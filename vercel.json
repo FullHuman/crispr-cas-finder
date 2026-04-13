@@ -1,4 +1,5 @@
 {
+  "outputDirectory": "crisprcas-wasm/www",
   "headers": [
     {
       "source": "/(.*)",
@@ -8,8 +9,5 @@
         { "key": "Cross-Origin-Resource-Policy", "value": "cross-origin" }
       ]
     }
-  ],
-  "rewrites": [
-    { "source": "/(.*)", "destination": "/index.html" }
   ]
 }
