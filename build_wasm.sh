@@ -8,8 +8,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
+# Ensure the toolchain, components, and targets from rust-toolchain.toml are installed.
+rustup show active-toolchain >/dev/null 2>&1 || true
+rustup component add rust-src 2>/dev/null || true
+rustup target add wasm32-unknown-unknown 2>/dev/null || true
+
 echo "==> Building crisprcas-wasm (release, threaded)..."
-cargo +nightly-2025-06-01 build \
+cargo build \
   -p crisprcas-wasm \
   --target wasm32-unknown-unknown \
   --release
