@@ -3,6 +3,7 @@
 import init, {
   find_repeats,
   cas_prepare,
+  cas_search_profile,
   cas_search_all_profiles,
   cas_finalize,
   init_panic_hook,
@@ -11,13 +12,69 @@ import init, {
 
 let wasmReady = false;
 let casModelsData = null; // cached { models: [...], profiles: [...] }
+let threadPoolAttempted = false;
+let threadPoolReady = false;
+let threadPoolError = null;
+
+const THREAD_POOL_TIMEOUT_MS = 8000;
+
+function withTimeout(promise, timeoutMs, message) {
+  return new Promise((resolve, reject) => {
+    const timeoutId = setTimeout(() => {
+      reject(new Error(message));
+    }, timeoutMs);
+
+    promise.then(
+      (value) => {
+        clearTimeout(timeoutId);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timeoutId);
+        reject(error);
+      }
+    );
+  });
+}
 
 async function ensureWasm() {
   if (wasmReady) return;
   await init();
   init_panic_hook();
-  await initThreadPool(navigator.hardwareConcurrency);
   wasmReady = true;
+}
+
+async function ensureThreadPool(id) {
+  if (threadPoolAttempted) return threadPoolReady;
+
+  threadPoolAttempted = true;
+
+  if (!self.crossOriginIsolated) {
+    threadPoolError = "crossOriginIsolated is false";
+    return false;
+  }
+
+  const requestedThreads = Math.max(1, navigator.hardwareConcurrency || 1);
+  if (requestedThreads <= 1) {
+    threadPoolError = "navigator.hardwareConcurrency reported a single core";
+    return false;
+  }
+
+  progress(id, `Initializing WebAssembly thread pool (${requestedThreads} threads)...`, 0, 1);
+
+  try {
+    await withTimeout(
+      initThreadPool(requestedThreads),
+      THREAD_POOL_TIMEOUT_MS,
+      `thread pool startup timed out after ${THREAD_POOL_TIMEOUT_MS / 1000}s`
+    );
+    threadPoolReady = true;
+  } catch (error) {
+    threadPoolError = error.message || String(error);
+    console.warn("Falling back to single-threaded CAS search:", error);
+  }
+
+  return threadPoolReady;
 }
 
 function progress(id, message, current, total) {
@@ -44,6 +101,16 @@ self.onmessage = async (e) => {
       self.postMessage({ id, result });
 
     } else if (type === "run_full_analysis") {
+      const threadPoolEnabled = await ensureThreadPool(id);
+      if (!threadPoolEnabled && threadPoolError) {
+        progress(
+          id,
+          `WebAssembly threads unavailable (${threadPoolError}). Falling back to single-threaded HMM search.`,
+          0,
+          1
+        );
+      }
+
       // 1. Load CAS models (fetched here, not sent through postMessage)
       const data = await loadCasModels(id);
 
@@ -58,12 +125,25 @@ self.onmessage = async (e) => {
         data.models,
         payload.casOpts
       );
-      const totalProfiles = data.profiles.length;
+      const neededProfileNames = new Set(prepInfo.needed_profiles || []);
+      const profilesToSearch = data.profiles.filter(
+        (profile) => neededProfileNames.size === 0 || neededProfileNames.has(profile.name)
+      );
+      const totalProfiles = profilesToSearch.length;
       progress(id, `Predicted ${prepInfo.gene_count} genes. Searching ${totalProfiles} HMM profiles...`, 0, totalProfiles);
 
-      // 4. Search all profiles in parallel via rayon
-      progress(id, `Searching ${totalProfiles} HMM profiles (parallel)...`, 0, totalProfiles);
-      const totalHits = cas_search_all_profiles(data.profiles);
+      // 4. Search all needed profiles, using rayon when the browser can start the thread pool.
+      let totalHits = 0;
+      if (threadPoolEnabled) {
+        progress(id, `Searching ${totalProfiles} HMM profiles in parallel...`, 0, totalProfiles);
+        totalHits = cas_search_all_profiles(profilesToSearch);
+      } else {
+        for (let index = 0; index < totalProfiles; index += 1) {
+          const profile = profilesToSearch[index];
+          progress(id, `Searching HMM profiles sequentially (${index + 1}/${totalProfiles})...`, index, totalProfiles);
+          totalHits += cas_search_profile(profile.name, profile.data);
+        }
+      }
       progress(id, `HMM search complete. ${totalHits} total hits.`, totalProfiles, totalProfiles);
 
       // 5. Finalize — clustering + system evaluation
