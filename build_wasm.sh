@@ -13,6 +13,13 @@ rustup show active-toolchain >/dev/null 2>&1 || true
 rustup component add rust-src 2>/dev/null || true
 rustup target add wasm32-unknown-unknown 2>/dev/null || true
 
+# Ensure wasm-bindgen-cli is installed (must match the wasm-bindgen version in Cargo.lock).
+WASM_BINDGEN_VERSION="0.2.114"
+if ! command -v wasm-bindgen &>/dev/null || [[ "$(wasm-bindgen --version)" != *"$WASM_BINDGEN_VERSION"* ]]; then
+  echo "==> Installing wasm-bindgen-cli@${WASM_BINDGEN_VERSION}..."
+  cargo install wasm-bindgen-cli --version "$WASM_BINDGEN_VERSION"
+fi
+
 echo "==> Building crisprcas-wasm (release, threaded)..."
 cargo build \
   -p crisprcas-wasm \
