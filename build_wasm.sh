@@ -14,19 +14,19 @@ rustup component add rust-src 2>/dev/null || true
 rustup target add wasm32-unknown-unknown 2>/dev/null || true
 
 # Ensure wasm-bindgen-cli is installed (must match the wasm-bindgen version in Cargo.lock).
-WASM_BINDGEN_VERSION="0.2.114"
+WASM_BINDGEN_VERSION="0.2.118"
 if ! command -v wasm-bindgen &>/dev/null || [[ "$(wasm-bindgen --version)" != *"$WASM_BINDGEN_VERSION"* ]]; then
   echo "==> Installing wasm-bindgen-cli@${WASM_BINDGEN_VERSION}..."
   cargo install wasm-bindgen-cli --version "$WASM_BINDGEN_VERSION"
 fi
 
 echo "==> Building crisprcas-wasm (release, threaded)..."
-RUSTFLAGS='-C target-feature=+atomics,+bulk-memory,+mutable-globals' \
+# Threading flags (atomics, shared-memory, etc.) come from .cargo/config.toml.
+# Do NOT set RUSTFLAGS here — it would override the config and drop linker flags.
 cargo build \
   -p crisprcas-wasm \
   --target wasm32-unknown-unknown \
-  --release \
-  -Z build-std=std,panic_abort
+  --release
 
 echo "==> Running wasm-bindgen..."
 wasm-bindgen \
