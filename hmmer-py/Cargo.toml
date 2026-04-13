@@ -1,0 +1,15 @@
+[package]
+name = "hmmer-py"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Python bindings for HMMER"
+
+[lib]
+name = "hmmer"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { workspace = true, features = ["extension-module"] }
+hmmer-core = { workspace = true }
+hmmer-io   = { workspace = true }

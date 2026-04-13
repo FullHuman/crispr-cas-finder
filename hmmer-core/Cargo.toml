@@ -1,0 +1,24 @@
+[package]
+name = "hmmer-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "HMMER profile HMM algorithms — core library"
+
+[features]
+default = []
+serde = ["dep:serde"]
+
+[dependencies]
+bitflags.workspace = true
+thiserror.workspace = true
+rayon.workspace = true
+ndarray.workspace = true
+serde = { workspace = true, optional = true }
+
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "hmmer_benchmarks"
+harness = false

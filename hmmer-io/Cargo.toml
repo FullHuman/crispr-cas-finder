@@ -1,0 +1,11 @@
+[package]
+name = "hmmer-io"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "HMMER file I/O — HMM, sequence, and alignment readers/writers"
+
+[dependencies]
+bio.workspace = true
+hmmer-core.workspace = true
+thiserror.workspace = true

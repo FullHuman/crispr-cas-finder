@@ -1,0 +1,19 @@
+[package]
+name = "crisprcas-cli"
+version = "0.1.0"
+edition = "2024"
+description = "CLI for CRISPR-Cas detection"
+license = "GPL-3.0-or-later"
+
+[dependencies]
+anyhow = "1"
+bio = "3"
+clap = { version = "4", features = ["derive"] }
+env_logger = "0.11"
+log = "0.4"
+serde_json = "1"
+crisprcas-core = { path = "../crisprcas-core" }
+
+[[bin]]
+name = "crisprcas"
+path = "src/main.rs"

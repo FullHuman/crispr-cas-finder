@@ -1,0 +1,16 @@
+[package]
+name = "hmmer-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "WebAssembly bindings for HMMER"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wasm-bindgen = { workspace = true }
+hmmer-core = { workspace = true }
+hmmer-io   = { workspace = true }
+serde = { workspace = true }
+serde-wasm-bindgen = "0.6"
