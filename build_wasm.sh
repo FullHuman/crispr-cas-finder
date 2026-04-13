@@ -21,10 +21,12 @@ if ! command -v wasm-bindgen &>/dev/null || [[ "$(wasm-bindgen --version)" != *"
 fi
 
 echo "==> Building crisprcas-wasm (release, threaded)..."
+RUSTFLAGS='-C target-feature=+atomics,+bulk-memory,+mutable-globals' \
 cargo build \
   -p crisprcas-wasm \
   --target wasm32-unknown-unknown \
-  --release
+  --release \
+  -Z build-std=std,panic_abort
 
 echo "==> Running wasm-bindgen..."
 wasm-bindgen \
