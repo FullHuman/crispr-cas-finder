@@ -205,6 +205,12 @@ pub struct Cluster {
     pub wraps_origin: bool,
 }
 
+impl Default for Cluster {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Cluster {
     pub fn new() -> Self {
         Self {

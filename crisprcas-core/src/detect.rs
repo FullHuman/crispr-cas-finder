@@ -37,7 +37,7 @@ pub fn infer_orientation(
     } else {
         0
     };
-    let left_end = if array_start > 1 { array_start - 1 } else { 0 };
+    let left_end = array_start.saturating_sub(1);
     let left_flank = if left_start < left_end {
         &seq[left_start..left_end]
     } else {
@@ -493,7 +493,7 @@ pub fn find_direct_repeats(seq: &[u8], seq_id: &str, params: &DetectionParams) -
     });
     let mut deduped: Vec<RepeatHit> = Vec::new();
     for hit in hits {
-        if deduped.last().map_or(true, |prev: &RepeatHit| {
+        if deduped.last().is_none_or(|prev: &RepeatHit| {
             hit.pos1 >= prev.pos1 + prev.repeat_length
         }) {
             deduped.push(hit);
@@ -935,7 +935,7 @@ pub fn check_short_crispr(dr: &str, spacer: &str) -> bool {
 
     let mut i = best_i;
     let mut j = best_j;
-    let mut gaps = (trailing_a_gaps + trailing_b_gaps) as usize;
+    let mut gaps = (trailing_a_gaps + trailing_b_gaps);
     let mut total = gaps;
     let ep = 1e-6;
 
