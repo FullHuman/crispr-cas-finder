@@ -70,19 +70,33 @@ struct Cli {
     classify_small: bool,
     #[arg(long, alias = "forceDetection", action = ArgAction::SetTrue)]
     force_detection: bool,
-    #[arg(long, alias = "fosterDRLength", value_name = "INT", default_value_t = 30)]
+    #[arg(
+        long,
+        alias = "fosterDRLength",
+        value_name = "INT",
+        default_value_t = 30
+    )]
     foster_repeat_length: usize,
     #[arg(long, alias = "fosterDRBegin", value_name = "STR", default_value = "G")]
     foster_repeat_begin: String,
     #[arg(long, alias = "fosterDREnd", value_name = "STR", default_value = "AA.")]
     foster_repeat_end: String,
-    #[arg(long = "matching-repeats", alias = "MatchingRepeats", value_name = "FILE")]
+    #[arg(
+        long = "matching-repeats",
+        alias = "MatchingRepeats",
+        value_name = "FILE"
+    )]
     matching_repeats: Option<String>,
     #[arg(long, alias = "minNbSpacers", value_name = "INT", default_value_t = 1)]
     min_spacer_count: usize,
     #[arg(long, alias = "betterDetectTrunc", action = ArgAction::SetTrue)]
     better_detect_truncated: bool,
-    #[arg(long, alias = "PercMismTrunc", value_name = "FLOAT", default_value_t = 4.0)]
+    #[arg(
+        long,
+        alias = "PercMismTrunc",
+        value_name = "FLOAT",
+        default_value_t = 4.0
+    )]
     truncated_mismatch_percent: f64,
     #[arg(long = "cas", action = ArgAction::SetTrue)]
     launch_cas_finder: bool,
@@ -90,7 +104,12 @@ struct Cli {
     write_full_report: bool,
     #[arg(long, value_name = "INT", default_value_t = 600)]
     vicinity: usize,
-    #[arg(long, alias = "cpuMacSyFinder", value_name = "INT", default_value_t = 1)]
+    #[arg(
+        long,
+        alias = "cpuMacSyFinder",
+        value_name = "INT",
+        default_value_t = 1
+    )]
     workers: usize,
     #[arg(long, action = ArgAction::SetTrue)]
     rcfowce: bool,
@@ -100,7 +119,12 @@ struct Cli {
     user_gff: Option<String>,
     #[arg(long, alias = "faa", value_name = "FILE")]
     proteome: Option<String>,
-    #[arg(long = "clustering-threshold", alias = "cluster", value_name = "INT", default_value_t = 0)]
+    #[arg(
+        long = "clustering-threshold",
+        alias = "cluster",
+        value_name = "INT",
+        default_value_t = 0
+    )]
     clustering_threshold: usize,
     #[arg(long = "summary", alias = "getSummaryCasfinder", action = ArgAction::SetTrue)]
     get_summary: bool,
@@ -251,18 +275,14 @@ fn main() -> Result<()> {
                 info!("CasFinder found {} systems", search_results.systems.len());
                 let faa_path = outdir.join(format!("orphos_{}/{}.faa", basename, basename));
                 let faa_content = std::fs::read_to_string(&faa_path).ok();
-                let cas_clusters = from_search_results(
-                    &search_results,
-                    faa_content.as_deref(),
-                );
+                let cas_clusters = from_search_results(&search_results, faa_content.as_deref());
                 let report = serde_json::json!({
                     "crisprs": &arrays,
                     "cas_clusters": cas_clusters,
                 });
                 let report_path = outdir.join("report.json");
                 let f = File::create(&report_path).context("Creating merged report JSON")?;
-                serde_json::to_writer_pretty(f, &report)
-                    .context("Writing merged report JSON")?;
+                serde_json::to_writer_pretty(f, &report).context("Writing merged report JSON")?;
                 info!("Merged report written to {:?}", report_path);
             }
             Err(err) => error!("CasFinder failed: {}", err),

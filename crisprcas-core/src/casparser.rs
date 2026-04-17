@@ -40,11 +40,17 @@ pub fn from_search_results(
 
         for hit in &sys.hits {
             let (start, end, strand) = if let Some(ref gmap) = gene_map {
-                gmap.get(hit.hit.id.as_str())
-                    .cloned()
-                    .unwrap_or((hit.hit.begin_match as usize, hit.hit.end_match as usize, ".".to_string()))
+                gmap.get(hit.hit.id.as_str()).cloned().unwrap_or((
+                    hit.hit.begin_match as usize,
+                    hit.hit.end_match as usize,
+                    ".".to_string(),
+                ))
             } else {
-                (hit.hit.begin_match as usize, hit.hit.end_match as usize, ".".to_string())
+                (
+                    hit.hit.begin_match as usize,
+                    hit.hit.end_match as usize,
+                    ".".to_string(),
+                )
             };
 
             if start < min_start {
@@ -66,7 +72,11 @@ pub fn from_search_results(
         clusters.push(CasCluster {
             system: sys.model_fqn.clone(),
             genes,
-            start: if min_start == usize::MAX { 0 } else { min_start },
+            start: if min_start == usize::MAX {
+                0
+            } else {
+                min_start
+            },
             end: max_end,
         });
     }
@@ -75,7 +85,9 @@ pub fn from_search_results(
 
 /// Parse gene coordinates from FASTA headers in Orphos/Prodigal format:
 ///   >seqid_N # start # end # strand_int # ID=N
-fn parse_gene_map_from_faa(faa_content: &str) -> std::collections::HashMap<String, (usize, usize, String)> {
+fn parse_gene_map_from_faa(
+    faa_content: &str,
+) -> std::collections::HashMap<String, (usize, usize, String)> {
     let mut gene_map = std::collections::HashMap::new();
     for line in faa_content.lines() {
         if !line.starts_with('>') {
@@ -100,7 +112,9 @@ fn parse_gene_map_from_faa(faa_content: &str) -> std::collections::HashMap<Strin
     gene_map
 }
 
-fn parse_gene_map_from_gff(gff_content: &str) -> std::collections::HashMap<String, (usize, usize, String)> {
+fn parse_gene_map_from_gff(
+    gff_content: &str,
+) -> std::collections::HashMap<String, (usize, usize, String)> {
     let mut gene_map = std::collections::HashMap::new();
     for line in gff_content.lines() {
         if line.starts_with('#') || line.trim().is_empty() {
@@ -130,7 +144,8 @@ fn parse_gene_map_from_gff(gff_content: &str) -> std::collections::HashMap<Strin
 
 pub fn parse_cas_from_strings(best_solution_tsv: &str, ann_gff: &str) -> Result<Vec<CasCluster>> {
     let gene_map = parse_gene_map_from_gff(ann_gff);
-    let mut clusters: std::collections::HashMap<String, Vec<CasGene>> = std::collections::HashMap::new();
+    let mut clusters: std::collections::HashMap<String, Vec<CasGene>> =
+        std::collections::HashMap::new();
 
     for line in best_solution_tsv.lines() {
         let line = line.trim();

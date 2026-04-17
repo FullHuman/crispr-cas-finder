@@ -112,6 +112,7 @@ pub struct GeneDefinition {
     pub status: GeneStatus,
     pub loner: bool,
     pub multi_system: bool,
+    pub system_ref: Option<String>,
     pub exchangeables: Vec<String>,
     pub inter_gene_max_space: Option<u32>,
     pub multi_model: bool,
@@ -162,8 +163,7 @@ impl SystemModel {
             .genes
             .iter()
             .flat_map(|g| {
-                std::iter::once(g.name.as_str())
-                    .chain(g.exchangeables.iter().map(|e| e.as_str()))
+                std::iter::once(g.name.as_str()).chain(g.exchangeables.iter().map(|e| e.as_str()))
             })
             .collect();
         names.sort_unstable();
@@ -338,10 +338,7 @@ pub fn select_best_solution(systems: Vec<DetectedSystem>) -> Vec<DetectedSystem>
     }
 
     selected.sort_unstable();
-    selected
-        .into_iter()
-        .map(|i| systems[i].clone())
-        .collect()
+    selected.into_iter().map(|i| systems[i].clone()).collect()
 }
 
 // ---------------------------------------------------------------------------

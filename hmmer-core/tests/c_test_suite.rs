@@ -70,12 +70,7 @@ fn test_hmm_composition() {
     );
 
     for (a, value) in compo.iter().enumerate().take(k) {
-        assert!(
-            *value >= 0.0,
-            "composition[{}] = {} (negative!)",
-            a,
-            value
-        );
+        assert!(*value >= 0.0, "composition[{}] = {} (negative!)", a, value);
     }
 }
 

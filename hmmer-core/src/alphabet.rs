@@ -235,7 +235,9 @@ impl<'de> Deserialize<'de> for Alphabet {
 
         let raw = AlphabetSerde::deserialize(deserializer)?;
         if raw.canonical_size > MAX_CANONICAL_SIZE {
-            return Err(D::Error::custom("canonical_size exceeds maximum alphabet size"));
+            return Err(D::Error::custom(
+                "canonical_size exceeds maximum alphabet size",
+            ));
         }
         if raw.full_size > MAX_FULL_SIZE {
             return Err(D::Error::custom("full_size exceeds maximum alphabet size"));

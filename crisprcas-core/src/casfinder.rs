@@ -1,10 +1,10 @@
+use crate::cas_types::{
+    Cluster, DetectedSystem, GeneDefinition, GeneStatus, HmmerHit, ModelRegistry, RepliconTopology,
+    SearchResults, SequenceIndex, SystemHit, SystemModel, cluster_hits, select_best_solution,
+};
+use crate::types::CasFinderConfig;
 use anyhow::{Context, Result};
 use bio::io::fasta::Reader as FastaReader;
-use crate::cas_types::{
-    Cluster, DetectedSystem, GeneDefinition, GeneStatus, HmmerHit,
-    ModelRegistry, RepliconTopology, SearchResults, SequenceIndex, SystemHit,
-    SystemModel, cluster_hits, select_best_solution,
-};
 use hmmer_core::{
     alphabet::Alphabet,
     background::BackgroundModel,
@@ -27,7 +27,6 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use crate::types::CasFinderConfig;
 
 /// Run Orphos gene prediction and then detect Cas systems using
 /// hmmer-core for HMM search (pure Rust, no external subprocess).
@@ -305,12 +304,14 @@ fn parse_cas_model_xml(
                 .is_some_and(|v| v == "True" || v == "true" || v == "1");
             let multi_system = extract_xml_attr(trimmed, "multi_system")
                 .is_some_and(|v| v == "True" || v == "true" || v == "1");
+            let system_ref = extract_xml_attr(trimmed, "system_ref");
 
             genes.push(GeneDefinition {
                 name,
                 status,
                 loner,
                 multi_system,
+                system_ref,
                 exchangeables: Vec::new(),
                 inter_gene_max_space: None,
                 multi_model: false,
@@ -422,8 +423,8 @@ fn run_hmm_search(
                         if !domain.is_included {
                             continue;
                         }
-                        let prof_cov = (domain.hmm_to - domain.hmm_from + 1) as f64
-                            / num_nodes as f64;
+                        let prof_cov =
+                            (domain.hmm_to - domain.hmm_from + 1) as f64 / num_nodes as f64;
                         if prof_cov < coverage_threshold {
                             continue;
                         }
@@ -452,8 +453,7 @@ fn run_hmm_search(
                     {
                         let bitscore = (fwd_raw - null_sc) / std::f32::consts::LN_2;
                         // Rough profile coverage: min(seq_len, model_len) / model_len
-                        let prof_cov =
-                            seq.len().min(num_nodes) as f64 / num_nodes as f64;
+                        let prof_cov = seq.len().min(num_nodes) as f64 / num_nodes as f64;
                         if prof_cov >= coverage_threshold {
                             profile_hits.push(HmmerHit {
                                 id: seq.name.clone(),
@@ -491,19 +491,18 @@ fn assign_hits_to_model(
     hmmer_hits: &HashMap<String, Vec<HmmerHit>>,
     seq_index: &SequenceIndex,
 ) -> Vec<SystemHit> {
-    let mut system_hits = Vec::new();
+    let mut best_by_protein: HashMap<&str, (SystemHit, bool)> = HashMap::new();
 
     for gene in &model.genes {
-        let gene_names_to_check: Vec<(&str, bool)> =
-            std::iter::once((gene.name.as_str(), false))
-                .chain(gene.exchangeables.iter().map(|e| (e.as_str(), true)))
-                .collect();
+        let gene_names_to_check: Vec<(&str, bool)> = std::iter::once((gene.name.as_str(), false))
+            .chain(gene.exchangeables.iter().map(|e| (e.as_str(), true)))
+            .collect();
 
         for (gene_name, is_exchangeable) in gene_names_to_check {
             if let Some(hits) = hmmer_hits.get(gene_name) {
                 for hit in hits {
                     if let Some(position) = seq_index.position(&hit.id) {
-                        system_hits.push(SystemHit {
+                        let candidate = SystemHit {
                             hit: hit.clone(),
                             position,
                             gene_ref: gene.name.clone(),
@@ -513,27 +512,69 @@ fn assign_hits_to_model(
                             locus_num: 1,
                             counterpart: String::new(),
                             used_in: Vec::new(),
-                        });
+                        };
+                        let inherited = gene.system_ref.is_some();
+
+                        match best_by_protein.get_mut(hit.id.as_str()) {
+                            Some((best_hit, best_inherited)) => {
+                                if should_replace_assignment(
+                                    &candidate,
+                                    inherited,
+                                    best_hit,
+                                    *best_inherited,
+                                ) {
+                                    *best_hit = candidate;
+                                    *best_inherited = inherited;
+                                }
+                            }
+                            None => {
+                                best_by_protein.insert(hit.id.as_str(), (candidate, inherited));
+                            }
+                        }
                     }
                 }
             }
         }
     }
 
-    system_hits
+    best_by_protein.into_values().map(|(hit, _)| hit).collect()
+}
+
+fn should_replace_assignment(
+    candidate: &SystemHit,
+    candidate_inherited: bool,
+    current: &SystemHit,
+    current_inherited: bool,
+) -> bool {
+    if candidate_inherited != current_inherited {
+        return !candidate_inherited;
+    }
+
+    candidate
+        .hit
+        .score
+        .total_cmp(&current.hit.score)
+        .then_with(|| {
+            candidate
+                .hit
+                .profile_coverage
+                .total_cmp(&current.hit.profile_coverage)
+        })
+        .then_with(|| {
+            candidate
+                .hit
+                .seq_coverage
+                .total_cmp(&current.hit.seq_coverage)
+        })
+        .then_with(|| current.is_exchangeable.cmp(&candidate.is_exchangeable))
+        .is_gt()
 }
 
 /// Evaluate a cluster against a model to produce a DetectedSystem (if valid).
-fn evaluate_cluster(
-    c: &Cluster,
-    model: &SystemModel,
-) -> Option<DetectedSystem> {
-    let mandatory_names: HashSet<&str> =
-        model.mandatory_genes().map(|g| g.name.as_str()).collect();
-    let accessory_names: HashSet<&str> =
-        model.accessory_genes().map(|g| g.name.as_str()).collect();
-    let forbidden_names: HashSet<&str> =
-        model.forbidden_genes().map(|g| g.name.as_str()).collect();
+fn evaluate_cluster(c: &Cluster, model: &SystemModel) -> Option<DetectedSystem> {
+    let mandatory_names: HashSet<&str> = model.mandatory_genes().map(|g| g.name.as_str()).collect();
+    let accessory_names: HashSet<&str> = model.accessory_genes().map(|g| g.name.as_str()).collect();
+    let forbidden_names: HashSet<&str> = model.forbidden_genes().map(|g| g.name.as_str()).collect();
 
     let found_genes: HashSet<&str> = c.hits.iter().map(|h| h.gene_ref.as_str()).collect();
 
@@ -712,4 +753,101 @@ fn codon_table(genetic_code: usize) -> HashMap<[u8; 3], u8> {
         map.insert([codons[i], second[i], third[i]], aa_table[i]);
     }
     map
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_hit(id: &str, gene_name: &str, score: f64) -> HmmerHit {
+        HmmerHit {
+            id: id.to_string(),
+            gene_name: gene_name.to_string(),
+            seq_len: 100,
+            i_evalue: 0.0,
+            score,
+            profile_coverage: 0.9,
+            seq_coverage: 0.8,
+            begin_match: 1,
+            end_match: 100,
+        }
+    }
+
+    fn test_gene(name: &str, status: GeneStatus, system_ref: Option<&str>) -> GeneDefinition {
+        GeneDefinition {
+            name: name.to_string(),
+            status,
+            loner: false,
+            multi_system: false,
+            system_ref: system_ref.map(str::to_string),
+            exchangeables: Vec::new(),
+            inter_gene_max_space: None,
+            multi_model: false,
+        }
+    }
+
+    #[test]
+    fn assign_hits_prefers_local_gene_over_inherited_duplicate() {
+        let model = SystemModel {
+            fqn: "CASFinder/CAS-TypeIE".to_string(),
+            family: "CASFinder".to_string(),
+            name: "CAS-TypeIE".to_string(),
+            version: None,
+            genes: vec![
+                test_gene("Cas1_0_IE", GeneStatus::Mandatory, None),
+                test_gene("Cas1_0_I-II-III", GeneStatus::Accessory, Some("CAS")),
+            ],
+            inter_gene_max_space: 5,
+            min_mandatory_genes_required: 1,
+            min_genes_required: 1,
+            multi_loci: false,
+        };
+
+        let hmmer_hits = HashMap::from([
+            (
+                "Cas1_0_IE".to_string(),
+                vec![test_hit("orf_1", "Cas1_0_IE", 90.0)],
+            ),
+            (
+                "Cas1_0_I-II-III".to_string(),
+                vec![test_hit("orf_1", "Cas1_0_I-II-III", 140.0)],
+            ),
+        ]);
+        let seq_index = SequenceIndex::from_ids(&["orf_1"]);
+
+        let hits = assign_hits_to_model(&model, &hmmer_hits, &seq_index);
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].hit.id, "orf_1");
+        assert_eq!(hits[0].gene_ref, "Cas1_0_IE");
+    }
+
+    #[test]
+    fn assign_hits_keeps_best_scoring_hit_for_same_gene_and_orf() {
+        let model = SystemModel {
+            fqn: "CASFinder/CAS-TypeIE".to_string(),
+            family: "CASFinder".to_string(),
+            name: "CAS-TypeIE".to_string(),
+            version: None,
+            genes: vec![test_gene("Cas3_0_I", GeneStatus::Accessory, Some("CAS"))],
+            inter_gene_max_space: 5,
+            min_mandatory_genes_required: 0,
+            min_genes_required: 1,
+            multi_loci: false,
+        };
+
+        let hmmer_hits = HashMap::from([(
+            "Cas3_0_I".to_string(),
+            vec![
+                test_hit("orf_1", "Cas3_0_I", 55.0),
+                test_hit("orf_1", "Cas3_0_I", 65.0),
+            ],
+        )]);
+        let seq_index = SequenceIndex::from_ids(&["orf_1"]);
+
+        let hits = assign_hits_to_model(&model, &hmmer_hits, &seq_index);
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].hit.score, 65.0);
+    }
 }

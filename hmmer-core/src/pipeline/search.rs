@@ -39,9 +39,13 @@ mod wasm_instant {
     pub struct Instant;
     impl Instant {
         #[inline(always)]
-        pub fn now() -> Self { Self }
+        pub fn now() -> Self {
+            Self
+        }
         #[inline(always)]
-        pub fn elapsed(&self) -> core::time::Duration { core::time::Duration::ZERO }
+        pub fn elapsed(&self) -> core::time::Duration {
+            core::time::Duration::ZERO
+        }
     }
 }
 #[cfg(target_arch = "wasm32")]

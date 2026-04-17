@@ -33,7 +33,10 @@ fn main() {
         if let Some(header) = line.strip_prefix('>') {
             if !current_name.is_empty() && !current_seq.is_empty() {
                 targets.push(DigitalSequence::from_bytes(
-                    &current_name, &current_desc, &current_seq, &abc,
+                    &current_name,
+                    &current_desc,
+                    &current_seq,
+                    &abc,
                 ));
             }
             let parts: Vec<&str> = header.splitn(2, char::is_whitespace).collect();
@@ -46,7 +49,10 @@ fn main() {
     }
     if !current_name.is_empty() && !current_seq.is_empty() {
         targets.push(DigitalSequence::from_bytes(
-            &current_name, &current_desc, &current_seq, &abc,
+            &current_name,
+            &current_desc,
+            &current_seq,
+            &abc,
         ));
     }
     println!("Loaded {} protein targets", targets.len());
@@ -59,7 +65,9 @@ fn main() {
     let (_habc, hmm) = hfp.read().expect("read hmm");
     println!("HMM: name={}, nodes={}", hmm.name, hmm.num_nodes);
 
-    let avg_len = if targets.is_empty() { 400 } else {
+    let avg_len = if targets.is_empty() {
+        400
+    } else {
         targets.iter().map(|s| s.len()).sum::<usize>() / targets.len()
     };
     println!("Average target length: {}", avg_len);
@@ -68,21 +76,23 @@ fn main() {
     let mut gm = Profile::new(hmm.num_nodes, &abc);
     modelconfig::profile_config(&hmm, &bg, &mut gm, avg_len, SearchMode::Local);
 
-    let query = SearchQuery::from_configured_profile(gm, bg)
-        .expect("query config");
+    let query = SearchQuery::from_configured_profile(gm, bg).expect("query config");
     // First run with default filters to check what happens
     let plan = SearchPlan::builder(query)
         .filters(FilterPolicy::default())
         .build();
     let mut worker = plan
-        .spawn_worker(CapacityHints { target_length: avg_len })
+        .spawn_worker(CapacityHints {
+            target_length: avg_len,
+        })
         .expect("spawn worker");
 
     let mut total_hits = 0;
     let mut total_domains = 0;
     let mut total_included = 0;
     let mut passing_coverage = 0;
-    let mut filter_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut filter_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
 
     for seq in &targets {
         let is_target = seq.name == "CP014688.1_298";
@@ -91,7 +101,8 @@ fn main() {
         }
         let report = worker.search(seq).expect("search");
         if is_target {
-            println!("  >>> trace: null_score={:?}, msv_raw={:?}, vit_raw={:?}, fwd_raw={:?}, domain_count={}, filter={:?}",
+            println!(
+                "  >>> trace: null_score={:?}, msv_raw={:?}, vit_raw={:?}, fwd_raw={:?}, domain_count={}, filter={:?}",
                 report.trace.null_score,
                 report.trace.msv_raw_score,
                 report.trace.viterbi_raw_score,
@@ -104,7 +115,10 @@ fn main() {
             SearchOutcome::Hit(ref hit) => {
                 total_hits += 1;
                 if is_target {
-                    println!("  >>> Got Hit for CP014688.1_298, {} domains", hit.domains.len());
+                    println!(
+                        "  >>> Got Hit for CP014688.1_298, {} domains",
+                        hit.domains.len()
+                    );
                 }
                 for domain in &hit.domains {
                     total_domains += 1;
@@ -131,8 +145,8 @@ fn main() {
                     }
                     if domain.is_included {
                         total_included += 1;
-                        let prof_cov = (domain.hmm_to - domain.hmm_from + 1) as f64
-                            / hmm.num_nodes as f64;
+                        let prof_cov =
+                            (domain.hmm_to - domain.hmm_from + 1) as f64 / hmm.num_nodes as f64;
                         if prof_cov >= 0.4 {
                             passing_coverage += 1;
                             println!(

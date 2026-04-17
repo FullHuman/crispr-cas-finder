@@ -11,9 +11,9 @@ pub mod types;
 pub use types::{CasFinderConfig, CrisprArray, DetectionParams, Orientation, Repeat, Spacer};
 
 use detect::{
-    RepeatHit, check_short_crispr, check_spacer_similarity, cluster_repeats,
-    extract_spacers, find_direct_repeats, get_repeat_candidates, infer_orientation,
-    refine_cluster_with_consensus, trim_consensus,
+    RepeatHit, check_short_crispr, check_spacer_similarity, cluster_repeats, extract_spacers,
+    find_direct_repeats, get_repeat_candidates, infer_orientation, refine_cluster_with_consensus,
+    trim_consensus,
 };
 
 /// Detect CRISPR arrays in a set of sequences.
@@ -29,10 +29,7 @@ use detect::{
 /// # Returns
 /// A `Vec<CrisprArray>` of detected arrays, each with repeats, spacers, and
 /// an evidence level.
-pub fn detect_crisprs(
-    sequences: &[(&str, &[u8])],
-    params: &DetectionParams,
-) -> Vec<CrisprArray> {
+pub fn detect_crisprs(sequences: &[(&str, &[u8])], params: &DetectionParams) -> Vec<CrisprArray> {
     let gap_threshold = 1500;
     let min_repeat_count = params.min_spacer_count.max(1) + 1;
     let mut arrays = Vec::new();
@@ -57,7 +54,9 @@ pub fn detect_crisprs(
             .collect();
 
         for cluster in filtered_clusters {
-            if let Some(array) = process_cluster(seq_id, seq, &hits, cluster, params, min_repeat_count) {
+            if let Some(array) =
+                process_cluster(seq_id, seq, &hits, cluster, params, min_repeat_count)
+            {
                 arrays.push(array);
             }
         }
@@ -147,7 +146,9 @@ fn process_cluster(
     }
 
     // Multi-spacer: reject if ANY pairwise spacer identity >= spacer_similarity_threshold
-    if best_spacers.len() > 1 && !check_spacer_similarity(&best_spacers, params.spacer_similarity_threshold) {
+    if best_spacers.len() > 1
+        && !check_spacer_similarity(&best_spacers, params.spacer_similarity_threshold)
+    {
         return None;
     }
     // Single-spacer: reject if DR aligns too well against the spacer
@@ -156,7 +157,8 @@ fn process_cluster(
     }
 
     let spacer_count = best_spacers.len();
-    let spacers_pass_similarity = check_spacer_similarity(&best_spacers, params.spacer_similarity_threshold);
+    let spacers_pass_similarity =
+        check_spacer_similarity(&best_spacers, params.spacer_similarity_threshold);
     let evidence_level = if spacer_count <= 3 {
         1
     } else if spacers_pass_similarity {
