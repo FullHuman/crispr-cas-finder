@@ -9,8 +9,8 @@ description = "WebAssembly bindings for HMMER"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-wasm-bindgen = { workspace = true }
-hmmer-core = { workspace = true }
-hmmer-io   = { workspace = true }
-serde = { workspace = true }
+wasm-bindgen = "0.2.118"
+hmmer-core = { path = "../hmmer-core" }
+hmmer-io = { path = "../hmmer-io" }
+serde = { version = "1", features = ["derive"] }
 serde-wasm-bindgen = "0.6"

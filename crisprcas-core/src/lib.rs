@@ -1,6 +1,9 @@
 use anyhow::Result;
 use log::info;
+use rayon::prelude::*;
+use std::path::Path;
 
+pub mod cas_pipeline;
 pub mod cas_types;
 pub mod casfinder;
 pub mod casparser;
@@ -8,7 +11,11 @@ pub mod detect;
 pub mod io;
 pub mod types;
 
-pub use types::{CasFinderConfig, CrisprArray, DetectionParams, Orientation, Repeat, Spacer};
+pub use cas_pipeline::{GeneRecord, ModelDefinition};
+pub use casparser::{CasCluster, CasGene, GeneCoordinates};
+pub use types::{
+    CasFinderConfig, CrisprArray, DetectionParams, FullAnalysisResult, Orientation, Repeat, Spacer,
+};
 
 use detect::{
     RepeatHit, check_short_crispr, check_spacer_similarity, cluster_repeats, extract_spacers,
@@ -30,35 +37,58 @@ use detect::{
 /// A `Vec<CrisprArray>` of detected arrays, each with repeats, spacers, and
 /// an evidence level.
 pub fn detect_crisprs(sequences: &[(&str, &[u8])], params: &DetectionParams) -> Vec<CrisprArray> {
-    let gap_threshold = 1500;
     let min_repeat_count = params.min_spacer_count.max(1) + 1;
-    let mut arrays = Vec::new();
 
-    for &(seq_id, seq) in sequences {
-        if seq.len() < params.min_sequence_length {
-            continue;
-        }
-        let hits = find_direct_repeats(seq, seq_id, params);
-        info!("  {} — {} DR candidates", seq_id, hits.len());
-
-        let clusters = cluster_repeats(&hits, gap_threshold);
-
-        let filtered_clusters: Vec<(usize, usize)> = clusters
-            .into_iter()
-            .filter(|(start, end)| {
-                hits.iter()
-                    .filter(|h| h.pos1 >= *start && h.pos1 <= *end)
-                    .count()
-                    >= min_repeat_count
+    if sequences.len() > 1 {
+        let arrays_by_sequence: Vec<Vec<CrisprArray>> = sequences
+            .par_iter()
+            .map(|&(seq_id, seq)| {
+                detect_crisprs_for_sequence(seq_id, seq, params, min_repeat_count)
             })
             .collect();
+        return arrays_by_sequence.into_iter().flatten().collect();
+    }
 
-        for cluster in filtered_clusters {
-            if let Some(array) =
-                process_cluster(seq_id, seq, &hits, cluster, params, min_repeat_count)
-            {
-                arrays.push(array);
-            }
+    sequences
+        .iter()
+        .flat_map(|&(seq_id, seq)| {
+            detect_crisprs_for_sequence(seq_id, seq, params, min_repeat_count)
+        })
+        .collect()
+}
+
+fn detect_crisprs_for_sequence(
+    seq_id: &str,
+    seq: &[u8],
+    params: &DetectionParams,
+    min_repeat_count: usize,
+) -> Vec<CrisprArray> {
+    const GAP_THRESHOLD: usize = 1500;
+
+    if seq.len() < params.min_sequence_length {
+        return Vec::new();
+    }
+
+    let hits = find_direct_repeats(seq, seq_id, params);
+    info!("  {} — {} DR candidates", seq_id, hits.len());
+
+    let clusters = cluster_repeats(&hits, GAP_THRESHOLD);
+
+    let filtered_clusters: Vec<(usize, usize)> = clusters
+        .into_iter()
+        .filter(|(start, end)| {
+            hits.iter()
+                .filter(|h| h.pos1 >= *start && h.pos1 <= *end)
+                .count()
+                >= min_repeat_count
+        })
+        .collect();
+
+    let mut arrays = Vec::new();
+    for cluster in filtered_clusters {
+        if let Some(array) = process_cluster(seq_id, seq, &hits, cluster, params, min_repeat_count)
+        {
+            arrays.push(array);
         }
     }
 
@@ -223,6 +253,33 @@ pub fn detect_crisprs_in_fasta_str(
     params: &DetectionParams,
 ) -> Result<Vec<CrisprArray>> {
     let reader = bio::io::fasta::Reader::new(std::io::Cursor::new(fasta_content.as_bytes()));
+    let mut sequences: Vec<(String, Vec<u8>)> = Vec::new();
+    for result in reader.records() {
+        let record = result?;
+        sequences.push((record.id().to_string(), record.seq().to_vec()));
+    }
+    let seq_refs: Vec<(&str, &[u8])> = sequences
+        .iter()
+        .map(|(id, seq)| (id.as_str(), seq.as_slice()))
+        .collect();
+    Ok(detect_crisprs(&seq_refs, params))
+}
+
+/// Convenience: detect CRISPRs from a single raw sequence string.
+pub fn detect_crisprs_in_sequence_str(
+    seq_id: &str,
+    sequence: &str,
+    params: &DetectionParams,
+) -> Vec<CrisprArray> {
+    detect_crisprs(&[(seq_id, sequence.as_bytes())], params)
+}
+
+/// Convenience: detect CRISPRs directly from a FASTA file path.
+pub fn detect_crisprs_in_fasta_path(
+    fasta_path: &Path,
+    params: &DetectionParams,
+) -> Result<Vec<CrisprArray>> {
+    let reader = bio::io::fasta::Reader::from_file(fasta_path)?;
     let mut sequences: Vec<(String, Vec<u8>)> = Vec::new();
     for result in reader.records() {
         let record = result?;

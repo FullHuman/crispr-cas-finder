@@ -4,7 +4,6 @@
 
 use std::io::Write;
 use std::path::PathBuf;
-use std::time::Instant;
 
 use clap::Parser;
 use rayon::prelude::*;
@@ -62,7 +61,6 @@ struct SearchRunSummary {
 
 fn main() {
     let args = Args::parse();
-    let start_time = Instant::now();
 
     // Read HMM file
     let hmmfile_str = args
@@ -160,10 +158,7 @@ fn main() {
         write_domtblout(path, &th, &hmm, &summary, log_z);
     }
 
-    write_statistics(&mut out, &hmm, nseq, &summary, start_time);
-
-    // Print pipeline timing breakdown to stderr
-    summary.metrics.timings.report();
+    write_statistics(&mut out, &hmm, nseq, &summary);
 }
 
 fn read_sequences(abc: &hmmer_core::alphabet::Alphabet, seqdb: &str) -> Vec<DigitalSequence> {
@@ -548,14 +543,7 @@ fn write_domtblout(
     }
 }
 
-fn write_statistics(
-    out: &mut impl Write,
-    hmm: &Hmm,
-    nseq: u64,
-    summary: &SearchRunSummary,
-    start_time: Instant,
-) {
-    let elapsed = start_time.elapsed();
+fn write_statistics(out: &mut impl Write, hmm: &Hmm, nseq: u64, summary: &SearchRunSummary) {
     let stats = &summary.metrics.stats;
     let ratio = |count: u64| {
         if nseq > 0 {
@@ -606,6 +594,5 @@ fn write_statistics(
         "Initial search space (Z):    {:>10.0}",
         summary.search_space
     );
-    let _ = writeln!(out, "Elapsed: {:.2}s", elapsed.as_secs_f64());
     let _ = writeln!(out, "//");
 }

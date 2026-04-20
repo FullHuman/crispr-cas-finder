@@ -1,7 +1,9 @@
 use crate::types::{DetectionParams, Orientation};
 use bio::alignment::AlignmentOperation;
 use bio::alignment::pairwise::{Aligner, Scoring};
+use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
+const PARALLEL_PAIR_SCAN_MIN_POSITIONS: usize = 8_192;
 
 /// Compute AT% of a DNA sequence (fraction of A+T bases, as a percentage).
 ///
@@ -327,9 +329,8 @@ fn match_extends_beyond(
 
 /// Scan `index` for valid DR pairs ahead of each position `i`.
 /// `seed_offset` = 0 for left-half index; `min_repeat_length − seed` for right-half.
-fn find_pairs_with_index(
-    seq: &[u8],
-    index: &HashMap<u64, Vec<usize>>,
+#[derive(Clone, Copy)]
+struct PairSearchConfig {
     seed_offset: usize,
     seed: usize,
     min_repeat_length: usize,
@@ -337,61 +338,104 @@ fn find_pairs_with_index(
     min_spacer_length: usize,
     max_spacer_length: usize,
     max_mism: usize,
+}
+
+fn find_pairs_at_position(
+    seq: &[u8],
+    index: &HashMap<u64, Vec<usize>>,
+    i: usize,
+    config: PairSearchConfig,
 ) -> Vec<(usize, usize, usize)> {
+    let PairSearchConfig {
+        seed_offset,
+        seed,
+        min_repeat_length,
+        max_repeat_length,
+        min_spacer_length,
+        max_spacer_length,
+        max_mism,
+    } = config;
+
     let n = seq.len();
-    let mut pairs: Vec<(usize, usize, usize)> = Vec::new();
-    if n < min_repeat_length {
-        return pairs;
+    let seed_end = i + seed_offset + seed;
+    if seed_end > n {
+        return Vec::new();
     }
-    for i in 0..=(n - min_repeat_length) {
-        let seed_end = i + seed_offset + seed;
-        if seed_end > n {
-            break;
-        }
-        let h = fnv1a(&seq[i + seed_offset..seed_end]);
-        let positions = match index.get(&h) {
-            Some(v) => v,
+
+    let h = fnv1a(&seq[i + seed_offset..seed_end]);
+    let positions = match index.get(&h) {
+        Some(v) => v,
+        None => return Vec::new(),
+    };
+
+    let j_min = i + min_repeat_length + min_spacer_length;
+    let j_max =
+        (i + max_repeat_length + max_spacer_length).min(n.saturating_sub(min_repeat_length));
+    if j_min > j_max {
+        return Vec::new();
+    }
+
+    let lo = positions.partition_point(|&p| p < j_min);
+    let hi = positions.partition_point(|&p| p <= j_max);
+    let mut pairs = Vec::new();
+
+    for &j in &positions[lo..hi] {
+        let gap = j - i;
+        let dr_lo = gap.saturating_sub(max_spacer_length).max(min_repeat_length);
+        let dr_hi = match gap.checked_sub(min_spacer_length) {
+            Some(v) => v.min(max_repeat_length),
             None => continue,
         };
-        let j_min = i + min_repeat_length + min_spacer_length;
-        let j_max =
-            (i + max_repeat_length + max_spacer_length).min(n.saturating_sub(min_repeat_length));
-        if j_min > j_max {
+        if dr_lo > dr_hi {
             continue;
         }
-        let lo = positions.partition_point(|&p| p < j_min);
-        let hi = positions.partition_point(|&p| p <= j_max);
-        for &j in &positions[lo..hi] {
-            let gap = j - i;
-            let dr_lo = gap.saturating_sub(max_spacer_length).max(min_repeat_length);
-            let dr_hi = match gap.checked_sub(min_spacer_length) {
-                Some(v) => v.min(max_repeat_length),
-                None => continue,
-            };
-            if dr_lo > dr_hi {
+
+        // Take the longest valid DR length to maximise information.
+        'dr: for dr_len in (dr_lo..=dr_hi).rev() {
+            if j + dr_len > n {
                 continue;
             }
-            // Take the longest valid DR length to maximise information
-            'dr: for dr_len in (dr_lo..=dr_hi).rev() {
-                if j + dr_len > n {
-                    continue;
-                }
-                if hamming_le(&seq[i..i + dr_len], &seq[j..j + dr_len], max_mism) {
-                    // Mimic vmatch + sel392v2.so: reject if the maximum
-                    // matchable region at this offset (shifting start/end
-                    // within the mismatch budget) exceeds max_repeat_length.  vmatch
-                    // reports the longest match and sel392 filters on
-                    // `length <= max_repeat_length`.
-                    if max_mism > 0
-                        && match_extends_beyond(seq, i, j, dr_len, max_mism, max_repeat_length)
-                    {
-                        break 'dr; // entire (i,j) pair rejected
-                    }
-                    pairs.push((i, j, dr_len));
+            if hamming_le(&seq[i..i + dr_len], &seq[j..j + dr_len], max_mism) {
+                // Mimic vmatch + sel392v2.so: reject if the maximum
+                // matchable region at this offset exceeds max_repeat_length.
+                if max_mism > 0
+                    && match_extends_beyond(seq, i, j, dr_len, max_mism, max_repeat_length)
+                {
                     break 'dr;
                 }
+                pairs.push((i, j, dr_len));
+                break 'dr;
             }
         }
+    }
+
+    pairs
+}
+
+fn find_pairs_with_index(
+    seq: &[u8],
+    index: &HashMap<u64, Vec<usize>>,
+    config: PairSearchConfig,
+) -> Vec<(usize, usize, usize)> {
+    let n = seq.len();
+    if n < config.min_repeat_length {
+        return Vec::new();
+    }
+
+    let pair_scan_len = n - config.min_repeat_length + 1;
+    if pair_scan_len >= PARALLEL_PAIR_SCAN_MIN_POSITIONS {
+        return (0..pair_scan_len)
+            .into_par_iter()
+            .map(|i| find_pairs_at_position(seq, index, i, config))
+            .reduce(Vec::new, |mut acc, mut pairs| {
+                acc.append(&mut pairs);
+                acc
+            });
+    }
+
+    let mut pairs = Vec::new();
+    for i in 0..pair_scan_len {
+        pairs.extend(find_pairs_at_position(seq, index, i, config));
     }
     pairs
 }
@@ -433,6 +477,15 @@ pub fn find_direct_repeats(seq: &[u8], seq_id: &str, params: &DetectionParams) -
 
     let mut seen: HashSet<(usize, usize)> = HashSet::new();
     let mut hits: Vec<RepeatHit> = Vec::new();
+    let pair_config = PairSearchConfig {
+        seed_offset: 0,
+        seed,
+        min_repeat_length,
+        max_repeat_length,
+        min_spacer_length,
+        max_spacer_length,
+        max_mism,
+    };
 
     let record = |hits: &mut Vec<RepeatHit>,
                   seen: &mut HashSet<(usize, usize)>,
@@ -449,17 +502,7 @@ pub fn find_direct_repeats(seq: &[u8], seq_id: &str, params: &DetectionParams) -
     };
 
     // Pass 1 — left-half seeds (catches mismatches in the right half)
-    for (i, j, dr_len) in find_pairs_with_index(
-        seq,
-        &left_index,
-        0,
-        seed,
-        min_repeat_length,
-        max_repeat_length,
-        min_spacer_length,
-        max_spacer_length,
-        max_mism,
-    ) {
+    for (i, j, dr_len) in find_pairs_with_index(seq, &left_index, pair_config) {
         record(&mut hits, &mut seen, i, dr_len);
         record(&mut hits, &mut seen, j, dr_len);
     }
@@ -469,13 +512,10 @@ pub fn find_direct_repeats(seq: &[u8], seq_id: &str, params: &DetectionParams) -
         for (i, j, dr_len) in find_pairs_with_index(
             seq,
             &right_index,
-            min_repeat_length - seed,
-            seed,
-            min_repeat_length,
-            max_repeat_length,
-            min_spacer_length,
-            max_spacer_length,
-            max_mism,
+            PairSearchConfig {
+                seed_offset: min_repeat_length - seed,
+                ..pair_config
+            },
         ) {
             record(&mut hits, &mut seen, i, dr_len);
             record(&mut hits, &mut seen, j, dr_len);
@@ -493,9 +533,10 @@ pub fn find_direct_repeats(seq: &[u8], seq_id: &str, params: &DetectionParams) -
     });
     let mut deduped: Vec<RepeatHit> = Vec::new();
     for hit in hits {
-        if deduped.last().is_none_or(|prev: &RepeatHit| {
-            hit.pos1 >= prev.pos1 + prev.repeat_length
-        }) {
+        if deduped
+            .last()
+            .is_none_or(|prev: &RepeatHit| hit.pos1 >= prev.pos1 + prev.repeat_length)
+        {
             deduped.push(hit);
         }
     }
@@ -610,11 +651,7 @@ pub fn find_direct_repeats(seq: &[u8], seq_id: &str, params: &DetectionParams) -
             // Extend forward (after last DR in core cluster)
             // Same windowed search to handle positional jitter.
             let mut pos = sorted.last().unwrap().pos1;
-            loop {
-                let nominal = match pos.checked_add(period) {
-                    Some(v) => v,
-                    None => break,
-                };
+            while let Some(nominal) = pos.checked_add(period) {
                 let lo = nominal
                     .saturating_sub(half_search)
                     .max(pos + min_spacer_length + min_repeat_length);
@@ -859,11 +896,11 @@ pub fn check_short_crispr(dr: &str, spacer: &str) -> bool {
     mm[0][0] = 0.0;
 
     // End-gap-free boundary: leading gaps cost zero
-    for j in 1..=n {
-        ga[0][j] = 0.0; // j bases of b unmatched at start = free
+    for cell in ga[0].iter_mut().skip(1) {
+        *cell = 0.0; // j bases of b unmatched at start = free
     }
-    for i in 1..=m {
-        gb[i][0] = 0.0; // i bases of a unmatched at start = free
+    for row in gb.iter_mut().skip(1) {
+        row[0] = 0.0; // i bases of a unmatched at start = free
     }
 
     for i in 1..=m {
@@ -935,7 +972,7 @@ pub fn check_short_crispr(dr: &str, spacer: &str) -> bool {
 
     let mut i = best_i;
     let mut j = best_j;
-    let mut gaps = (trailing_a_gaps + trailing_b_gaps);
+    let mut gaps = trailing_a_gaps + trailing_b_gaps;
     let mut total = gaps;
     let ep = 1e-6;
 
@@ -1507,8 +1544,8 @@ mod tests {
         );
         println!("{}", "─".repeat(112));
         println!(
-            "{:<12}  {:>6}  {:>6}  {:>6}  {:>6}  {:>6}%  {}",
-            "Array", "RefDRs", "OurDRs", "RefSPs", "OurSPs", "DRhit", "Notes"
+            "{:<12}  {:>6}  {:>6}  {:>6}  {:>6}  {:>6}%  Notes",
+            "Array", "RefDRs", "OurDRs", "RefSPs", "OurSPs", "DRhit"
         );
         println!("{}", "─".repeat(112));
 

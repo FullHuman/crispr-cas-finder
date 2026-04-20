@@ -17,3 +17,11 @@ crisprcas-core = { path = "../crisprcas-core" }
 [[bin]]
 name = "crisprcas"
 path = "src/main.rs"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+tempfile = "3"
+
+[[bench]]
+name = "crisprcas_cli_ecoli"
+harness = false

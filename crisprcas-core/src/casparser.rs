@@ -1,9 +1,16 @@
 use anyhow::{Context, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GeneCoordinates {
+    pub start: usize,
+    pub end: usize,
+    pub strand: String,
+}
+
 /// A Cas-associated gene
-#[derive(Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CasGene {
     pub id: String,
     pub name: String,
@@ -13,12 +20,19 @@ pub struct CasGene {
 }
 
 /// A Cas system cluster
-#[derive(Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CasCluster {
     pub system: String,
     pub genes: Vec<CasGene>,
     pub start: usize,
     pub end: usize,
+}
+
+pub fn from_search_results_with_gene_map(
+    results: &crate::cas_types::SearchResults,
+    gene_map: &std::collections::HashMap<String, GeneCoordinates>,
+) -> Vec<CasCluster> {
+    clusters_from_search_results(results, Some(gene_map))
 }
 
 /// Convert search results into CasCluster format.
@@ -31,7 +45,13 @@ pub fn from_search_results(
     faa_content: Option<&str>,
 ) -> Vec<CasCluster> {
     let gene_map = faa_content.map(parse_gene_map_from_faa);
+    clusters_from_search_results(results, gene_map.as_ref())
+}
 
+fn clusters_from_search_results(
+    results: &crate::cas_types::SearchResults,
+    gene_map: Option<&std::collections::HashMap<String, GeneCoordinates>>,
+) -> Vec<CasCluster> {
     let mut clusters = Vec::new();
     for sys in &results.systems {
         let mut genes = Vec::new();
@@ -39,12 +59,15 @@ pub fn from_search_results(
         let mut max_end = 0usize;
 
         for hit in &sys.hits {
-            let (start, end, strand) = if let Some(ref gmap) = gene_map {
-                gmap.get(hit.hit.id.as_str()).cloned().unwrap_or((
-                    hit.hit.begin_match as usize,
-                    hit.hit.end_match as usize,
-                    ".".to_string(),
-                ))
+            let (start, end, strand) = if let Some(gmap) = gene_map {
+                gmap.get(hit.hit.id.as_str())
+                    .cloned()
+                    .map(|coords| (coords.start, coords.end, coords.strand))
+                    .unwrap_or((
+                        hit.hit.begin_match as usize,
+                        hit.hit.end_match as usize,
+                        ".".to_string(),
+                    ))
             } else {
                 (
                     hit.hit.begin_match as usize,
@@ -87,7 +110,7 @@ pub fn from_search_results(
 ///   >seqid_N # start # end # strand_int # ID=N
 fn parse_gene_map_from_faa(
     faa_content: &str,
-) -> std::collections::HashMap<String, (usize, usize, String)> {
+) -> std::collections::HashMap<String, GeneCoordinates> {
     let mut gene_map = std::collections::HashMap::new();
     for line in faa_content.lines() {
         if !line.starts_with('>') {
@@ -107,14 +130,14 @@ fn parse_gene_map_from_faa(
             "1" => "+".to_string(),
             s => s.to_string(),
         };
-        gene_map.insert(id, (start, end, strand));
+        gene_map.insert(id, GeneCoordinates { start, end, strand });
     }
     gene_map
 }
 
 fn parse_gene_map_from_gff(
     gff_content: &str,
-) -> std::collections::HashMap<String, (usize, usize, String)> {
+) -> std::collections::HashMap<String, GeneCoordinates> {
     let mut gene_map = std::collections::HashMap::new();
     for line in gff_content.lines() {
         if line.starts_with('#') || line.trim().is_empty() {
@@ -134,7 +157,14 @@ fn parse_gene_map_from_gff(
         let attrs = cols[8];
         for attr in attrs.split(';') {
             if let Some(value) = attr.strip_prefix("ID=") {
-                gene_map.insert(value.to_string(), (start, end, strand.clone()));
+                gene_map.insert(
+                    value.to_string(),
+                    GeneCoordinates {
+                        start,
+                        end,
+                        strand: strand.clone(),
+                    },
+                );
                 break;
             }
         }
@@ -159,13 +189,13 @@ pub fn parse_cas_from_strings(best_solution_tsv: &str, ann_gff: &str) -> Result<
         let gene_id = cols[1];
         let gene_name = cols[2].to_string();
         let system_label = cols[5].to_string();
-        if let Some(&(start, end, ref strand)) = gene_map.get(gene_id) {
+        if let Some(coords) = gene_map.get(gene_id) {
             let gene = CasGene {
                 id: gene_id.to_string(),
                 name: gene_name,
-                start,
-                end,
-                strand: strand.clone(),
+                start: coords.start,
+                end: coords.end,
+                strand: coords.strand.clone(),
             };
             clusters.entry(system_label).or_default().push(gene);
         }

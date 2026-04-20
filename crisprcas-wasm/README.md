@@ -5,9 +5,12 @@ This package exposes the CRISPR repeat detection engine to the browser and inclu
 ## Build WASM
 
 ```bash
-cd crisprcas-wasm
-wasm-pack build --target web --out-dir www/pkg
+./build_wasm.sh
 ```
+
+This uses the repo's threaded wasm build path, including the scoped
+`-Zbuild-std=panic_abort,std` flag needed for the `wasm32-unknown-unknown`
+target without affecting host builds such as Criterion benchmarks.
 
 ## Run the Website
 

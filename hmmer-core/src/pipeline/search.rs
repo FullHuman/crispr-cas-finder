@@ -27,30 +27,6 @@ use std::marker::PhantomData;
 use std::ops::ControlFlow;
 use std::sync::Arc;
 
-#[cfg(not(target_arch = "wasm32"))]
-use std::time::Instant;
-
-/// Shim: on wasm32, `std::time::Instant` panics. We provide a zero-cost
-/// stand-in that always reports zero elapsed time so the pipeline runs
-/// without modification.
-#[cfg(target_arch = "wasm32")]
-mod wasm_instant {
-    #[derive(Clone, Copy)]
-    pub struct Instant;
-    impl Instant {
-        #[inline(always)]
-        pub fn now() -> Self {
-            Self
-        }
-        #[inline(always)]
-        pub fn elapsed(&self) -> core::time::Duration {
-            core::time::Duration::ZERO
-        }
-    }
-}
-#[cfg(target_arch = "wasm32")]
-use wasm_instant::Instant;
-
 /// Reporting and inclusion thresholds.
 #[derive(Debug, Clone)]
 pub struct Thresholds {
@@ -89,100 +65,6 @@ impl Default for Thresholds {
             inclusion_domain_evalue: 0.01,
             inclusion_domain_bitscore: 0.0,
         }
-    }
-}
-
-/// Accumulated wall-clock timings per pipeline stage.
-#[derive(Debug, Clone, Default)]
-pub struct PipelineTimings {
-    pub setup_ns: u64,
-    pub msv_ns: u64,
-    pub viterbi_ns: u64,
-    pub forward_ns: u64,
-    pub fwdback_ns: u64,
-    pub fwd_only_ns: u64,
-    pub bwd_only_ns: u64,
-    pub domaindef_ns: u64,
-    pub postproc_ns: u64,
-}
-
-impl PipelineTimings {
-    pub fn merge(&mut self, other: &PipelineTimings) {
-        self.setup_ns += other.setup_ns;
-        self.msv_ns += other.msv_ns;
-        self.viterbi_ns += other.viterbi_ns;
-        self.forward_ns += other.forward_ns;
-        self.fwdback_ns += other.fwdback_ns;
-        self.fwd_only_ns += other.fwd_only_ns;
-        self.bwd_only_ns += other.bwd_only_ns;
-        self.domaindef_ns += other.domaindef_ns;
-        self.postproc_ns += other.postproc_ns;
-    }
-
-    pub fn total_ns(&self) -> u64 {
-        self.setup_ns
-            + self.msv_ns
-            + self.viterbi_ns
-            + self.forward_ns
-            + self.fwdback_ns
-            + self.domaindef_ns
-            + self.postproc_ns
-    }
-
-    pub fn report(&self) {
-        let tot = self.total_ns() as f64 / 1e6;
-        let pct = |ns: u64| {
-            if tot > 0.0 {
-                ns as f64 / 1e6 / tot * 100.0
-            } else {
-                0.0
-            }
-        };
-        eprintln!("Pipeline timing breakdown:");
-        eprintln!(
-            "  Setup (reconfig/null1): {:>8.1} ms  ({:5.1}%)",
-            self.setup_ns as f64 / 1e6,
-            pct(self.setup_ns)
-        );
-        eprintln!(
-            "  MSV filter:            {:>8.1} ms  ({:5.1}%)",
-            self.msv_ns as f64 / 1e6,
-            pct(self.msv_ns)
-        );
-        eprintln!(
-            "  Viterbi filter:        {:>8.1} ms  ({:5.1}%)",
-            self.viterbi_ns as f64 / 1e6,
-            pct(self.viterbi_ns)
-        );
-        eprintln!(
-            "  Forward filter:        {:>8.1} ms  ({:5.1}%)",
-            self.forward_ns as f64 / 1e6,
-            pct(self.forward_ns)
-        );
-        eprintln!(
-            "  Fwd/Bwd checkpointed:  {:>8.1} ms  ({:5.1}%)",
-            self.fwdback_ns as f64 / 1e6,
-            pct(self.fwdback_ns)
-        );
-        eprintln!(
-            "    Fwd (SIMD) only:     {:>8.1} ms",
-            self.fwd_only_ns as f64 / 1e6
-        );
-        eprintln!(
-            "    Bwd (SIMD) only:     {:>8.1} ms",
-            self.bwd_only_ns as f64 / 1e6
-        );
-        eprintln!(
-            "  Domain definition:     {:>8.1} ms  ({:5.1}%)",
-            self.domaindef_ns as f64 / 1e6,
-            pct(self.domaindef_ns)
-        );
-        eprintln!(
-            "  Post-processing:       {:>8.1} ms  ({:5.1}%)",
-            self.postproc_ns as f64 / 1e6,
-            pct(self.postproc_ns)
-        );
-        eprintln!("  Total:                 {:>8.1} ms", tot);
     }
 }
 
@@ -238,13 +120,11 @@ impl PipelineStats {
 #[derive(Debug, Clone, Default)]
 pub struct SearchMetrics {
     pub stats: PipelineStats,
-    pub timings: PipelineTimings,
 }
 
 impl SearchMetrics {
     pub fn merge(&mut self, other: &SearchMetrics) {
         self.stats.merge(&other.stats);
-        self.timings.merge(&other.timings);
     }
 }
 
@@ -417,6 +297,7 @@ pub struct SearchReport {
 
 /// Sequence-level outcome from the public worker API.
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
 pub enum SearchOutcome {
     Filtered(FilterReason),
     Hit(Hit),
@@ -426,6 +307,16 @@ pub enum SearchOutcome {
 struct QueryState {
     profile: Profile,
     background: BackgroundModel,
+}
+
+struct ScoreHitRequest<'a> {
+    profile: &'a Profile,
+    background: &'a BackgroundModel,
+    sequence: &'a DigitalSequence,
+    domain_result: &'a mut crate::domaindef::DomainResult,
+    null_score: f32,
+    forward_raw_score: f32,
+    sequence_length: usize,
 }
 
 /// Reusable per-thread search executor.
@@ -483,20 +374,17 @@ impl SearchWorker {
     pub fn metrics(&self) -> SearchMetrics {
         SearchMetrics {
             stats: self.engine.stats.clone(),
-            timings: self.engine.timings.clone(),
         }
     }
 
     pub fn into_metrics(self) -> SearchMetrics {
         SearchMetrics {
             stats: self.engine.stats,
-            timings: self.engine.timings,
         }
     }
 
     pub fn reset_metrics(&mut self) {
         self.engine.stats = PipelineStats::default();
-        self.engine.timings = PipelineTimings::default();
     }
 
     pub fn plan(&self) -> SearchPlan {
@@ -566,10 +454,8 @@ impl<'w, 's> TargetRun<'w, 's, Prepared> {
     fn run_filters(mut self) -> ControlFlow<SearchReport, TargetRun<'w, 's, PassedFilters>> {
         let om = self.worker.engine.oprofile.as_ref().unwrap();
 
-        let t0 = Instant::now();
         let msv_raw_score =
             f32_msv::msv_filter_f32(&self.sequence.residues, self.sequence_length, om);
-        self.worker.engine.timings.msv_ns += t0.elapsed().as_nanos() as u64;
 
         self.trace.msv_raw_score = Some(msv_raw_score);
 
@@ -672,14 +558,16 @@ impl<'w, 's> TargetRun<'w, 's, Decoded> {
             .expect("decoded phase must have a domain result");
 
         let added = self.worker.engine.score_and_add_hit(
-            &self.worker.state.profile,
-            &self.worker.state.background,
-            self.sequence,
             &mut hits,
-            &mut domain_result,
-            self.null_score,
-            self.forward_raw_score,
-            self.sequence_length,
+            ScoreHitRequest {
+                profile: &self.worker.state.profile,
+                background: &self.worker.state.background,
+                sequence: self.sequence,
+                domain_result: &mut domain_result,
+                null_score: self.null_score,
+                forward_raw_score: self.forward_raw_score,
+                sequence_length: self.sequence_length,
+            },
         );
         if !added || hits.is_empty() {
             return Err(HmmerError::Internal(
@@ -733,7 +621,6 @@ struct SearchEngine {
 
     // Accounting
     stats: PipelineStats,
-    timings: PipelineTimings,
 
     // Reusable DP matrices (allocated once, grown as needed)
     posterior_matrix: ScoreMatrix,
@@ -765,7 +652,6 @@ impl SearchEngine {
             viterbi_threshold: DEFAULT_VITERBI_THRESHOLD,
             forward_threshold: DEFAULT_FORWARD_THRESHOLD,
             stats: PipelineStats::default(),
-            timings: PipelineTimings::default(),
             posterior_matrix: ScoreMatrix::new(m, sequence_length).unwrap(),
             rescore_buf: RescoringBuffers::new(m),
             domain_config: DomainConfig::default(),
@@ -814,17 +700,16 @@ impl SearchEngine {
         }
     }
 
-    fn score_and_add_hit(
-        &mut self,
-        profile: &Profile,
-        background: &BackgroundModel,
-        sequence: &DigitalSequence,
-        top_hits: &mut TopHits,
-        domain_result: &mut crate::domaindef::DomainResult,
-        null_score: f32,
-        forward_raw_score: f32,
-        sequence_length: usize,
-    ) -> bool {
+    fn score_and_add_hit(&mut self, top_hits: &mut TopHits, request: ScoreHitRequest<'_>) -> bool {
+        let ScoreHitRequest {
+            profile,
+            background,
+            sequence,
+            domain_result,
+            null_score,
+            forward_raw_score,
+            sequence_length,
+        } = request;
         let num_domains = domain_result.domains.len();
 
         // ---- Per-domain scoring (matches C p7_pipeline.c) ----
@@ -964,8 +849,6 @@ impl SearchEngine {
         digital_sequence: &[u8],
         sequence_length: usize,
     ) -> f32 {
-        let t0 = Instant::now();
-
         // Set the target length model on both background and profile.
         background.set_length(sequence_length);
         crate::modelconfig::reconfigure_length(profile, sequence_length);
@@ -976,9 +859,7 @@ impl SearchEngine {
             .get_or_insert_with(|| OptimizedProfile::from_profile(profile));
         om.reconfigure_length(sequence_length);
 
-        let null_score = background.null_one(digital_sequence, sequence_length);
-        self.timings.setup_ns += t0.elapsed().as_nanos() as u64;
-        null_score
+        background.null_one(digital_sequence, sequence_length)
     }
 
     fn run_viterbi_filter(
@@ -988,11 +869,9 @@ impl SearchEngine {
         sequence_length: usize,
         null_score: f32,
     ) -> Option<f32> {
-        let t0 = Instant::now();
         let om = self.oprofile.as_ref().unwrap();
         let viterbi_raw_score =
             f32_viterbi::viterbi_filter_f32(digital_sequence, sequence_length, om);
-        self.timings.viterbi_ns += t0.elapsed().as_nanos() as u64;
 
         let seq_score_vit = (viterbi_raw_score - null_score) / LOG2;
         let p_vit = Self::viterbi_pvalue(profile, seq_score_vit);
@@ -1012,10 +891,8 @@ impl SearchEngine {
         sequence_length: usize,
         null_score: f32,
     ) -> Option<f32> {
-        let t0 = Instant::now();
         let om = self.oprofile.as_ref().unwrap();
         let fwd_result = simd_fwd::forward_filter(digital_sequence, sequence_length, om);
-        self.timings.forward_ns += t0.elapsed().as_nanos() as u64;
 
         let seq_score_fwd = (fwd_result.score - null_score) / LOG2;
         let p_fwd = Self::forward_pvalue(profile, seq_score_fwd);
@@ -1034,7 +911,6 @@ impl SearchEngine {
         digital_sequence: &[u8],
         sequence_length: usize,
     ) -> Result<Option<(f32, crate::domaindef::DomainResult)>, HmmerError> {
-        let tfb0 = Instant::now();
         self.domain_workspace.reuse();
         self.domain_workspace.grow_to(sequence_length);
 
@@ -1042,9 +918,7 @@ impl SearchEngine {
         let (checkpoints, simd_cp_data) =
             simd_fwd_bck::forward_checkpointed_simd(digital_sequence, sequence_length, om);
         let forward_raw_score = checkpoints.overall_score;
-        self.timings.fwd_only_ns += tfb0.elapsed().as_nanos() as u64;
 
-        let tbwd0 = Instant::now();
         self.posterior_matrix
             .resize(profile.num_nodes, sequence_length)?;
         let om = self.oprofile.as_ref().unwrap();
@@ -1062,10 +936,7 @@ impl SearchEngine {
         {
             return Ok(None);
         }
-        self.timings.bwd_only_ns += tbwd0.elapsed().as_nanos() as u64;
-        self.timings.fwdback_ns += tfb0.elapsed().as_nanos() as u64;
 
-        let tdd0 = Instant::now();
         let mut om = self.oprofile.take().unwrap();
         let mut seg_buf = std::mem::take(&mut self.seg_buf);
         let domain_result = self.domain_workspace.by_posterior_heuristics(
@@ -1079,7 +950,6 @@ impl SearchEngine {
         );
         self.oprofile = Some(om);
         self.seg_buf = seg_buf;
-        self.timings.domaindef_ns += tdd0.elapsed().as_nanos() as u64;
 
         Ok(Some((forward_raw_score, domain_result)))
     }

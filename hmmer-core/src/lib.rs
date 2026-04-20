@@ -2,8 +2,6 @@
 
 // hmmer-core: Pure computation library — algorithms, data structures, scoring.
 
-// Rayon parallel iterators (disabled on WASM, which has no threads)
-#[cfg(not(target_arch = "wasm32"))]
 pub use rayon;
 
 // Re-export error types

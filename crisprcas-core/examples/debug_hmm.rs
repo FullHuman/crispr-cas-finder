@@ -10,7 +10,6 @@ use hmmer_core::{
 };
 use hmmer_io::HmmFile;
 use std::env;
-use std::io::BufRead;
 
 fn main() {
     let args: Vec<String> = env::args().collect();

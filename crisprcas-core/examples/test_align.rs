@@ -1,6 +1,3 @@
-use bio::alignment::AlignmentOperation;
-use bio::alignment::pairwise::{Aligner, Scoring};
-
 fn check_short_crispr(dr: &str, spacer: &str) -> (usize, usize, f64, f64) {
     let a = dr.as_bytes();
     let b = spacer.as_bytes();
@@ -19,11 +16,11 @@ fn check_short_crispr(dr: &str, spacer: &str) -> (usize, usize, f64, f64) {
     let mut gb = vec![vec![inf; n + 1]; m + 1];
 
     mm[0][0] = 0.0;
-    for j in 1..=n {
-        ga[0][j] = 0.0;
+    for cell in ga[0].iter_mut().skip(1) {
+        *cell = 0.0;
     }
-    for i in 1..=m {
-        gb[i][0] = 0.0;
+    for row in gb.iter_mut().skip(1) {
+        row[0] = 0.0;
     }
 
     for i in 1..=m {
@@ -86,7 +83,7 @@ fn check_short_crispr(dr: &str, spacer: &str) -> (usize, usize, f64, f64) {
 
     let mut i = best_i;
     let mut j = best_j;
-    let mut gaps = (trailing_a_gaps + trailing_b_gaps) as usize;
+    let mut gaps = trailing_a_gaps + trailing_b_gaps;
     let mut total = gaps;
     let ep = 1e-6;
 

@@ -1,11 +1,14 @@
 use crisprcas_core::{
     DetectionParams,
+    cas_pipeline::{
+        GeneRecord, ModelDefinition, assign_hits_to_model, build_faa_content, build_model_registry,
+        codon_table, evaluate_cluster, gene_coordinates_from_records, revcomp_dna, translate_dna,
+    },
     cas_types::{
-        Cluster, DetectedSystem, GeneDefinition, GeneStatus, HmmerHit, HmmerOptions, ModelRegistry,
-        RepliconTopology, SequenceIndex, SystemHit, SystemModel, cluster_hits,
+        HmmerHit, HmmerOptions, ModelRegistry, RepliconTopology, SequenceIndex, cluster_hits,
         select_best_solution,
     },
-    casparser::{CasCluster, CasGene},
+    casparser::{CasCluster, from_search_results_with_gene_map},
     detect_crisprs,
 };
 use hmmer_core::{
@@ -57,27 +60,11 @@ pub struct WasmFinderOptions {
     pub min_evidence_level: Option<usize>,
 }
 
-/// A single model definition passed from JavaScript.
-#[derive(Deserialize)]
-pub struct ModelDefinition {
-    pub name: String,
-    pub family: String,
-    /// XML content of the model definition.
-    pub content: String,
-}
-
 /// CAS detection options.
 #[derive(Deserialize, Default)]
 pub struct CasOptions {
     pub genetic_code: Option<usize>,
     pub metagenome: Option<bool>,
-}
-
-/// Combined result of CRISPR + CAS analysis.
-#[derive(Serialize)]
-pub struct FullAnalysisResult {
-    pub crisprs: Vec<crisprcas_core::CrisprArray>,
-    pub cas_clusters: Vec<CasCluster>,
 }
 
 fn parse_fasta_sequences(fasta_content: &str) -> Vec<(String, Vec<u8>)> {
@@ -99,9 +86,10 @@ fn parse_fasta_sequences(fasta_content: &str) -> Vec<(String, Vec<u8>)> {
         if current_id.is_some() {
             let clean = line.trim().as_bytes();
             if !clean.is_empty()
-                && let Some((_, seq)) = seqs.last_mut() {
-                    seq.extend_from_slice(clean);
-                }
+                && let Some((_, seq)) = seqs.last_mut()
+            {
+                seq.extend_from_slice(clean);
+            }
         }
     }
 
@@ -157,7 +145,6 @@ pub fn cas_prepare(
     let genetic_code = cas_opts.genetic_code.unwrap_or(11);
     let metagenome = cas_opts.metagenome.unwrap_or(false);
 
-    // Gene prediction
     let config = OrphosConfig {
         metagenomic: metagenome,
         closed_ends: true,
@@ -209,7 +196,6 @@ pub fn cas_prepare(
         }
     }
 
-    // Build targets as DigitalSequence for hmmer-core
     let abc = Alphabet::amino();
     let faa_content = build_faa_content(&all_genes);
     log!(
@@ -260,10 +246,8 @@ pub fn cas_prepare(
         seqs
     };
 
-    // Build model registry
     let registry = build_model_registry(&models).map_err(|e| JsValue::from_str(&e))?;
 
-    // Determine needed profiles
     let mut needed_profiles: HashSet<String> = HashSet::new();
     for model_def in &models {
         let fqn = format!("{}/{}", model_def.family, model_def.name);
@@ -280,7 +264,6 @@ pub fn cas_prepare(
     log!("[CAS] Needed profiles: {} profiles", needed_profiles.len());
     log!("[CAS] Built {} digital sequence targets", targets.len());
 
-    // Store context
     *CAS_CTX.lock().unwrap() = Some(CasContext {
         genes: all_genes,
         targets,
@@ -289,13 +272,11 @@ pub fn cas_prepare(
         needed_profiles,
         hmmer_options: HmmerOptions {
             coverage_profile: 0.4,
-            ..Default::default()
         },
         all_hits: HashMap::new(),
         models_raw: models,
     });
 
-    // Return { needed_profiles: [...], gene_count: N }
     let info = serde_json::json!({
         "needed_profiles": needed_list,
         "gene_count": gene_count,
@@ -422,7 +403,6 @@ pub fn cas_search_all_profiles(profiles_js: JsValue) -> Result<u32, JsValue> {
     let profiles: Vec<ProfileEntry> = serde_wasm_bindgen::from_value(profiles_js)
         .map_err(|e| JsValue::from_str(&format!("invalid profiles: {e}")))?;
 
-    // Extract read-only data from context
     let (targets, hmmer_options, needed_profiles, abc) = {
         let guard = CAS_CTX.lock().unwrap();
         let ctx = guard
@@ -443,7 +423,6 @@ pub fn cas_search_all_profiles(profiles_js: JsValue) -> Result<u32, JsValue> {
     };
     let coverage_threshold = hmmer_options.coverage_profile;
 
-    // Parallel search — each thread parses its HMM and runs hmmer-core pipeline
     let results: Vec<(String, Vec<HmmerHit>)> = profiles
         .par_iter()
         .filter(|p| needed_profiles.contains(&p.name))
@@ -530,7 +509,6 @@ pub fn cas_search_all_profiles(profiles_js: JsValue) -> Result<u32, JsValue> {
         })
         .collect();
 
-    // Merge results into context
     let total_hits: u32 = results.iter().map(|(_, h)| h.len() as u32).sum();
     log!(
         "[CAS] HMM search complete: {} total hits across {} profiles",
@@ -573,8 +551,7 @@ pub fn cas_finalize() -> Result<JsValue, JsValue> {
         .take()
         .ok_or_else(|| JsValue::from_str("cas_prepare not called"))?;
 
-    let gene_map: HashMap<&str, &GeneRecord> =
-        ctx.genes.iter().map(|g| (g.id.as_str(), g)).collect();
+    let gene_map = gene_coordinates_from_records(&ctx.genes);
 
     let protein_ids: Vec<&str> = ctx.genes.iter().map(|g| g.id.as_str()).collect();
     let seq_index = SequenceIndex::from_ids(&protein_ids);
@@ -643,7 +620,6 @@ pub fn cas_finalize() -> Result<JsValue, JsValue> {
                 );
                 detected_systems.push(system);
             } else {
-                // Log why it was rejected
                 let mandatory_names: std::collections::HashSet<&str> =
                     model.mandatory_genes().map(|g| g.name.as_str()).collect();
                 let accessory_names: std::collections::HashSet<&str> =
@@ -709,51 +685,14 @@ pub fn cas_finalize() -> Result<JsValue, JsValue> {
         detected_systems.len()
     );
 
-    let cas_clusters: Vec<CasCluster> = detected_systems
-        .into_iter()
-        .map(|sys| {
-            let mut genes = Vec::new();
-            let mut min_start = usize::MAX;
-            let mut max_end = 0usize;
-
-            for hit in &sys.hits {
-                let (start, end, strand) = gene_map
-                    .get(hit.hit.id.as_str())
-                    .map(|g| (g.start, g.end, g.strand.clone()))
-                    .unwrap_or((
-                        hit.hit.begin_match as usize,
-                        hit.hit.end_match as usize,
-                        ".".to_string(),
-                    ));
-
-                if start < min_start {
-                    min_start = start;
-                }
-                if end > max_end {
-                    max_end = end;
-                }
-
-                genes.push(CasGene {
-                    id: hit.hit.id.clone(),
-                    name: hit.gene_ref.clone(),
-                    start,
-                    end,
-                    strand,
-                });
-            }
-
-            CasCluster {
-                system: sys.model_fqn,
-                genes,
-                start: if min_start == usize::MAX {
-                    0
-                } else {
-                    min_start
-                },
-                end: max_end,
-            }
-        })
-        .collect();
+    let cas_clusters: Vec<CasCluster> = from_search_results_with_gene_map(
+        &crisprcas_core::cas_types::SearchResults {
+            systems: detected_systems,
+            rejected: Vec::new(),
+            skipped_replicons: Vec::new(),
+        },
+        &gene_map,
+    );
 
     serde_wasm_bindgen::to_value(&cas_clusters)
         .map_err(|e| JsValue::from_str(&format!("serialization failed: {e}")))
@@ -783,346 +722,10 @@ fn build_detection_params(options: &WasmFinderOptions) -> DetectionParams {
     params
 }
 
-struct GeneRecord {
-    id: String,
-    protein: String,
-    start: usize,
-    end: usize,
-    strand: String,
-}
-
-fn build_faa_content(genes: &[GeneRecord]) -> String {
-    let mut faa = String::new();
-    for gene in genes {
-        let strand_int: i32 = if gene.strand == "-" { -1 } else { 1 };
-        faa.push_str(&format!(
-            ">{} # {} # {} # {} # ID={}\n",
-            gene.id, gene.start, gene.end, strand_int, gene.id
-        ));
-        for chunk in gene.protein.as_bytes().chunks(60) {
-            faa.push_str(std::str::from_utf8(chunk).unwrap_or(""));
-            faa.push('\n');
-        }
-    }
-    faa
-}
-
-/// Build a ModelRegistry from in-memory XML model definitions.
-fn build_model_registry(models: &[ModelDefinition]) -> Result<ModelRegistry, String> {
-    let mut registry = ModelRegistry::new();
-    for model_def in models {
-        let model = parse_cas_model_xml(&model_def.content, &model_def.name, &model_def.family)?;
-        registry.add(model);
-    }
-    Ok(registry)
-}
-
-/// Parse a CAS model definition from XML content.
-/// Handles the CRISPRCasFinder format which uses <system> tags instead of <model>.
-fn parse_cas_model_xml(
-    content: &str,
-    model_name: &str,
-    family: &str,
-) -> Result<SystemModel, String> {
-    // Convert <system> to <model> and strip # comments
-    let converted = convert_cas_xml(content);
-
-    let fqn = format!("{}/{}", family, model_name);
-    let mut inter_gene_max_space: u32 = 20;
-    let mut min_mandatory_genes_required: u32 = 0;
-    let mut min_genes_required: u32 = 0;
-    let mut multi_loci = false;
-    let mut genes: Vec<GeneDefinition> = Vec::new();
-
-    // Simple XML parsing for model definitions
-    // The format is: <model inter_gene_max_space="5" ...> <gene name="..." presence="..."/> </model>
-    for line in converted.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("<model ") || trimmed.starts_with("<model>") {
-            if let Some(val) = extract_xml_attr(trimmed, "inter_gene_max_space") {
-                inter_gene_max_space = val.parse().unwrap_or(20);
-            }
-            if let Some(val) = extract_xml_attr(trimmed, "min_mandatory_genes_required") {
-                min_mandatory_genes_required = val.parse().unwrap_or(0);
-            }
-            if let Some(val) = extract_xml_attr(trimmed, "min_genes_required") {
-                min_genes_required = val.parse().unwrap_or(0);
-            }
-            if let Some(val) = extract_xml_attr(trimmed, "multi_loci") {
-                multi_loci = val == "True" || val == "true" || val == "1";
-            }
-        } else if trimmed.starts_with("<gene ") {
-            let name = extract_xml_attr(trimmed, "name").unwrap_or_default();
-            let presence = extract_xml_attr(trimmed, "presence").unwrap_or_default();
-            let status = match presence.as_str() {
-                "mandatory" => GeneStatus::Mandatory,
-                "accessory" => GeneStatus::Accessory,
-                "forbidden" => GeneStatus::Forbidden,
-                _ => GeneStatus::Mandatory,
-            };
-            let loner = extract_xml_attr(trimmed, "loner")
-                .is_some_and(|v| v == "True" || v == "true" || v == "1");
-            let multi_system = extract_xml_attr(trimmed, "multi_system")
-                .is_some_and(|v| v == "True" || v == "true" || v == "1");
-            let system_ref = extract_xml_attr(trimmed, "system_ref");
-
-            genes.push(GeneDefinition {
-                name,
-                status,
-                loner,
-                multi_system,
-                system_ref,
-                exchangeables: Vec::new(),
-                inter_gene_max_space: None,
-                multi_model: false,
-            });
-        }
-    }
-
-    Ok(SystemModel {
-        fqn,
-        family: family.to_string(),
-        name: model_name.to_string(),
-        version: None,
-        genes,
-        inter_gene_max_space,
-        min_mandatory_genes_required,
-        min_genes_required,
-        multi_loci,
-    })
-}
-
-fn convert_cas_xml(content: &str) -> String {
-    let mut out = String::with_capacity(content.len());
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with('#') {
-            continue;
-        }
-        let converted = line
-            .replace("<system ", "<model ")
-            .replace("<system>", "<model>")
-            .replace("</system>", "</model>");
-        out.push_str(&converted);
-        out.push('\n');
-    }
-    out
-}
-
-fn extract_xml_attr(tag: &str, attr_name: &str) -> Option<String> {
-    let pattern = format!("{}=\"", attr_name);
-    if let Some(start) = tag.find(&pattern) {
-        let value_start = start + pattern.len();
-        if let Some(end) = tag[value_start..].find('"') {
-            return Some(tag[value_start..value_start + end].to_string());
-        }
-    }
-    None
-}
-
-/// Assign HMMER hits to a model's genes, creating SystemHits.
-fn assign_hits_to_model(
-    model: &SystemModel,
-    hmmer_hits: &HashMap<String, Vec<HmmerHit>>,
-    seq_index: &SequenceIndex,
-) -> Vec<SystemHit> {
-    let mut best_by_protein: HashMap<&str, (SystemHit, bool)> = HashMap::new();
-
-    for gene in &model.genes {
-        let gene_names_to_check: Vec<(&str, bool)> = std::iter::once((gene.name.as_str(), false))
-            .chain(gene.exchangeables.iter().map(|e| (e.as_str(), true)))
-            .collect();
-
-        for (gene_name, is_exchangeable) in gene_names_to_check {
-            if let Some(hits) = hmmer_hits.get(gene_name) {
-                for hit in hits {
-                    if let Some(position) = seq_index.position(&hit.id) {
-                        let candidate = SystemHit {
-                            hit: hit.clone(),
-                            position,
-                            gene_ref: gene.name.clone(),
-                            gene_status: gene.status,
-                            model_fqn: model.fqn.clone(),
-                            is_exchangeable,
-                            locus_num: 1,
-                            counterpart: String::new(),
-                            used_in: Vec::new(),
-                        };
-                        let inherited = gene.system_ref.is_some();
-
-                        match best_by_protein.get_mut(hit.id.as_str()) {
-                            Some((best_hit, best_inherited)) => {
-                                if should_replace_assignment(
-                                    &candidate,
-                                    inherited,
-                                    best_hit,
-                                    *best_inherited,
-                                ) {
-                                    *best_hit = candidate;
-                                    *best_inherited = inherited;
-                                }
-                            }
-                            None => {
-                                best_by_protein.insert(hit.id.as_str(), (candidate, inherited));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    best_by_protein.into_values().map(|(hit, _)| hit).collect()
-}
-
-fn should_replace_assignment(
-    candidate: &SystemHit,
-    candidate_inherited: bool,
-    current: &SystemHit,
-    current_inherited: bool,
-) -> bool {
-    if candidate_inherited != current_inherited {
-        return !candidate_inherited;
-    }
-
-    candidate
-        .hit
-        .score
-        .total_cmp(&current.hit.score)
-        .then_with(|| {
-            candidate
-                .hit
-                .profile_coverage
-                .total_cmp(&current.hit.profile_coverage)
-        })
-        .then_with(|| {
-            candidate
-                .hit
-                .seq_coverage
-                .total_cmp(&current.hit.seq_coverage)
-        })
-        .then_with(|| current.is_exchangeable.cmp(&candidate.is_exchangeable))
-        .is_gt()
-}
-
-/// Evaluate a cluster against a model to produce a DetectedSystem (if valid).
-fn evaluate_cluster(c: &Cluster, model: &SystemModel) -> Option<DetectedSystem> {
-    let mandatory_names: HashSet<&str> = model.mandatory_genes().map(|g| g.name.as_str()).collect();
-    let accessory_names: HashSet<&str> = model.accessory_genes().map(|g| g.name.as_str()).collect();
-    let forbidden_names: HashSet<&str> = model.forbidden_genes().map(|g| g.name.as_str()).collect();
-
-    let found_genes: HashSet<&str> = c.hits.iter().map(|h| h.gene_ref.as_str()).collect();
-
-    let mandatory_found: Vec<String> = mandatory_names
-        .iter()
-        .filter(|g| found_genes.contains(*g))
-        .map(|g| g.to_string())
-        .collect();
-    let accessory_found: Vec<String> = accessory_names
-        .iter()
-        .filter(|g| found_genes.contains(*g))
-        .map(|g| g.to_string())
-        .collect();
-    let forbidden_found: Vec<String> = forbidden_names
-        .iter()
-        .filter(|g| found_genes.contains(*g))
-        .map(|g| g.to_string())
-        .collect();
-
-    // Reject if forbidden genes present
-    if !forbidden_found.is_empty() {
-        return None;
-    }
-
-    // Check minimum requirements
-    let min_mandatory = model.min_mandatory_genes_required as usize;
-    let min_genes = model.min_genes_required as usize;
-    let total_found = mandatory_found.len() + accessory_found.len();
-
-    if mandatory_found.len() < min_mandatory || total_found < min_genes {
-        return None;
-    }
-
-    // Simple scoring: sum of hit scores
-    let score: f64 = c.hits.iter().map(|h| h.hit.score).sum();
-    let max_nb_genes = model.mandatory_count() + model.accessory_count();
-    let wholeness = if max_nb_genes > 0 {
-        (mandatory_found.len() + accessory_found.len()) as f64 / max_nb_genes as f64
-    } else {
-        1.0
-    };
-
-    Some(DetectedSystem {
-        id: String::new(),
-        replicon: String::new(),
-        model_fqn: model.fqn.clone(),
-        score,
-        wholeness,
-        loci_count: 1,
-        occurrence: 0,
-        hits: c.hits.clone(),
-        state: "single_locus".to_string(),
-        mandatory_found,
-        accessory_found,
-        forbidden_found,
-    })
-}
-
-fn revcomp_dna(seq: &[u8]) -> Vec<u8> {
-    seq.iter()
-        .rev()
-        .map(|&b| match b {
-            b'A' | b'a' => b'T',
-            b'T' | b't' => b'A',
-            b'C' | b'c' => b'G',
-            b'G' | b'g' => b'C',
-            other => other,
-        })
-        .collect()
-}
-
-fn translate_dna(seq: &[u8], table: &HashMap<[u8; 3], u8>) -> String {
-    let mut protein = String::with_capacity(seq.len() / 3);
-    for codon in seq.chunks(3) {
-        if codon.len() < 3 {
-            break;
-        }
-        let key = [
-            codon[0].to_ascii_uppercase(),
-            codon[1].to_ascii_uppercase(),
-            codon[2].to_ascii_uppercase(),
-        ];
-        let aa = table.get(&key).copied().unwrap_or(b'X');
-        if aa == b'*' {
-            break;
-        }
-        protein.push(aa as char);
-    }
-    protein
-}
-
-fn codon_table(genetic_code: usize) -> HashMap<[u8; 3], u8> {
-    let codons = b"TTTTTTTTTTTTTTTTCCCCCCCCCCCCCCCCAAAAAAAAAAAAAAAAGGGGGGGGGGGGGGGG";
-    let second = b"TTTTCCCCAAAAGGGGTTTTCCCCAAAAGGGGTTTTCCCCAAAAGGGGTTTTCCCCAAAAGGGG";
-    let third = b"TCAGTCAGTCAGTCAGTCAGTCAGTCAGTCAGTCAGTCAGTCAGTCAGTCAGTCAGTCAGTCAG";
-    let standard = b"FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG";
-    let table11 = b"FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG";
-
-    let aa_table: &[u8] = match genetic_code {
-        11 => table11,
-        _ => standard,
-    };
-
-    let mut map = HashMap::new();
-    for i in 0..64 {
-        map.insert([codons[i], second[i], third[i]], aa_table[i]);
-    }
-    map
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crisprcas_core::cas_types::{GeneDefinition, GeneStatus, SystemModel};
 
     fn test_hit(id: &str, gene_name: &str, score: f64) -> HmmerHit {
         HmmerHit {

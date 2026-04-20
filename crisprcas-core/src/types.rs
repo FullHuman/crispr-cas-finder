@@ -1,3 +1,4 @@
+use crate::casparser::CasCluster;
 use serde::{Deserialize, Serialize};
 
 /// A single direct repeat within a CRISPR array.
@@ -142,7 +143,7 @@ impl Default for CasFinderConfig {
         Self {
             genetic_code: 11,
             metagenome: false,
-            workers: 1,
+            workers: 0,
             definition: "SubTyping".to_string(),
             vicinity: 600,
             clustering_threshold: 0,
@@ -152,4 +153,11 @@ impl Default for CasFinderConfig {
             cas_profiles_dir: None,
         }
     }
+}
+
+/// Combined CRISPR + Cas analysis result for higher-level library callers.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct FullAnalysisResult {
+    pub crisprs: Vec<CrisprArray>,
+    pub cas_clusters: Vec<CasCluster>,
 }

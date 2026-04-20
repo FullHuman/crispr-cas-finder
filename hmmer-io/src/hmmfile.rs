@@ -108,7 +108,10 @@ impl HmmFile {
         } else if first_line.starts_with("HMMER3/a") {
             self.format = P7_HMMFILE_3A;
         } else if first_line.starts_with("HMMER2.0") {
-            self.format = P7_HMMFILE_20;
+            return Err(HmmerError::Format(format!(
+                "Unsupported HMM file format: {}",
+                first_line
+            )));
         } else {
             return Err(HmmerError::Format(format!(
                 "Unrecognized HMM file format: {}",

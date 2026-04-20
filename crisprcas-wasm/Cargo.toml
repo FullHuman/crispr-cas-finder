@@ -11,8 +11,8 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 crisprcas-core = { path = "../crisprcas-core" }
 orphos-core = "0.1.0"
-hmmer-core = { workspace = true }
-hmmer-io   = { workspace = true }
+hmmer-core = { path = "../hmmer-core" }
+hmmer-io = { path = "../hmmer-io" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 wasm-bindgen = "0.2"

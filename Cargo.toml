@@ -6,35 +6,15 @@ members = [
   "hmmer-core",
     "hmmer-io",
     "hmmer-cli",
-    "hmmer-py",
     "hmmer-wasm",
 ]
-exclude = ["crisprcas-python"]
+exclude = ["crisprcas-python", "hmmer-py"]
 resolver = "2"
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
 license = "GPL-3.0-or-later"
-
-[workspace.dependencies]
-# Internal
-hmmer-core   = { path = "hmmer-core" }
-hmmer-io     = { path = "hmmer-io" }
-
-# External
-bitflags     = "2"
-bio          = "3"
-thiserror    = "2"
-rayon        = "1.11"
-ndarray      = "0.17"
-serde        = { version = "1", features = ["derive"] }
-clap         = { version = "4", features = ["derive"] }
-pyo3         = { version = "0.28" }
-wasm-bindgen = "0.2.118"
-seq_io       = "0.3"
-flate2       = "1"
-criterion    = { version = "0.5", features = ["html_reports"] }
 
 [profile.release]
 opt-level = 3

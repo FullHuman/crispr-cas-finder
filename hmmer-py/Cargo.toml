@@ -10,6 +10,6 @@ name = "hmmer"
 crate-type = ["cdylib"]
 
 [dependencies]
-pyo3 = { workspace = true, features = ["extension-module"] }
-hmmer-core = { workspace = true }
-hmmer-io   = { workspace = true }
+pyo3 = { version = "0.28", features = ["extension-module"] }
+hmmer-core = { path = "../hmmer-core" }
+hmmer-io = { path = "../hmmer-io" }

@@ -58,6 +58,7 @@ use crate::domaindef::DomainDef;
 ///
 /// Replaces the log-space `flogsum` inner loop with multiply-add operations,
 /// matching C HMMER's approach. Same interface as `backward_decode_fused_simd_odds`.
+#[allow(clippy::too_many_arguments)]
 pub fn backward_decode_prob_space(
     digital_sequence: &[u8],
     profile: &Profile,

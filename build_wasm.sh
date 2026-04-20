@@ -22,8 +22,11 @@ fi
 
 echo "==> Building crisprcas-wasm (release, threaded)..."
 # Threading flags (atomics, shared-memory, etc.) come from .cargo/config.toml.
+# Keep build-std scoped to this wasm build so host benches and tests do not
+# rebuild the standard library and trip duplicate lang item errors.
 # Do NOT set RUSTFLAGS here — it would override the config and drop linker flags.
 cargo build \
+  -Zbuild-std=panic_abort,std \
   -p crisprcas-wasm \
   --target wasm32-unknown-unknown \
   --release

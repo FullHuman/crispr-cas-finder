@@ -7,7 +7,6 @@ pub mod search;
 // Re-export key types at the pipeline module level
 pub use search::FilterReason;
 pub use search::PipelineStats;
-pub use search::PipelineTimings;
 pub use search::SearchMetrics;
 pub use search::SearchOutcome;
 pub use search::SearchPlan;

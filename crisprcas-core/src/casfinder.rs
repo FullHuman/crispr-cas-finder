@@ -1,10 +1,15 @@
+use crate::cas_pipeline::{
+    ModelDefinition, assign_hits_to_model, build_model_registry, codon_table, evaluate_cluster,
+    revcomp_dna, translate_dna,
+};
 use crate::cas_types::{
-    Cluster, DetectedSystem, GeneDefinition, GeneStatus, HmmerHit, ModelRegistry, RepliconTopology,
-    SearchResults, SequenceIndex, SystemHit, SystemModel, cluster_hits, select_best_solution,
+    HmmerHit, ModelRegistry, RepliconTopology, SearchResults, SequenceIndex, cluster_hits,
+    select_best_solution,
 };
 use crate::types::CasFinderConfig;
 use anyhow::{Context, Result};
 use bio::io::fasta::Reader as FastaReader;
+use hmmer_core::rayon::{ThreadPoolBuilder, prelude::*};
 use hmmer_core::{
     alphabet::Alphabet,
     background::BackgroundModel,
@@ -110,7 +115,7 @@ pub fn run_casfinder(
     );
 
     // ---- HMM search using hmmer-core pipeline ----
-    let all_hits = run_hmm_search(&profiles_dir, &needed_profiles, &seqs, &abc)?;
+    let all_hits = run_hmm_search(&profiles_dir, &needed_profiles, &seqs, &abc, cfg.workers)?;
 
     info!("HMM search found hits for {} profiles", all_hits.len());
 
@@ -145,7 +150,6 @@ pub fn run_casfinder(
             }
         }
     }
-
     if detected_systems.len() > 1 {
         detected_systems = select_best_solution(detected_systems);
     }
@@ -238,9 +242,8 @@ fn resolve_profiles_dir(cfg: &CasFinderConfig) -> Result<PathBuf> {
 
 /// Build a ModelRegistry from CAS XML definitions on disk.
 fn build_model_registry_from_dir(models_dir: &Path) -> Result<(ModelRegistry, Vec<String>)> {
-    let mut registry = ModelRegistry::new();
-    let mut fqns = Vec::new();
     let family = "CASFinder".to_string();
+    let mut models = Vec::new();
 
     for entry in fs::read_dir(models_dir)? {
         let entry = entry?;
@@ -251,114 +254,21 @@ fn build_model_registry_from_dir(models_dir: &Path) -> Result<(ModelRegistry, Ve
                 .map(|s| s.to_string_lossy().to_string())
                 .unwrap_or_default();
             let content = fs::read_to_string(&path)?;
-            let model = parse_cas_model_xml(&content, &model_name, &family)
-                .map_err(|e| anyhow::anyhow!("Failed to parse model {}: {}", model_name, e))?;
-            let fqn = model.fqn.clone();
-            registry.add(model);
-            fqns.push(fqn);
-        }
-    }
-    Ok((registry, fqns))
-}
-
-/// Parse a CAS model definition from XML content.
-fn parse_cas_model_xml(
-    content: &str,
-    model_name: &str,
-    family: &str,
-) -> std::result::Result<SystemModel, String> {
-    let converted = convert_cas_xml(content);
-
-    let fqn = format!("{}/{}", family, model_name);
-    let mut inter_gene_max_space: u32 = 20;
-    let mut min_mandatory_genes_required: u32 = 0;
-    let mut min_genes_required: u32 = 0;
-    let mut multi_loci = false;
-    let mut genes: Vec<GeneDefinition> = Vec::new();
-
-    for line in converted.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("<model ") || trimmed.starts_with("<model>") {
-            if let Some(val) = extract_xml_attr(trimmed, "inter_gene_max_space") {
-                inter_gene_max_space = val.parse().unwrap_or(20);
-            }
-            if let Some(val) = extract_xml_attr(trimmed, "min_mandatory_genes_required") {
-                min_mandatory_genes_required = val.parse().unwrap_or(0);
-            }
-            if let Some(val) = extract_xml_attr(trimmed, "min_genes_required") {
-                min_genes_required = val.parse().unwrap_or(0);
-            }
-            if let Some(val) = extract_xml_attr(trimmed, "multi_loci") {
-                multi_loci = val == "True" || val == "true" || val == "1";
-            }
-        } else if trimmed.starts_with("<gene ") {
-            let name = extract_xml_attr(trimmed, "name").unwrap_or_default();
-            let presence = extract_xml_attr(trimmed, "presence").unwrap_or_default();
-            let status = match presence.as_str() {
-                "mandatory" => GeneStatus::Mandatory,
-                "accessory" => GeneStatus::Accessory,
-                "forbidden" => GeneStatus::Forbidden,
-                _ => GeneStatus::Mandatory,
-            };
-            let loner = extract_xml_attr(trimmed, "loner")
-                .is_some_and(|v| v == "True" || v == "true" || v == "1");
-            let multi_system = extract_xml_attr(trimmed, "multi_system")
-                .is_some_and(|v| v == "True" || v == "true" || v == "1");
-            let system_ref = extract_xml_attr(trimmed, "system_ref");
-
-            genes.push(GeneDefinition {
-                name,
-                status,
-                loner,
-                multi_system,
-                system_ref,
-                exchangeables: Vec::new(),
-                inter_gene_max_space: None,
-                multi_model: false,
+            models.push(ModelDefinition {
+                name: model_name,
+                family: family.clone(),
+                content,
             });
         }
     }
 
-    Ok(SystemModel {
-        fqn,
-        family: family.to_string(),
-        name: model_name.to_string(),
-        version: None,
-        genes,
-        inter_gene_max_space,
-        min_mandatory_genes_required,
-        min_genes_required,
-        multi_loci,
-    })
-}
-
-/// Convert CASFinder XML (<system>) to <model> tags and strip # comments.
-fn convert_cas_xml(content: &str) -> String {
-    let mut out = String::with_capacity(content.len());
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with('#') {
-            continue;
-        }
-        let converted = line
-            .replace("<system ", "<model ")
-            .replace("<system>", "<model>")
-            .replace("</system>", "</model>");
-        out.push_str(&converted);
-        out.push('\n');
-    }
-    out
-}
-
-fn extract_xml_attr(tag: &str, attr_name: &str) -> Option<String> {
-    let pattern = format!("{}=\"", attr_name);
-    if let Some(start) = tag.find(&pattern) {
-        let value_start = start + pattern.len();
-        if let Some(end) = tag[value_start..].find('"') {
-            return Some(tag[value_start..value_start + end].to_string());
-        }
-    }
-    None
+    let fqns: Vec<String> = models
+        .iter()
+        .map(|model| format!("{}/{}", model.family, model.name))
+        .collect();
+    let registry = build_model_registry(&models)
+        .map_err(|e| anyhow::anyhow!("Failed to build CAS model registry: {}", e))?;
+    Ok((registry, fqns))
 }
 
 // ---------------------------------------------------------------------------
@@ -372,8 +282,8 @@ fn run_hmm_search(
     needed_profiles: &HashSet<String>,
     seqs: &[DigitalSequence],
     abc: &Alphabet,
+    workers: usize,
 ) -> Result<HashMap<String, Vec<HmmerHit>>> {
-    let bg = BackgroundModel::new(abc);
     let avg_len = if seqs.is_empty() {
         400
     } else {
@@ -382,57 +292,105 @@ fn run_hmm_search(
 
     let coverage_threshold = 0.4;
     let mut all_hits: HashMap<String, Vec<HmmerHit>> = HashMap::new();
+    let mut profile_names: Vec<String> = needed_profiles.iter().cloned().collect();
+    profile_names.sort_unstable();
+    let mut sequence_search_order: Vec<usize> = (0..seqs.len()).collect();
+    sequence_search_order.sort_unstable_by_key(|&index| (seqs[index].len(), index));
 
-    for profile_name in needed_profiles {
-        let hmm_path = profiles_dir.join(format!("{}.hmm", profile_name));
-        if !hmm_path.exists() {
-            continue;
-        }
-
-        let mut hfp = HmmFile::open(hmm_path.to_str().unwrap(), None)
-            .map_err(|e| anyhow::anyhow!("Failed to open {}: {}", profile_name, e))?;
-        let (_abc, hmm) = hfp
-            .read()
-            .map_err(|e| anyhow::anyhow!("Failed to parse {}: {}", profile_name, e))?;
-
-        let num_nodes = hmm.num_nodes;
-        let mut gm = Profile::new(num_nodes, abc);
-        modelconfig::profile_config(&hmm, &bg, &mut gm, avg_len, SearchMode::Local);
-
-        let query = SearchQuery::from_configured_profile(gm, bg.clone())
-            .map_err(|e| anyhow::anyhow!("Query config failed for {}: {}", profile_name, e))?;
-        let plan = SearchPlan::builder(query)
-            .filters(FilterPolicy::default())
-            .build();
-        let mut worker = plan
-            .spawn_worker(CapacityHints {
-                target_length: avg_len,
+    let pool = build_hmm_search_pool(workers)?;
+    info!(
+        "Searching {} HMM profiles across {} protein sequences with {} thread(s)",
+        profile_names.len(),
+        seqs.len(),
+        pool.current_num_threads()
+    );
+    let search_results = pool.install(|| {
+        profile_names
+            .par_iter()
+            .map(|profile_name| {
+                search_profile_hits(
+                    profiles_dir,
+                    profile_name,
+                    seqs,
+                    &sequence_search_order,
+                    abc,
+                    avg_len,
+                    coverage_threshold,
+                )
             })
-            .map_err(|e| anyhow::anyhow!("Spawn worker failed for {}: {}", profile_name, e))?;
+            .collect::<Vec<_>>()
+    });
 
-        let mut profile_hits = Vec::new();
+    for result in search_results {
+        if let Some((profile_name, profile_hits)) = result? {
+            all_hits.insert(profile_name, profile_hits);
+        }
+    }
 
-        for seq in seqs {
-            let report = worker
-                .search(seq)
-                .map_err(|e| anyhow::anyhow!("Search error {}: {}", profile_name, e))?;
+    Ok(all_hits)
+}
 
-            match &report.outcome {
-                SearchOutcome::Hit(hit) => {
-                    for domain in &hit.domains {
-                        if !domain.is_included {
-                            continue;
-                        }
-                        let prof_cov =
-                            (domain.hmm_to - domain.hmm_from + 1) as f64 / num_nodes as f64;
-                        if prof_cov < coverage_threshold {
-                            continue;
-                        }
-                        let seq_cov = (domain.alignment_end - domain.alignment_start + 1) as f64
-                            / seq.len() as f64;
-                        profile_hits.push(HmmerHit {
+fn search_profile_hits(
+    profiles_dir: &Path,
+    profile_name: &str,
+    seqs: &[DigitalSequence],
+    sequence_search_order: &[usize],
+    abc: &Alphabet,
+    avg_len: usize,
+    coverage_threshold: f64,
+) -> Result<Option<(String, Vec<HmmerHit>)>> {
+    let hmm_path = profiles_dir.join(format!("{}.hmm", profile_name));
+    if !hmm_path.exists() {
+        return Ok(None);
+    }
+
+    let bg = BackgroundModel::new(abc);
+    let mut hfp = HmmFile::open(hmm_path.to_str().unwrap(), None)
+        .map_err(|e| anyhow::anyhow!("Failed to open {}: {}", profile_name, e))?;
+    let (_abc, hmm) = hfp
+        .read()
+        .map_err(|e| anyhow::anyhow!("Failed to parse {}: {}", profile_name, e))?;
+
+    let num_nodes = hmm.num_nodes;
+    let mut gm = Profile::new(num_nodes, abc);
+    modelconfig::profile_config(&hmm, &bg, &mut gm, avg_len, SearchMode::Local);
+
+    let query = SearchQuery::from_configured_profile(gm, bg.clone())
+        .map_err(|e| anyhow::anyhow!("Query config failed for {}: {}", profile_name, e))?;
+    let plan = SearchPlan::builder(query)
+        .filters(FilterPolicy::default())
+        .build();
+    let mut worker = plan
+        .spawn_worker(CapacityHints {
+            target_length: avg_len,
+        })
+        .map_err(|e| anyhow::anyhow!("Spawn worker failed for {}: {}", profile_name, e))?;
+
+    let mut profile_hits: Vec<(usize, HmmerHit)> = Vec::new();
+
+    for &seq_index in sequence_search_order {
+        let seq = &seqs[seq_index];
+        let report = worker
+            .search(seq)
+            .map_err(|e| anyhow::anyhow!("Search error {}: {}", profile_name, e))?;
+
+        match &report.outcome {
+            SearchOutcome::Hit(hit) => {
+                for domain in &hit.domains {
+                    if !domain.is_included {
+                        continue;
+                    }
+                    let prof_cov = (domain.hmm_to - domain.hmm_from + 1) as f64 / num_nodes as f64;
+                    if prof_cov < coverage_threshold {
+                        continue;
+                    }
+                    let seq_cov = (domain.alignment_end - domain.alignment_start + 1) as f64
+                        / seq.len() as f64;
+                    profile_hits.push((
+                        seq_index,
+                        HmmerHit {
                             id: hit.name.clone(),
-                            gene_name: profile_name.clone(),
+                            gene_name: profile_name.to_string(),
                             seq_len: seq.len() as u32,
                             i_evalue: domain.log_pvalue.exp(),
                             score: domain.bitscore as f64,
@@ -440,195 +398,63 @@ fn run_hmm_search(
                             seq_coverage: seq_cov,
                             begin_match: domain.alignment_start as u32,
                             end_match: domain.alignment_end as u32,
-                        });
-                    }
+                        },
+                    ));
                 }
-                SearchOutcome::Filtered(FilterReason::NoDomains) => {
-                    // Domain detection failed but the sequence passed all
-                    // pre-filters (MSV, Viterbi, Forward).  Compute a
-                    // sequence-level bitscore from the Forward raw score and
-                    // emit a synthetic hit covering the whole protein.
-                    if let (Some(fwd_raw), Some(null_sc)) =
-                        (report.trace.forward_raw_score, report.trace.null_score)
-                    {
-                        let bitscore = (fwd_raw - null_sc) / std::f32::consts::LN_2;
-                        // Rough profile coverage: min(seq_len, model_len) / model_len
-                        let prof_cov = seq.len().min(num_nodes) as f64 / num_nodes as f64;
-                        if prof_cov >= coverage_threshold {
-                            profile_hits.push(HmmerHit {
+            }
+            SearchOutcome::Filtered(FilterReason::NoDomains) => {
+                if let (Some(fwd_raw), Some(null_sc)) =
+                    (report.trace.forward_raw_score, report.trace.null_score)
+                {
+                    let bitscore = (fwd_raw - null_sc) / std::f32::consts::LN_2;
+                    let prof_cov = seq.len().min(num_nodes) as f64 / num_nodes as f64;
+                    if prof_cov >= coverage_threshold {
+                        profile_hits.push((
+                            seq_index,
+                            HmmerHit {
                                 id: seq.name.clone(),
-                                gene_name: profile_name.clone(),
+                                gene_name: profile_name.to_string(),
                                 seq_len: seq.len() as u32,
-                                i_evalue: 0.0, // not available
+                                i_evalue: 0.0,
                                 score: bitscore as f64,
                                 profile_coverage: prof_cov,
                                 seq_coverage: 1.0,
                                 begin_match: 1,
                                 end_match: seq.len() as u32,
-                            });
-                        }
+                            },
+                        ));
                     }
                 }
-                _ => {}
             }
-        }
-
-        if !profile_hits.is_empty() {
-            all_hits.insert(profile_name.clone(), profile_hits);
+            _ => {}
         }
     }
 
-    Ok(all_hits)
+    profile_hits.sort_by_key(|(seq_index, _)| *seq_index);
+    let profile_hits: Vec<HmmerHit> = profile_hits.into_iter().map(|(_, hit)| hit).collect();
+
+    if profile_hits.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some((profile_name.to_string(), profile_hits)))
+    }
+}
+
+fn build_hmm_search_pool(workers: usize) -> Result<hmmer_core::rayon::ThreadPool> {
+    let builder = if workers > 0 {
+        ThreadPoolBuilder::new().num_threads(workers)
+    } else {
+        ThreadPoolBuilder::new()
+    };
+
+    builder
+        .build()
+        .map_err(|e| anyhow::anyhow!("Failed to build CasFinder HMM thread pool: {}", e))
 }
 
 // ---------------------------------------------------------------------------
 // System evaluation (clustering + scoring)
 // ---------------------------------------------------------------------------
-
-/// Assign HMMER hits to a model's genes, creating SystemHits.
-fn assign_hits_to_model(
-    model: &SystemModel,
-    hmmer_hits: &HashMap<String, Vec<HmmerHit>>,
-    seq_index: &SequenceIndex,
-) -> Vec<SystemHit> {
-    let mut best_by_protein: HashMap<&str, (SystemHit, bool)> = HashMap::new();
-
-    for gene in &model.genes {
-        let gene_names_to_check: Vec<(&str, bool)> = std::iter::once((gene.name.as_str(), false))
-            .chain(gene.exchangeables.iter().map(|e| (e.as_str(), true)))
-            .collect();
-
-        for (gene_name, is_exchangeable) in gene_names_to_check {
-            if let Some(hits) = hmmer_hits.get(gene_name) {
-                for hit in hits {
-                    if let Some(position) = seq_index.position(&hit.id) {
-                        let candidate = SystemHit {
-                            hit: hit.clone(),
-                            position,
-                            gene_ref: gene.name.clone(),
-                            gene_status: gene.status,
-                            model_fqn: model.fqn.clone(),
-                            is_exchangeable,
-                            locus_num: 1,
-                            counterpart: String::new(),
-                            used_in: Vec::new(),
-                        };
-                        let inherited = gene.system_ref.is_some();
-
-                        match best_by_protein.get_mut(hit.id.as_str()) {
-                            Some((best_hit, best_inherited)) => {
-                                if should_replace_assignment(
-                                    &candidate,
-                                    inherited,
-                                    best_hit,
-                                    *best_inherited,
-                                ) {
-                                    *best_hit = candidate;
-                                    *best_inherited = inherited;
-                                }
-                            }
-                            None => {
-                                best_by_protein.insert(hit.id.as_str(), (candidate, inherited));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    best_by_protein.into_values().map(|(hit, _)| hit).collect()
-}
-
-fn should_replace_assignment(
-    candidate: &SystemHit,
-    candidate_inherited: bool,
-    current: &SystemHit,
-    current_inherited: bool,
-) -> bool {
-    if candidate_inherited != current_inherited {
-        return !candidate_inherited;
-    }
-
-    candidate
-        .hit
-        .score
-        .total_cmp(&current.hit.score)
-        .then_with(|| {
-            candidate
-                .hit
-                .profile_coverage
-                .total_cmp(&current.hit.profile_coverage)
-        })
-        .then_with(|| {
-            candidate
-                .hit
-                .seq_coverage
-                .total_cmp(&current.hit.seq_coverage)
-        })
-        .then_with(|| current.is_exchangeable.cmp(&candidate.is_exchangeable))
-        .is_gt()
-}
-
-/// Evaluate a cluster against a model to produce a DetectedSystem (if valid).
-fn evaluate_cluster(c: &Cluster, model: &SystemModel) -> Option<DetectedSystem> {
-    let mandatory_names: HashSet<&str> = model.mandatory_genes().map(|g| g.name.as_str()).collect();
-    let accessory_names: HashSet<&str> = model.accessory_genes().map(|g| g.name.as_str()).collect();
-    let forbidden_names: HashSet<&str> = model.forbidden_genes().map(|g| g.name.as_str()).collect();
-
-    let found_genes: HashSet<&str> = c.hits.iter().map(|h| h.gene_ref.as_str()).collect();
-
-    let mandatory_found: Vec<String> = mandatory_names
-        .iter()
-        .filter(|g| found_genes.contains(*g))
-        .map(|g| g.to_string())
-        .collect();
-    let accessory_found: Vec<String> = accessory_names
-        .iter()
-        .filter(|g| found_genes.contains(*g))
-        .map(|g| g.to_string())
-        .collect();
-    let forbidden_found: Vec<String> = forbidden_names
-        .iter()
-        .filter(|g| found_genes.contains(*g))
-        .map(|g| g.to_string())
-        .collect();
-
-    if !forbidden_found.is_empty() {
-        return None;
-    }
-
-    let min_mandatory = model.min_mandatory_genes_required as usize;
-    let min_genes = model.min_genes_required as usize;
-    let total_found = mandatory_found.len() + accessory_found.len();
-
-    if mandatory_found.len() < min_mandatory || total_found < min_genes {
-        return None;
-    }
-
-    let score: f64 = c.hits.iter().map(|h| h.hit.score).sum();
-    let max_nb_genes = model.mandatory_count() + model.accessory_count();
-    let wholeness = if max_nb_genes > 0 {
-        total_found as f64 / max_nb_genes as f64
-    } else {
-        1.0
-    };
-
-    Some(DetectedSystem {
-        id: String::new(),
-        replicon: String::new(),
-        model_fqn: model.fqn.clone(),
-        score,
-        wholeness,
-        loci_count: 1,
-        occurrence: 0,
-        hits: c.hits.clone(),
-        state: "single_locus".to_string(),
-        mandatory_found,
-        accessory_found,
-        forbidden_found,
-    })
-}
 
 // ---------------------------------------------------------------------------
 // Gene prediction helpers
@@ -703,61 +529,10 @@ fn write_faa_from_genes(
     Ok(())
 }
 
-fn revcomp_dna(seq: &[u8]) -> Vec<u8> {
-    seq.iter()
-        .rev()
-        .map(|&b| match b {
-            b'A' | b'a' => b'T',
-            b'T' | b't' => b'A',
-            b'C' | b'c' => b'G',
-            b'G' | b'g' => b'C',
-            other => other,
-        })
-        .collect()
-}
-
-fn translate_dna(seq: &[u8], table: &HashMap<[u8; 3], u8>) -> String {
-    let mut protein = String::with_capacity(seq.len() / 3);
-    for codon in seq.chunks(3) {
-        if codon.len() < 3 {
-            break;
-        }
-        let key = [
-            codon[0].to_ascii_uppercase(),
-            codon[1].to_ascii_uppercase(),
-            codon[2].to_ascii_uppercase(),
-        ];
-        let aa = table.get(&key).copied().unwrap_or(b'X');
-        if aa == b'*' {
-            break;
-        }
-        protein.push(aa as char);
-    }
-    protein
-}
-
-fn codon_table(genetic_code: usize) -> HashMap<[u8; 3], u8> {
-    let codons = b"TTTTTTTTTTTTTTTTCCCCCCCCCCCCCCCCAAAAAAAAAAAAAAAAGGGGGGGGGGGGGGGG";
-    let second = b"TTTTCCCCAAAAGGGGTTTTCCCCAAAAGGGGTTTTCCCCAAAAGGGGTTTTCCCCAAAAGGGG";
-    let third = b"TCAGTCAGTCAGTCAGTCAGTCAGTCAGTCAGTCAGTCAGTCAGTCAGTCAGTCAGTCAGTCAG";
-    let standard = b"FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG";
-    let table11 = b"FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG";
-
-    let aa_table: &[u8] = match genetic_code {
-        11 => table11,
-        _ => standard,
-    };
-
-    let mut map = HashMap::new();
-    for i in 0..64 {
-        map.insert([codons[i], second[i], third[i]], aa_table[i]);
-    }
-    map
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cas_types::{GeneDefinition, GeneStatus, SystemModel};
 
     fn test_hit(id: &str, gene_name: &str, score: f64) -> HmmerHit {
         HmmerHit {

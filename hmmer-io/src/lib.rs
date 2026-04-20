@@ -1,6 +1,5 @@
 // hmmer-io: File I/O for HMM files, sequence databases, and alignments.
 
-pub mod h2_io;
 pub mod hmmfile;
 pub mod seq_reader;
 

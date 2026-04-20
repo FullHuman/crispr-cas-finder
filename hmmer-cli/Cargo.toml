@@ -6,17 +6,17 @@ license.workspace = true
 description = "HMMER command-line tools"
 
 [dependencies]
-hmmer-core.workspace = true
-hmmer-io.workspace = true
-clap.workspace = true
-rayon.workspace = true
+hmmer-core = { path = "../hmmer-core" }
+hmmer-io = { path = "../hmmer-io" }
+clap = { version = "4", features = ["derive"] }
+rayon = "1.11"
 
 [[bin]]
 name = "hmmsearch"
 path = "src/bin/hmmsearch.rs"
 
 [dev-dependencies]
-criterion.workspace = true
+criterion = { version = "0.5", features = ["html_reports"] }
 
 [[bench]]
 name = "hmmsearch_compare"

@@ -111,7 +111,6 @@ pub struct Hmm {
     pub effective_num_seq_float: Option<f32>,
     pub effective_num_seq: f64,
     pub max_length: Option<usize>,
-    pub creation_time: Option<String>,
     pub map: Option<Vec<i32>>,
     pub checksum: Option<u32>,
 
@@ -146,7 +145,6 @@ impl Hmm {
             effective_num_seq_float: None,
             effective_num_seq: -1.0,
             max_length: None,
-            creation_time: None,
             map: None,
             checksum: None,
             ev_params: None,
@@ -259,12 +257,6 @@ impl Hmm {
             }
         }
     }
-
-    /// Set the creation time to the current time.
-    pub fn set_ctime(&mut self) {
-        self.creation_time = Some(chrono_now());
-    }
-
     // ---------------------------------------------------------------
     // Renormalization and rescaling
     // ---------------------------------------------------------------
@@ -454,22 +446,6 @@ fn vec_fnorm(v: &mut [f32]) {
             *x /= sum;
         }
     }
-}
-
-/// Get a basic timestamp string (simplified replacement for C ctime())
-#[cfg(not(target_arch = "wasm32"))]
-fn chrono_now() -> String {
-    format!(
-        "{:?}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-    )
-}
-
-#[cfg(target_arch = "wasm32")]
-fn chrono_now() -> String {
-    String::from("wasm")
 }
 
 // ---------------------------------------------------------------
