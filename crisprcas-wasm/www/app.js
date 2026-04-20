@@ -28,7 +28,6 @@ function callWorker(type, payload, onProgress) {
 const fastaInput = document.getElementById("fasta-input");
 const fastaFileInput = document.getElementById("fasta-file");
 const fileName = document.getElementById("file-name");
-const loadExampleBtn = document.getElementById("load-example");
 const analyzeBtn = document.getElementById("analyze-btn");
 const downloadBtn = document.getElementById("download-btn");
 
@@ -243,11 +242,6 @@ function renderResults(items) {
 }
 
 // --- Event handlers ---
-loadExampleBtn.addEventListener("click", () => {
-  fastaInput.value = `>Example\nATGCGTACGATCGTACGATCGTACGATCGTACGATCGTACGATCGTACGATCGTACGATCGTACG`;
-  clearStatus();
-});
-
 fastaFileInput.addEventListener("change", async (event) => {
   const file = event.target.files?.[0];
   if (!file) {
