@@ -5,29 +5,16 @@
 // Model positions 1..M are interleaved across Q SIMD vectors.
 // Position k maps to vector q = (k-1) % Q, lane z = (k-1) / Q.
 //
-// Three precision tiers:
-//   MSV:     u8   in 16-lane vectors (Q16 = max(2, ceil((M-1)/16) + 1))
-//   Viterbi: i16  in 8-lane vectors  (Q8  = max(2, ceil((M-1)/8)  + 1))
-//   Forward: f32  in 4-lane vectors  (Q4  = max(2, ceil((M-1)/4)  + 1))
+// Two f32 precision tiers:
+//   Forward: f32  in 4-lane vectors  (Q4  = max(2, ceil((M-1)/4)  + 1)) — odds space
+//   Log:     f32  in 4-lane vectors  (Q4)  — log-space for MSV/Viterbi filters
 
 use crate::config::*;
 use crate::profile::Profile;
 
 // ---------- layout helpers ----------
 
-/// Number of u8x16 vectors for MSV.
-#[inline]
-pub fn nqb(m: usize) -> usize {
-    2.max(m.saturating_sub(1) / 16 + 1)
-}
-
-/// Number of i16x8 vectors for Viterbi.
-#[inline]
-pub fn nqw(m: usize) -> usize {
-    2.max(m.saturating_sub(1) / 8 + 1)
-}
-
-/// Number of f32x4 vectors for Forward.
+/// Number of f32x4 vectors for Forward / log-space tiers.
 #[inline]
 pub fn nqf(m: usize) -> usize {
     2.max(m.saturating_sub(1) / 4 + 1)
@@ -62,26 +49,7 @@ pub struct OptimizedProfile {
 
     pub kp: usize, // full alphabet size
 
-    pub q16: usize,
-    pub q8: usize,
     pub q4: usize,
-
-    // --- MSV (u8) ---
-    pub rbv: Vec<Vec<u8>>, // [kp][q16 * 16]
-    pub tbm_b: u8,
-    pub tec_b: u8,
-    pub tjb_b: u8,
-    pub scale_b: f32,
-    pub base_b: u8,
-    pub bias_b: u8,
-
-    // --- Viterbi (i16) ---
-    pub rwv: Vec<Vec<i16>>, // [kp][q8 * 8]
-    pub twv: Vec<i16>,      // [(7*q8 + q8) * 8]
-    pub xw: [[i16; 2]; NUM_XSTATES],
-    pub scale_w: f32,
-    pub base_w: i16,
-    pub ddbound_w: i16,
 
     // --- Forward (f32 odds ratios) ---
     pub rfv: Vec<Vec<f32>>, // [kp][q4 * 4] — match emission odds
@@ -101,8 +69,6 @@ pub struct OptimizedProfile {
 
 impl OptimizedProfile {
     pub fn new(m: usize, kp: usize) -> Self {
-        let q16 = nqb(m);
-        let q8 = nqw(m);
         let q4 = nqf(m);
 
         OptimizedProfile {
@@ -110,22 +76,7 @@ impl OptimizedProfile {
             l: 0,
             nj: 0.0,
             kp,
-            q16,
-            q8,
             q4,
-            rbv: vec![vec![0u8; q16 * 16]; kp],
-            tbm_b: 0,
-            tec_b: 0,
-            tjb_b: 0,
-            scale_b: 0.0,
-            base_b: 0,
-            bias_b: 0,
-            rwv: vec![vec![0i16; q8 * 8]; kp],
-            twv: vec![-32768i16; (NTSC_PER_Q * q8 + q8) * 8],
-            xw: [[0i16; 2]; NUM_XSTATES],
-            scale_w: 0.0,
-            base_w: 0,
-            ddbound_w: -32768,
             rfv: vec![vec![0.0f32; q4 * 4]; kp],
             riv: vec![vec![0.0f32; q4 * 4]; kp],
             tfv: vec![0.0f32; (NTSC_PER_Q * q4 + q4) * 4],
@@ -148,8 +99,6 @@ impl OptimizedProfile {
         om.max_length = gm.max_length;
         om.ev_params = gm.ev_params;
 
-        msv_conversion(gm, &mut om);
-        vit_conversion(gm, &mut om);
         fwd_conversion(gm, &mut om);
         log_conversion(gm, &mut om);
 
@@ -158,10 +107,6 @@ impl OptimizedProfile {
 
     /// Reconfigure length model for target length L.
     pub fn reconfigure_length(&mut self, l: usize) {
-        // MSV
-        self.tjb_b = unbiased_byteify(self.scale_b, (3.0 / (l as f32 + 3.0)).ln());
-
-        // Forward & Viterbi
         let pmove = (2.0 + self.nj) / (l as f32 + 2.0 + self.nj);
         let ploop = 1.0 - pmove;
 
@@ -171,13 +116,6 @@ impl OptimizedProfile {
         self.xf[XST_C][XTR_MOVE] = pmove;
         self.xf[XST_J][XTR_LOOP] = ploop;
         self.xf[XST_J][XTR_MOVE] = pmove;
-
-        self.xw[XST_N][XTR_MOVE] = wordify(self.scale_w, pmove.ln());
-        self.xw[XST_C][XTR_MOVE] = wordify(self.scale_w, pmove.ln());
-        self.xw[XST_J][XTR_MOVE] = wordify(self.scale_w, pmove.ln());
-        self.xw[XST_N][XTR_LOOP] = 0;
-        self.xw[XST_C][XTR_LOOP] = 0;
-        self.xw[XST_J][XTR_LOOP] = 0;
 
         self.l = l;
     }
@@ -212,195 +150,6 @@ impl OptimizedProfile {
         self.xf[XST_J][XTR_MOVE] = pmove;
         self.xf[XST_E][XTR_MOVE] = 0.5_f32; // exp(ln(0.5))
         self.xf[XST_E][XTR_LOOP] = 0.5_f32;
-    }
-}
-
-// ---------- Score conversion helpers ----------
-
-fn biased_byteify(scale: f32, bias: u8, sc: f32) -> u8 {
-    let s = -(scale * sc).round();
-    let b = if s > 255.0 - bias as f32 {
-        255.0
-    } else {
-        s + bias as f32
-    };
-    b as u8
-}
-
-fn unbiased_byteify(scale: f32, sc: f32) -> u8 {
-    let s = -(scale * sc).round();
-    if s > 255.0 { 255 } else { s as u8 }
-}
-
-fn wordify(scale: f32, sc: f32) -> i16 {
-    let s = (scale * sc).round();
-    s.clamp(-32768.0, 32767.0) as i16
-}
-
-// ---------- MSV conversion ----------
-
-fn msv_conversion(gm: &Profile, om: &mut OptimizedProfile) {
-    let m = gm.num_nodes;
-    let nq = om.q16;
-    let abc_k = gm.alphabet.canonical_size;
-    let kp = om.kp;
-
-    // Determine max emission score → bias
-    let mut max_sc = 0.0f32;
-    for x in 0..abc_k {
-        let rsc = gm.residue_scores_for(x);
-        for k in 1..=m {
-            let sc = rsc[k * PROFILE_NUM_EMISSIONS + PRsc::MatchScore as usize];
-            if sc > max_sc {
-                max_sc = sc;
-            }
-        }
-    }
-    om.scale_b = 3.0 / std::f32::consts::LN_2;
-    om.base_b = 190;
-    om.bias_b = unbiased_byteify(om.scale_b, -max_sc);
-
-    // Striped match emission scores
-    for x in 0..kp {
-        let rsc = gm.residue_scores_for(x);
-        let rsc_len = rsc.len();
-        for q in 0..nq {
-            let k_base = q + 1; // k = k_base + z * nq
-            for z in 0..16 {
-                let k = k_base + z * nq;
-                let idx = q * 16 + z;
-                if k <= m {
-                    let score_idx = k * PROFILE_NUM_EMISSIONS + PRsc::MatchScore as usize;
-                    if score_idx < rsc_len {
-                        om.rbv[x][idx] = biased_byteify(om.scale_b, om.bias_b, rsc[score_idx]);
-                    } else {
-                        om.rbv[x][idx] = 255;
-                    }
-                } else {
-                    om.rbv[x][idx] = 255; // -inf in biased uint8
-                }
-            }
-        }
-    }
-
-    // Transition costs
-    om.tbm_b = unbiased_byteify(
-        om.scale_b,
-        (2.0 / (gm.num_nodes as f32 * (gm.num_nodes as f32 + 1.0))).ln(),
-    );
-    om.tec_b = unbiased_byteify(om.scale_b, 0.5f32.ln());
-    om.tjb_b = unbiased_byteify(om.scale_b, (3.0 / (gm.target_length as f32 + 3.0)).ln());
-}
-
-// ---------- Viterbi conversion ----------
-
-fn vit_conversion(gm: &Profile, om: &mut OptimizedProfile) {
-    let m = gm.num_nodes;
-    let nq = om.q8;
-    let kp = om.kp;
-    let tsc = gm.transition_scores_raw();
-
-    om.scale_w = 500.0 / std::f32::consts::LN_2;
-    om.base_w = 12000;
-
-    // Striped match emission scores
-    for x in 0..kp {
-        let rsc = gm.residue_scores_for(x);
-        let rsc_len = rsc.len();
-        for q in 0..nq {
-            let k_base = q + 1;
-            for z in 0..8 {
-                let k = k_base + z * nq;
-                let idx = q * 8 + z;
-                if k <= m {
-                    let score_idx = k * PROFILE_NUM_EMISSIONS + PRsc::MatchScore as usize;
-                    if score_idx < rsc_len {
-                        om.rwv[x][idx] = wordify(om.scale_w, rsc[score_idx]);
-                    } else {
-                        om.rwv[x][idx] = -32768;
-                    }
-                } else {
-                    om.rwv[x][idx] = -32768;
-                }
-            }
-        }
-    }
-
-    // Transition scores: 7 per q-block, then DD
-    let tsc_len = tsc.len();
-    let mut j = 0usize;
-
-    // Map from archive t-index to current PTsc enum
-    let t_map: [(usize, i32, i16); 7] = [
-        (PTsc::BeginToMatch.idx(), -1, 0),
-        (PTsc::MatchToMatch.idx(), -1, 0),
-        (PTsc::InsertToMatch.idx(), -1, 0),
-        (PTsc::DeleteToMatch.idx(), -1, 0),
-        (PTsc::MatchToDelete.idx(), 0, 0),
-        (PTsc::MatchToInsert.idx(), 0, 0),
-        (PTsc::InsertToInsert.idx(), 0, -1),
-    ];
-
-    for q in 0..nq {
-        let k_base = q + 1;
-        for &(tg, kb_offset, maxval) in &t_map {
-            for z in 0..8 {
-                let kb = (k_base as i32 + kb_offset + z as i32 * nq as i32) as usize;
-                let idx = j * 8 + z;
-                let tsc_idx = kb * PROFILE_NUM_TRANSITIONS + tg;
-                if kb < m && tsc_idx < tsc_len {
-                    let val = wordify(om.scale_w, tsc[tsc_idx]);
-                    om.twv[idx] = if val <= maxval { val } else { maxval };
-                } else {
-                    om.twv[idx] = -32768;
-                }
-            }
-            j += 1;
-        }
-    }
-
-    // DD transitions at end
-    for q in 0..nq {
-        let k_base = q + 1;
-        for z in 0..8 {
-            let k = k_base + z * nq;
-            let idx = j * 8 + z;
-            let tsc_idx = k * PROFILE_NUM_TRANSITIONS + PTsc::DeleteToDelete.idx();
-            if k < m && tsc_idx < tsc_len {
-                om.twv[idx] = wordify(om.scale_w, tsc[tsc_idx]);
-            } else {
-                om.twv[idx] = -32768;
-            }
-        }
-        j += 1;
-    }
-
-    // Special state transitions
-    let ss = &gm.special_scores;
-    om.xw[XST_E][XTR_LOOP] = wordify(om.scale_w, ss.e_loop);
-    om.xw[XST_E][XTR_MOVE] = wordify(om.scale_w, ss.e_move);
-    om.xw[XST_N][XTR_MOVE] = wordify(om.scale_w, ss.n_move);
-    om.xw[XST_N][XTR_LOOP] = 0;
-    om.xw[XST_C][XTR_MOVE] = wordify(om.scale_w, ss.c_move);
-    om.xw[XST_C][XTR_LOOP] = 0;
-    om.xw[XST_J][XTR_MOVE] = wordify(om.scale_w, ss.j_move);
-    om.xw[XST_J][XTR_LOOP] = 0;
-
-    // DD bound for lazy-F evaluation
-    om.ddbound_w = -32768;
-    for k in 2..m.saturating_sub(1) {
-        let dd_idx = k * PROFILE_NUM_TRANSITIONS + PTsc::DeleteToDelete.idx();
-        let dm_idx = (k + 1) * PROFILE_NUM_TRANSITIONS + PTsc::DeleteToMatch.idx();
-        let bm_idx = (k + 1) * PROFILE_NUM_TRANSITIONS + PTsc::BeginToMatch.idx();
-        if dd_idx < tsc_len && dm_idx < tsc_len && bm_idx < tsc_len {
-            let dd = wordify(om.scale_w, tsc[dd_idx]) as i32;
-            let dm = wordify(om.scale_w, tsc[dm_idx]) as i32;
-            let bm = wordify(om.scale_w, tsc[bm_idx]) as i32;
-            let ddtmp = dd + dm - bm;
-            if ddtmp > om.ddbound_w as i32 {
-                om.ddbound_w = ddtmp.min(32767) as i16;
-            }
-        }
     }
 }
 

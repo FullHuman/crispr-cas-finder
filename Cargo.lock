@@ -376,7 +376,7 @@ dependencies = [
  "hmmer-core",
  "hmmer-io",
  "log",
- "orphos-core 0.2.0",
+ "orphos-core",
  "rayon",
  "serde",
  "serde_json",
@@ -392,7 +392,7 @@ dependencies = [
  "getrandom 0.2.16",
  "hmmer-core",
  "hmmer-io",
- "orphos-core 0.1.0",
+ "orphos-core",
  "rayon",
  "serde",
  "serde-wasm-bindgen",
@@ -1008,18 +1008,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f4779c6901a562440c3786d08192c6fbda7c1c2060edd10006b05ee35d10f2d"
 dependencies = [
  "num-traits",
-]
-
-[[package]]
-name = "orphos-core"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7cfbed2f5c495953f0b58eb277519ef4ee8baff4981cb07df39335d6618351de"
-dependencies = [
- "bio 2.3.0",
- "rayon",
- "thiserror 2.0.18",
- "wide",
 ]
 
 [[package]]
