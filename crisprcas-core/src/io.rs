@@ -12,13 +12,15 @@ pub fn write_gff(arrays: &[CrisprArray], writer: &mut impl Write) -> Result<()> 
         let strand = array.orientation.to_string();
         writeln!(
             writer,
-            "{seqid}\tCRISPRCasFinder\tCRISPR\t{start}\t{end}\t.\t{strand}\t.\tID={id};Name={name}",
+            "{seqid}\tCRISPRCasFinder\tCRISPR\t{start}\t{end}\t.\t{strand}\t.\tID={id};Name={name};Repeat_ID={repeat_id};CRISPRDirection={crispr_direction}",
             seqid = array.seq_id,
             start = array.start,
             end = array.end,
             strand = strand,
             id = crispr_id,
-            name = crispr_name
+            name = crispr_name,
+            repeat_id = array.repeat_id,
+            crispr_direction = array.crispr_direction,
         )?;
         for (j, repeat) in array.repeats.iter().enumerate() {
             let dr_id = format!("{}_dr{}", crispr_id, j + 1);

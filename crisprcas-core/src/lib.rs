@@ -9,10 +9,12 @@ pub mod casfinder;
 pub mod casparser;
 pub mod detect;
 pub mod io;
+pub mod repeat_db;
 pub mod types;
 
 pub use cas_pipeline::{GeneRecord, ModelDefinition};
 pub use casparser::{CasCluster, CasGene, GeneCoordinates};
+pub use repeat_db::{RepeatLookup, lookup_repeat};
 pub use types::{
     CasFinderConfig, CrisprArray, DetectionParams, FullAnalysisResult, Orientation, Repeat, Spacer,
 };
@@ -233,6 +235,8 @@ fn process_cluster(
 
     let orientation = infer_orientation(seq, array_start, array_end, params.flank);
 
+    let db_entry = repeat_db::lookup_repeat(&best_consensus);
+
     Some(CrisprArray {
         seq_id: seq_id.to_string(),
         start: array_start,
@@ -242,6 +246,8 @@ fn process_cluster(
         spacers,
         evidence_level,
         orientation,
+        repeat_id: db_entry.repeat_id,
+        crispr_direction: db_entry.crispr_direction,
     })
 }
 
