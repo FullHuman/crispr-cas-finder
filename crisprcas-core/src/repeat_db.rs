@@ -165,22 +165,10 @@ mod tests {
 
     #[test]
     fn reverse_repeat_returns_minus() {
-        // R20 → "AAAACTCCAAAAAACGCCTACAA" direction R → "-"
-        // Looking at the CSV: AAAAAGCTTGAGCAAAAACTAATA;R16;3;
-        // R1001 is listed as R → "-" in repeatDirection.tsv
-        // Use a known R-direction repeat from Repeat_List.csv
-        // R20 has direction "R" from Repeat_List.csv orientation field
-        // But the lookup goes through repeatDirection.tsv
-        // Let's just check that a repeat that resolves to R in repeatDirection gives "-"
-        let result = lookup_repeat("AAAAAGTGTTTCACTTTTGTCGTGCACTTTT"); // R20, orientation R in Repeat_List
-        // R20 in repeatDirection.tsv should give R → "-"
+        // R20: sequence "AAAAAGTGTTTCACTTTTGTCGTGCACTTTT" in Repeat_List.csv
+        // R20 in repeatDirection.tsv: "R [0,0.74   Confidence: HIGH]" → "-"
+        let result = lookup_repeat("AAAAAGTGTTTCACTTTTGTCGTGCACTTTT");
         assert_eq!(result.repeat_id, "R20");
-        // Direction from repeatDirection.tsv for R20
-        // We trust the database data here
-        assert!(
-            result.crispr_direction == "+" || result.crispr_direction == "-" || result.crispr_direction == "ND",
-            "unexpected direction: {}",
-            result.crispr_direction
-        );
+        assert_eq!(result.crispr_direction, "-");
     }
 }
