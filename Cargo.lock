@@ -363,6 +363,7 @@ dependencies = [
  "criterion",
  "env_logger",
  "log",
+ "rayon",
  "serde_json",
  "tempfile",
 ]
