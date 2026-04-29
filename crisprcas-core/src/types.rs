@@ -63,6 +63,14 @@ pub struct CrisprArray {
     pub evidence_level: usize,
     /// Potential orientation inferred from flanking AT% content.
     pub orientation: Orientation,
+    /// Canonical repeat ID from the CRISPRdb repeat database
+    /// (e.g. `"R10"`), or `"Unknown"` if the consensus repeat was not found.
+    pub repeat_id: String,
+    /// Orientation from the CRISPRDirection database (`"+"`, `"-"`, or `"ND"`).
+    ///
+    /// This is derived by looking up the `repeat_id` in `repeatDirection.tsv`
+    /// from the original CRISPRCasFinder supplementary data.
+    pub crispr_direction: String,
 }
 
 /// Algorithm-only parameters for CRISPR detection.
