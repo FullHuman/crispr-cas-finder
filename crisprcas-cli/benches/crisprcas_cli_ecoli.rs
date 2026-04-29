@@ -110,7 +110,7 @@ fn bench_crispr_only(c: &mut Criterion) {
     let mut group = c.benchmark_group("ecoli/crispr-only");
     group.sample_size(10);
     group.warm_up_time(Duration::from_secs(3));
-    group.measurement_time(Duration::from_secs(20));
+    group.measurement_time(Duration::from_secs(60));
     group.bench_function("rust", |b| {
         b.iter_batched(
             || TempDir::new().expect("failed to create temporary output directory"),
@@ -130,7 +130,7 @@ fn bench_full_pipeline(c: &mut Criterion) {
     group.warm_up_time(Duration::from_secs(5));
     // Each full pipeline sample is multi-second, so give Criterion enough
     // wall time to collect the configured sample size without warning.
-    group.measurement_time(Duration::from_secs(90));
+    group.measurement_time(Duration::from_secs(120));
     group.bench_function("rust", |b| {
         b.iter_batched(
             || TempDir::new().expect("failed to create temporary output directory"),
