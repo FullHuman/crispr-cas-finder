@@ -65,7 +65,11 @@ function buildCrisprItems(arrays) {
   return arrays.map((array, idx) => {
     const spacerCount = array.spacers ? array.spacers.length : 0;
     const orientationMap = { Forward: "+", Reverse: "-", Unknown: "." };
-    const dir = orientationMap[array.orientation] || ".";
+    // Prefer the CRISPRDirection DB value (crispr_direction) over the AT%-based
+    // orientation heuristic — the DB lookup matches the original CRISPRCasFinder.
+    const dir = array.crispr_direction && array.crispr_direction !== "ND"
+      ? array.crispr_direction
+      : (orientationMap[array.orientation] || ".");
     const drLen = array.consensus_repeat ? array.consensus_repeat.length : 0;
     return {
       type: "crispr",

@@ -92,30 +92,68 @@ pub struct RepeatLookup {
     pub crispr_direction: String,
 }
 
+/// Reverse-complement a DNA string (uppercase ACGT; unknown bases pass through).
+fn revcomp_str(seq: &str) -> String {
+    seq.chars()
+        .rev()
+        .map(|c| match c {
+            'A' => 'T',
+            'T' => 'A',
+            'C' => 'G',
+            'G' => 'C',
+            other => other,
+        })
+        .collect()
+}
+
+/// Flip a normalised direction symbol: `"+"` ↔ `"-"`, `"ND"` stays `"ND"`.
+fn flip_direction(dir: &str) -> String {
+    match dir {
+        "+" => "-".to_string(),
+        "-" => "+".to_string(),
+        other => other.to_string(),
+    }
+}
+
 /// Look up a consensus repeat sequence in the embedded database.
 ///
-/// The sequence is normalised to uppercase before matching.  If the sequence
-/// is not found the function returns `repeat_id = "Unknown"` and
+/// The sequence is normalised to uppercase before matching.  Both the
+/// forward sequence and its reverse complement are tried:
+/// * forward hit → direction as stored in the database
+/// * RC hit      → direction flipped (the array is on the opposite strand)
+///
+/// If neither is found the function returns `repeat_id = "Unknown"` and
 /// `crispr_direction = "ND"`.
 pub fn lookup_repeat(consensus_repeat: &str) -> RepeatLookup {
     let key = consensus_repeat.trim().to_uppercase();
     let seq_map = seq_to_id_map();
+    let dir_map = id_to_direction_map();
 
-    let repeat_id = seq_map.get(&key).cloned().unwrap_or_else(|| "Unknown".to_string());
-
-    let crispr_direction = if repeat_id == "Unknown" {
-        "ND".to_string()
-    } else {
-        let dir_map = id_to_direction_map();
-        match dir_map.get(&repeat_id) {
+    // ── Forward match ──────────────────────────────────────────────────────
+    if let Some(repeat_id) = seq_map.get(&key).cloned() {
+        let crispr_direction = match dir_map.get(&repeat_id) {
             Some(raw) => normalise_direction(raw),
             None => "ND".to_string(),
-        }
-    };
+        };
+        return RepeatLookup { repeat_id, crispr_direction };
+    }
+
+    // ── Reverse-complement match ────────────────────────────────────────────
+    // The detection algorithm may produce a consensus that is the RC of the
+    // canonical sequence stored in Repeat_List.csv.  In that case the array
+    // is on the opposite strand, so the direction must be flipped.
+    let rc_key = revcomp_str(&key);
+    if let Some(repeat_id) = seq_map.get(&rc_key).cloned() {
+        let crispr_direction = match dir_map.get(&repeat_id) {
+            Some(raw) => flip_direction(&normalise_direction(raw)),
+            None => "ND".to_string(),
+        };
+        return RepeatLookup { repeat_id, crispr_direction };
+    }
 
     RepeatLookup {
-        repeat_id,
-        crispr_direction,
+        repeat_id: "Unknown".to_string(),
+        crispr_direction: "ND".to_string(),
     }
 }
 
@@ -170,5 +208,40 @@ mod tests {
         let result = lookup_repeat("AAAAAGTGTTTCACTTTTGTCGTGCACTTTT");
         assert_eq!(result.repeat_id, "R20");
         assert_eq!(result.crispr_direction, "-");
+    }
+
+    #[test]
+    fn rc_of_forward_repeat_returns_minus() {
+        // R10 canonical sequence is "AAAAACCGCATCACTTATGATATGGA" → direction "+"
+        // If we supply its RC the lookup should still find R10 but return "-"
+        // (the array was detected on the opposite strand).
+        let canonical = "AAAAACCGCATCACTTATGATATGGA";
+        let rc: String = canonical
+            .chars()
+            .rev()
+            .map(|c| match c {
+                'A' => 'T', 'T' => 'A', 'C' => 'G', 'G' => 'C', other => other,
+            })
+            .collect();
+        let result = lookup_repeat(&rc);
+        assert_eq!(result.repeat_id, "R10");
+        assert_eq!(result.crispr_direction, "-");
+    }
+
+    #[test]
+    fn rc_of_reverse_repeat_returns_plus() {
+        // R20 canonical sequence → direction "-".
+        // Its RC should return "+" (flipped).
+        let canonical = "AAAAAGTGTTTCACTTTTGTCGTGCACTTTT";
+        let rc: String = canonical
+            .chars()
+            .rev()
+            .map(|c| match c {
+                'A' => 'T', 'T' => 'A', 'C' => 'G', 'G' => 'C', other => other,
+            })
+            .collect();
+        let result = lookup_repeat(&rc);
+        assert_eq!(result.repeat_id, "R20");
+        assert_eq!(result.crispr_direction, "+");
     }
 }
