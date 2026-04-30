@@ -20,21 +20,21 @@ if ! command -v wasm-bindgen &>/dev/null || [[ "$(wasm-bindgen --version)" != *"
   cargo install wasm-bindgen-cli --version "$WASM_BINDGEN_VERSION"
 fi
 
-echo "==> Building crisprcas-wasm (release, threaded)..."
+echo "==> Building crispr-cas-finder-wasm (release, threaded)..."
 # Threading flags (atomics, shared-memory, etc.) come from .cargo/config.toml.
 # Keep build-std scoped to this wasm build so host benches and tests do not
 # rebuild the standard library and trip duplicate lang item errors.
 # Do NOT set RUSTFLAGS here — it would override the config and drop linker flags.
 cargo build \
   -Zbuild-std=panic_abort,std \
-  -p crisprcas-wasm \
+  -p crispr-cas-finder-wasm \
   --target wasm32-unknown-unknown \
   --release
 
 echo "==> Running wasm-bindgen..."
 wasm-bindgen \
-  target/wasm32-unknown-unknown/release/crisprcas_wasm.wasm \
-  --out-dir crisprcas-wasm/www/pkg \
+  target/wasm32-unknown-unknown/release/crispr_cas_finder_wasm.wasm \
+  --out-dir crispr-cas-finder-wasm/www/pkg \
   --target web
 
-echo "==> Done. Output in crisprcas-wasm/www/pkg/"
+echo "==> Done. Output in crispr-cas-finder-wasm/www/pkg/"

@@ -1,5 +1,5 @@
 [package]
-name = "crisprcas-core"
+name = "crispr-cas-finder-core"
 version = "0.1.0"
 edition = "2024"
 description = "Core library for CRISPR-Cas detection"

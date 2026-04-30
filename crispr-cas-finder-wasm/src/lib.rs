@@ -1,4 +1,4 @@
-use crisprcas_core::{
+use crispr_cas_finder_core::{
     DetectionParams,
     cas_pipeline::{
         GeneRecord, ModelDefinition, assign_hits_to_model, build_faa_content, build_model_registry,
@@ -686,7 +686,7 @@ pub fn cas_finalize() -> Result<JsValue, JsValue> {
     );
 
     let cas_clusters: Vec<CasCluster> = from_search_results_with_gene_map(
-        &crisprcas_core::cas_types::SearchResults {
+        &crispr_cas_finder_core::cas_types::SearchResults {
             systems: detected_systems,
             rejected: Vec::new(),
             skipped_replicons: Vec::new(),
@@ -725,7 +725,7 @@ fn build_detection_params(options: &WasmFinderOptions) -> DetectionParams {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crisprcas_core::cas_types::{GeneDefinition, GeneStatus, SystemModel};
+    use crispr_cas_finder_core::cas_types::{GeneDefinition, GeneStatus, SystemModel};
 
     fn test_hit(id: &str, gene_name: &str, score: f64) -> HmmerHit {
         HmmerHit {

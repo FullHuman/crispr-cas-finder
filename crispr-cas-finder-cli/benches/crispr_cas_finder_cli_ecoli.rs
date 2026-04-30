@@ -1,4 +1,4 @@
-use crisprcas_cli::run_from_args;
+use crispr_cas_finder_cli::run_from_args;
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -14,14 +14,14 @@ fn workspace_root() -> PathBuf {
 
 fn ecoli_fasta() -> PathBuf {
     workspace_root()
-        .join("crisprcas-cli")
+        .join("crispr-cas-finder-cli")
         .join("data")
         .join("ecoli.fasta")
 }
 
 fn casfinder_data_root() -> PathBuf {
     workspace_root()
-        .join("crisprcas-cli")
+        .join("crispr-cas-finder-cli")
         .join("data")
         .join("CasFinder-2.0.3")
 }
@@ -58,7 +58,7 @@ fn assert_benchmark_inputs() {
 
 fn build_cli_args(outdir: &Path, include_cas: bool) -> Vec<OsString> {
     let mut args = vec![
-        OsString::from("crisprcas"),
+        OsString::from("crispr-cas-finder"),
         OsString::from("-i"),
         ecoli_fasta().into_os_string(),
         OsString::from("--outdir"),
@@ -86,7 +86,7 @@ fn run_cli_benchmark(outdir: &Path, include_cas: bool) {
 fn bench_crispr_only(c: &mut Criterion) {
     assert_benchmark_inputs();
 
-    let mut group = c.benchmark_group("crisprcas-cli/ecoli/crispr-only");
+    let mut group = c.benchmark_group("crispr-cas-finder-cli/ecoli/crispr-only");
     group.sample_size(10);
     group.warm_up_time(Duration::from_secs(3));
     group.measurement_time(Duration::from_secs(20));
@@ -103,7 +103,7 @@ fn bench_crispr_only(c: &mut Criterion) {
 fn bench_full_pipeline(c: &mut Criterion) {
     assert_benchmark_inputs();
 
-    let mut group = c.benchmark_group("crisprcas-cli/ecoli/with-cas-subtyping");
+    let mut group = c.benchmark_group("crispr-cas-finder-cli/ecoli/with-cas-subtyping");
     group.sample_size(10);
     group.warm_up_time(Duration::from_secs(5));
     // Each full pipeline sample is multi-second, so give Criterion enough

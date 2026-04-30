@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>CRISPR-Cas Finder</title>
+        <meta
+            name="description"
+            content="Run CRISPR repeat and CAS system detection directly in your browser using Rust + WebAssembly."
+        />
+        <link
+            rel="preconnect"
+            href="https://fonts.googleapis.com"
+            crossorigin
+        />
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+        <link
+            href="https://fonts.googleapis.com/css2?family=Geist:wght@200;300;400;500;600&family=Geist+Mono:wght@400;500&display=swap"
+            rel="stylesheet"
+            crossorigin
+        />
+        <link rel="stylesheet" href="style.css" />
+    </head>
+    <body>
+        <header class="site-header">
+            <div class="header-inner">
+                <span class="wordmark">CRISPR-CAS FINDER</span>
+            </div>
+        </header>
+
+        <div class="browser-notice">
+            <strong>Chrome recommended.</strong> This tool uses
+            SharedArrayBuffer and WebAssembly threads, which require
+            cross-origin isolation. It may not work correctly in Safari or other
+            browsers.
+        </div>
+
+        <div class="info-notice">
+            <div class="info-notice-inner">
+                <p>
+                    This is a browser-based WebAssembly port of
+                    <a
+                        href="https://crisprcas.i2bc.paris-saclay.fr"
+                        target="_blank"
+                        rel="noopener"
+                        >CRISPRCasFinder</a
+                    >
+                    (<a
+                        href="https://github.com/dcouvin/CRISPRCasFinder/tree/master"
+                        target="_blank"
+                        rel="noopener"
+                        >source on GitHub</a
+                    >), running entirely client-side &mdash; no data ever leaves
+                    your machine. If analysis is too slow on your device, the
+                    <a
+                        href="https://crisprcas.i2bc.paris-saclay.fr"
+                        target="_blank"
+                        rel="noopener"
+                        >official CRISPRCasFinder web server</a
+                    >
+                    offers the same analysis server-side, independent of your
+                    local hardware.
+                </p>
+            </div>
+        </div>
+
+        <main class="layout">
+            <section class="hero">
+                <h1>Run CRISPR-Cas detection in your browser</h1>
+                <p class="hero-sub">
+                    Full CRISPR repeat and CAS system detection, entirely
+                    client-side. No uploads, no servers, no waiting.
+                </p>
+            </section>
+
+            <section class="panel input-panel">
+                <div class="panel-head">
+                    <h2 class="detail">Input</h2>
+                </div>
+
+                <label class="block-label" for="fasta-input"
+                    >FASTA content</label
+                >
+                <textarea
+                    id="fasta-input"
+                    class="fasta"
+                    spellcheck="false"
+                    placeholder=">seq1&#10;ATGCGTAGCTAGCTAGCTAG..."
+                ></textarea>
+
+                <div class="file-row">
+                    <label class="btn-secondary file-label" for="fasta-file"
+                        >Upload FASTA</label
+                    >
+                    <input
+                        id="fasta-file"
+                        type="file"
+                        accept=".fa,.fasta,.fna,.txt"
+                    />
+                    <span id="file-name" class="file-name"
+                        >No file selected</span
+                    >
+                </div>
+            </section>
+
+            <section class="panel options-panel">
+                <h2 class="detail">CRISPR options</h2>
+                <div class="grid">
+                    <label>
+                        <span>Min DR</span>
+                        <input id="min-dr" type="number" min="1" value="23" />
+                    </label>
+                    <label>
+                        <span>Max DR</span>
+                        <input id="max-dr" type="number" min="1" value="55" />
+                    </label>
+                    <label>
+                        <span>Min spacer</span>
+                        <input id="min-sp" type="number" min="1" value="25" />
+                    </label>
+                    <label>
+                        <span>Max spacer</span>
+                        <input id="max-sp" type="number" min="1" value="60" />
+                    </label>
+                    <label>
+                        <span>Level min</span>
+                        <input
+                            id="level-min"
+                            type="number"
+                            min="1"
+                            max="4"
+                            value="1"
+                        />
+                    </label>
+                    <label>
+                        <span>Min spacer count</span>
+                        <input
+                            id="min-nb-spacers"
+                            type="number"
+                            min="1"
+                            value="1"
+                        />
+                    </label>
+                    <label class="checkbox">
+                        <input id="no-mism" type="checkbox" />
+                        <span>No mismatches</span>
+                    </label>
+                </div>
+
+                <h2 class="detail section-heading">CAS detection</h2>
+                <div class="grid">
+                    <label class="checkbox">
+                        <input id="enable-cas" type="checkbox" checked />
+                        <span>Enable CAS detection</span>
+                    </label>
+                    <label class="checkbox">
+                        <input id="metagenome" type="checkbox" />
+                        <span>Metagenome mode</span>
+                    </label>
+                </div>
+
+                <div class="actions">
+                    <button id="analyze-btn" class="btn-primary" type="button">
+                        Analyze
+                    </button>
+                    <button
+                        id="download-btn"
+                        class="btn-outline"
+                        type="button"
+                        disabled
+                    >
+                        Download JSON
+                    </button>
+                </div>
+            </section>
+
+            <section
+                id="status-panel"
+                class="panel status-panel hidden"
+                aria-live="polite"
+            ></section>
+
+            <section class="panel references-panel">
+                <h2 class="detail">References</h2>
+                <p class="references-intro">
+                    If you use this tool or the underlying algorithms, please
+                    cite:
+                </p>
+                <ol class="references-list">
+                    <li>
+                        Couvin D, Bernheim A, Toffano-Nioche C, Touchon M,
+                        Michalik J, N&eacute;ron B, Rocha EPC, Vergnaud G,
+                        Gautheret D, Pourcel C.
+                        <em
+                            >CRISPRCasFinder, an update of CRISRFinder, includes
+                            a portable version, enhanced performance and
+                            integrates search for Cas proteins.</em
+                        >
+                        Nucleic Acids Res. 2018 Jul 2;46(W1):W246&ndash;W251.
+                        <a
+                            href="https://doi.org/10.1093/nar/gky425"
+                            target="_blank"
+                            rel="noopener"
+                            >DOI: 10.1093/nar/gky425</a
+                        >
+                        &mdash; PMID: 29790974
+                    </li>
+                    <li>
+                        Grissa I, Vergnaud G, Pourcel C.
+                        <em
+                            >CRISPRFinder: a web tool to identify clustered
+                            regularly interspaced short palindromic repeats.</em
+                        >
+                        Nucleic Acids Res. 2007 Jul;35(Web Server
+                        issue):W52&ndash;7.
+                        <a
+                            href="https://doi.org/10.1093/nar/gkm360"
+                            target="_blank"
+                            rel="noopener"
+                            >DOI: 10.1093/nar/gkm360</a
+                        >
+                        &mdash; PMID: 17537822
+                    </li>
+                    <li>
+                        Abby SS, N&eacute;ron B, M&eacute;nager H, Touchon M,
+                        Rocha EP.
+                        <em
+                            >MacSyFinder: a program to mine genomes for
+                            molecular systems with an application to CRISPR-Cas
+                            systems.</em
+                        >
+                        PLoS One. 2014 Oct 17;9(10):e110726.
+                        <a
+                            href="https://doi.org/10.1371/journal.pone.0110726"
+                            target="_blank"
+                            rel="noopener"
+                            >DOI: 10.1371/journal.pone.0110726</a
+                        >
+                        &mdash; PMID: 25330359
+                    </li>
+                    <li>
+                        N&eacute;ron B, Denise R, Coluzzi C, Touchon M, Rocha
+                        EPC, Abby SS.
+                        <em
+                            >MacSyFinder v2: Improved modelling and search
+                            engine to identify molecular systems in genomes.</em
+                        >
+                        Peer Community Journal, 2023.
+                        <a
+                            href="https://doi.org/10.1101/2022.09.02.506364"
+                            target="_blank"
+                            rel="noopener"
+                            >DOI: 10.1101/2022.09.02.506364</a
+                        >
+                    </li>
+                </ol>
+            </section>
+
+            <section id="results-panel" class="panel results-panel hidden">
+                <div class="panel-head">
+                    <h2 class="detail">Results</h2>
+                    <p id="result-summary" class="summary"></p>
+                </div>
+
+                <div id="results-list" class="results-list"></div>
+            </section>
+        </main>
+
+        <footer class="site-footer">
+            <p>
+                CRISPR-Cas Finder &mdash; open source, client-side genomic
+                analysis
+            </p>
+        </footer>
+
+        <script type="module" src="app.js"></script>
+    </body>
+</html>

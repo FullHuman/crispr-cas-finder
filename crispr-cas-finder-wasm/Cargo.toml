@@ -1,15 +1,15 @@
 [package]
-name = "crisprcas-wasm"
+name = "crispr-cas-finder-wasm"
 version = "0.1.0"
 edition = "2024"
-description = "WebAssembly bindings for crisprcas-core"
+description = "WebAssembly bindings for crispr-cas-finder-core"
 license = "GPL-3.0-or-later"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-crisprcas-core = { path = "../crisprcas-core" }
+crispr-cas-finder-core = { path = "../crispr-cas-finder-core" }
 orphos-core = "0.2.0"
 hmmer-core = { path = "../hmmer-core" }
 hmmer-io = { path = "../hmmer-io" }

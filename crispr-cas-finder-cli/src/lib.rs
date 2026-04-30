@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use crisprcas_core::{
+use crispr_cas_finder_core::{
     CasFinderConfig, CrisprArray, DetectionParams, FullAnalysisResult,
     casfinder::run_casfinder,
     casparser::from_search_results,
@@ -14,7 +14,7 @@ use crisprcas_core::{
 use log::{error, info};
 
 #[derive(Parser, Debug)]
-#[command(name = "CRISPRCasFinder", author, version = env!("CARGO_PKG_VERSION"), about = "Find CRISPR arrays and Cas proteins in genomes")]
+#[command(name = "crispr-cas-finder", author, version = env!("CARGO_PKG_VERSION"), about = "Find CRISPR arrays and Cas proteins in genomes")]
 #[command(args_conflicts_with_subcommands = true)]
 pub struct Cli {
     #[arg(short = 'i', long = "in", value_name = "FILE")]
@@ -196,7 +196,7 @@ where
 
 pub fn run(cli: Cli) -> Result<()> {
     info!(
-        "Starting CRISPRCasFinder version {}",
+        "Starting crispr-cas-finder version {}",
         env!("CARGO_PKG_VERSION")
     );
 

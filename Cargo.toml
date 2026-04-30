@@ -1,14 +1,14 @@
 [workspace]
 members = [
-  "crisprcas-core",
-  "crisprcas-cli",
-  "crisprcas-wasm",
+  "crispr-cas-finder-core",
+  "crispr-cas-finder-cli",
+  "crispr-cas-finder-wasm",
   "hmmer-core",
-    "hmmer-io",
-    "hmmer-cli",
-    "hmmer-wasm",
+  "hmmer-io",
+  "hmmer-cli",
+  "hmmer-wasm",
 ]
-exclude = ["crisprcas-python", "hmmer-py"]
+exclude = ["crispr-cas-finder-python", "hmmer-py"]
 resolver = "2"
 
 [workspace.package]

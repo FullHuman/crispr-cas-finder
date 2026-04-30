@@ -1,5 +1,5 @@
 [package]
-name = "crisprcas-cli"
+name = "crispr-cas-finder-cli"
 version = "0.1.0"
 edition = "2024"
 description = "CLI for CRISPR-Cas detection"
@@ -12,10 +12,10 @@ clap = { version = "4", features = ["derive"] }
 env_logger = "0.11"
 log = "0.4"
 serde_json = "1"
-crisprcas-core = { path = "../crisprcas-core" }
+crispr-cas-finder-core = { path = "../crispr-cas-finder-core" }
 
 [[bin]]
-name = "crisprcas"
+name = "crispr-cas-finder"
 path = "src/main.rs"
 
 [dev-dependencies]
@@ -23,5 +23,9 @@ criterion = { version = "0.5", features = ["html_reports"] }
 tempfile = "3"
 
 [[bench]]
-name = "crisprcas_cli_ecoli"
+name = "crispr_cas_finder_cli_ecoli"
+harness = false
+
+[[bench]]
+name = "crispr_cas_finder_compare"
 harness = false

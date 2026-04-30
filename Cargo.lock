@@ -353,13 +353,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "crisprcas-cli"
+name = "crispr-cas-finder-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "bio 3.0.0",
  "clap",
- "crisprcas-core",
+ "crispr-cas-finder-core",
  "criterion",
  "env_logger",
  "log",
@@ -368,7 +368,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "crisprcas-core"
+name = "crispr-cas-finder-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -383,12 +383,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "crisprcas-wasm"
+name = "crispr-cas-finder-wasm"
 version = "0.1.0"
 dependencies = [
  "bio 3.0.0",
  "console_error_panic_hook",
- "crisprcas-core",
+ "crispr-cas-finder-core",
  "getrandom 0.2.16",
  "hmmer-core",
  "hmmer-io",

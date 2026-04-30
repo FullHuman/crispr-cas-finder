@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::Parser;
-use crisprcas_cli::{Cli, run};
+use crispr_cas_finder_cli::{Cli, run};
 
 fn main() -> Result<()> {
     env_logger::init();

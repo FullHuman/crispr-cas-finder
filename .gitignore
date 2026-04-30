@@ -21,3 +21,6 @@ target
 #.idea/
 
 .DS_Store
+
+# Original CRISPRCasFinder (cloned for benchmarking, not part of the repo)
+vendor/

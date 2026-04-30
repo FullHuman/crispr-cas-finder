@@ -1,8 +1,8 @@
 [package]
-name = "crisprcas-python"
+name = "crispr-cas-finder-python"
 version = "0.1.0"
 edition = "2024"
-description = "Python bindings for crisprcas-core"
+description = "Python bindings for crispr-cas-finder-core"
 license = "GPL-3.0-or-later"
 
 [lib]
@@ -10,6 +10,6 @@ name = "crispr_cas_finder"
 crate-type = ["cdylib"]
 
 [dependencies]
-crisprcas-core = { path = "../crisprcas-core" }
+crispr-cas-finder-core = { path = "../crispr-cas-finder-core" }
 pyo3 = { version = "0.27.1", features = ["extension-module"] }
 serde_json = "1.0"

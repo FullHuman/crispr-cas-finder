@@ -1,4 +1,4 @@
-use crisprcas_core::{DetectionParams, detect_crisprs_in_fasta_str};
+use crispr_cas_finder_core::{DetectionParams, detect_crisprs_in_fasta_str};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
