@@ -129,11 +129,7 @@ fn run_rust_crispr_only(outdir: &Path) {
 
 fn bench_crispr_only_comparison(c: &mut Criterion) {
     let fasta = ecoli_fasta();
-    assert!(
-        fasta.is_file(),
-        "FASTA not found at {}",
-        fasta.display()
-    );
+    assert!(fasta.is_file(), "FASTA not found at {}", fasta.display());
 
     let mut group = c.benchmark_group("crispr-only/ecoli");
     group.sample_size(10);

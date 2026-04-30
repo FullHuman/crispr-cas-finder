@@ -701,17 +701,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc0fef456e4baa96da950455cd02c081ca953b141298e41db3fc7e36b1da849c"
 
 [[package]]
-name = "hmmer-cli"
-version = "0.1.0"
-dependencies = [
- "clap",
- "criterion",
- "hmmer-core",
- "hmmer-io",
- "rayon",
-]
-
-[[package]]
 name = "hmmer-core"
 version = "0.1.0"
 dependencies = [
@@ -730,17 +719,6 @@ dependencies = [
  "bio 3.0.0",
  "hmmer-core",
  "thiserror 2.0.18",
-]
-
-[[package]]
-name = "hmmer-wasm"
-version = "0.1.0"
-dependencies = [
- "hmmer-core",
- "hmmer-io",
- "serde",
- "serde-wasm-bindgen",
- "wasm-bindgen",
 ]
 
 [[package]]

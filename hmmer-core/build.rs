@@ -14,7 +14,7 @@ fn main() {
     writeln!(f, "#[allow(clippy::approx_constant)]").unwrap();
     writeln!(f, "static FLOGSUM_LOOKUP: [f32; {}] = [", LOGSUM_TABLE_SIZE).unwrap();
     for i in 0..LOGSUM_TABLE_SIZE {
-        let val = (1.0_f64 + (-(i as f64) / LOGSUM_SCALE).exp()).ln() as f32;
+        let val = (-(i as f64) / LOGSUM_SCALE).exp().ln_1p() as f32;
         writeln!(f, "    {val:?},").unwrap();
     }
     writeln!(f, "];").unwrap();

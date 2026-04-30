@@ -15,12 +15,10 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 
 /// Raw `Repeat_List.csv` embedded at compile time.
-static REPEAT_LIST_CSV: &str =
-    include_str!("../data/Repeat_List.csv");
+static REPEAT_LIST_CSV: &str = include_str!("../data/Repeat_List.csv");
 
 /// Raw `repeatDirection.tsv` embedded at compile time.
-static REPEAT_DIRECTION_TSV: &str =
-    include_str!("../data/repeatDirection.tsv");
+static REPEAT_DIRECTION_TSV: &str = include_str!("../data/repeatDirection.tsv");
 
 // ---------------------------------------------------------------------------
 // Lazy-initialised lookup tables
@@ -135,7 +133,10 @@ pub fn lookup_repeat(consensus_repeat: &str) -> RepeatLookup {
             Some(raw) => normalise_direction(raw),
             None => "ND".to_string(),
         };
-        return RepeatLookup { repeat_id, crispr_direction };
+        return RepeatLookup {
+            repeat_id,
+            crispr_direction,
+        };
     }
 
     // ── Reverse-complement match ────────────────────────────────────────────
@@ -148,7 +149,10 @@ pub fn lookup_repeat(consensus_repeat: &str) -> RepeatLookup {
             Some(raw) => flip_direction(&normalise_direction(raw)),
             None => "ND".to_string(),
         };
-        return RepeatLookup { repeat_id, crispr_direction };
+        return RepeatLookup {
+            repeat_id,
+            crispr_direction,
+        };
     }
 
     RepeatLookup {
@@ -220,7 +224,11 @@ mod tests {
             .chars()
             .rev()
             .map(|c| match c {
-                'A' => 'T', 'T' => 'A', 'C' => 'G', 'G' => 'C', other => other,
+                'A' => 'T',
+                'T' => 'A',
+                'C' => 'G',
+                'G' => 'C',
+                other => other,
             })
             .collect();
         let result = lookup_repeat(&rc);
@@ -237,7 +245,11 @@ mod tests {
             .chars()
             .rev()
             .map(|c| match c {
-                'A' => 'T', 'T' => 'A', 'C' => 'G', 'G' => 'C', other => other,
+                'A' => 'T',
+                'T' => 'A',
+                'C' => 'G',
+                'G' => 'C',
+                other => other,
             })
             .collect();
         let result = lookup_repeat(&rc);

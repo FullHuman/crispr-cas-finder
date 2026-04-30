@@ -5,8 +5,6 @@ members = [
   "crispr-cas-finder-wasm",
   "hmmer-core",
   "hmmer-io",
-  "hmmer-cli",
-  "hmmer-wasm",
 ]
 exclude = ["crispr-cas-finder-python", "hmmer-py"]
 resolver = "2"
