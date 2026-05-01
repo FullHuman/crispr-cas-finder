@@ -1,5 +1,5 @@
 {
-  "outputDirectory": "crisprcas-wasm/www",
+  "outputDirectory": "crispr-cas-finder-wasm/www",
   "headers": [
     {
       "source": "/(.*)",
