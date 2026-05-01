@@ -24,3 +24,6 @@ target
 
 # Original CRISPRCasFinder (cloned for benchmarking, not part of the repo)
 vendor/
+
+# WASM
+crispr-cas-finder-wasm/www/pkg/
