@@ -140,6 +140,29 @@ pub struct Cli {
 }
 
 impl Cli {
+    /// Resolve the default CasFinder data root.
+    ///
+    /// Search order:
+    ///   1. Directory that contains the running binary (installed layout).
+    ///   2. CARGO_MANIFEST_DIR at compile time (development layout).
+    fn default_cas_data_root() -> Option<PathBuf> {
+        // 1. Next to the binary (production / installed)
+        if let Ok(exe) = std::env::current_exe()
+            && let Some(exe_dir) = exe.parent()
+        {
+            let candidate = exe_dir.join("data").join("CasFinder-2.0.3");
+            if candidate.is_dir() {
+                return Some(candidate);
+            }
+        }
+        // 2. Compile-time manifest directory (cargo run / dev builds)
+        let dev = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/data/CasFinder-2.0.3"));
+        if dev.is_dir() {
+            return Some(dev);
+        }
+        None
+    }
+
     fn detection_params(&self) -> DetectionParams {
         DetectionParams {
             min_repeat_length: self.min_repeat_length,
@@ -166,6 +189,24 @@ impl Cli {
     }
 
     fn casfinder_config(&self) -> CasFinderConfig {
+        let data_root = Self::default_cas_data_root();
+
+        let cas_models_dir = self.cas_models_dir.as_ref().map(PathBuf::from).or_else(|| {
+            data_root
+                .as_ref()
+                .map(|root| root.join(format!("DEF-{}-2.0.3", self.definition)))
+        });
+
+        let cas_profiles_dir = self
+            .cas_profiles_dir
+            .as_ref()
+            .map(PathBuf::from)
+            .or_else(|| {
+                data_root
+                    .as_ref()
+                    .map(|root| root.join("CASprofiles-2.0.3"))
+            });
+
         CasFinderConfig {
             genetic_code: self.genetic_code,
             metagenome: self.metagenome,
@@ -175,8 +216,8 @@ impl Cli {
             clustering_threshold: self.clustering_threshold,
             quiet: self.quiet,
             fast: self.fast,
-            cas_models_dir: self.cas_models_dir.as_ref().map(std::path::PathBuf::from),
-            cas_profiles_dir: self.cas_profiles_dir.as_ref().map(std::path::PathBuf::from),
+            cas_models_dir,
+            cas_profiles_dir,
         }
     }
 
