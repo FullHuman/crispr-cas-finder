@@ -24,7 +24,7 @@ jobs:
       version: ${{ steps.get_version.outputs.version }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
 
       - name: Get version
         id: get_version
@@ -76,12 +76,12 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add ${{ matrix.target }} --toolchain stable
 
       - name: Install cross (for cross-compilation)
         if: matrix.cross

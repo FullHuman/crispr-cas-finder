@@ -27,10 +27,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v5
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: actions/checkout@v6
 
       - name: Verify versions match
         run: |
