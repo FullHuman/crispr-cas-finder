@@ -11,7 +11,7 @@ use std::path::PathBuf;
 // ---------------------------------------------------------------------------
 
 /// A single direct repeat within a CRISPR array.
-#[pyclass(frozen, module = "crispr_cas_finder")]
+#[pyclass(frozen, module = "crispr_cas_finder", skip_from_py_object)]
 #[derive(Clone)]
 pub struct Repeat {
     /// 1-based start position on the sequence.
@@ -40,7 +40,7 @@ impl Repeat {
 }
 
 /// A single spacer between two direct repeats.
-#[pyclass(frozen, module = "crispr_cas_finder")]
+#[pyclass(frozen, module = "crispr_cas_finder", skip_from_py_object)]
 #[derive(Clone)]
 pub struct Spacer {
     /// 1-based start position on the sequence.
@@ -95,7 +95,7 @@ impl Spacer {
 /// crispr_direction : str
 ///     Direction from the CRISPRDirection database (``"+"``, ``"-"``, or
 ///     ``"ND"``).
-#[pyclass(frozen, module = "crispr_cas_finder")]
+#[pyclass(frozen, module = "crispr_cas_finder", skip_from_py_object)]
 #[derive(Clone)]
 pub struct CrisprArray {
     #[pyo3(get)]

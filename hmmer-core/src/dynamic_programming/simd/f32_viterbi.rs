@@ -44,6 +44,9 @@ pub fn viterbi_filter_f32(dsq: &[u8], l: usize, om: &OptimizedProfile) -> f32 {
 
     xb = n_move_f; // B(0) = N(0) + n_move = 0 + n_move
 
+    // DD transitions have a fixed position in the profile.
+    let dd_base = NTSC_PER_Q * q;
+
     for &residue in &dsq[..l] {
         let xi = residue as usize;
         let rsc = if xi < om.kp { &om.rlv[xi] } else { &om.rlv[0] };
@@ -106,10 +109,10 @@ pub fn viterbi_filter_f32(dsq: &[u8], l: usize, om: &OptimizedProfile) -> f32 {
         dcv = shr_f32x4(dcv);
         dmx[0] = neg_inf_v; // D(i, k=1) = -inf always
 
-        let dd_base = NTSC_PER_Q * q;
         for (qi, dmx_qi) in dmx.iter_mut().enumerate() {
             let dd_v = F32x4::from_slice(&om.tlv[(dd_base + qi) * 4..(dd_base + qi) * 4 + 4]);
             *dmx_qi = (*dmx_qi).simd_max(dcv);
+            xe_v = xe_v.simd_max(*dmx_qi);
             dcv = *dmx_qi + dd_v;
         }
 
@@ -125,16 +128,12 @@ pub fn viterbi_filter_f32(dsq: &[u8], l: usize, om: &OptimizedProfile) -> f32 {
                     any_change = true;
                 }
                 *dmx_qi = new_val;
+                xe_v = xe_v.simd_max(new_val);
                 dcv = new_val + dd_v;
             }
             if !any_change {
                 break;
             }
-        }
-
-        // Add D contributions to xE (local mode: D exits to E too)
-        for &v in &dmx {
-            xe_v = xe_v.simd_max(v);
         }
 
         let exit_score = xe_v.reduce_max();

@@ -7,7 +7,7 @@ license = "GPL-3.0-or-later"
 
 [dependencies]
 anyhow = "1"
-bio = "3"
+bio = "4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 log = "0.4"

@@ -11,4 +11,4 @@ crate-type = ["cdylib"]
 
 [dependencies]
 crispr-cas-finder-core = { path = "../crispr-cas-finder-core" }
-pyo3 = { version = "0.27.1", features = ["extension-module"] }
+pyo3 = { version = "0.29.0", features = ["extension-module"] }

@@ -23,6 +23,9 @@ pub struct ForwardResult {
 pub fn forward_filter(dsq: &[u8], l: usize, om: &OptimizedProfile) -> ForwardResult {
     let q = om.q4;
     let zero_v = f32x4::splat(0.0);
+    // Transition layout is invariant across sequence rows.
+    let dd_base = NTSC_PER_Q * q;
+    let regular_tfv = &om.tfv[..dd_base * 4];
 
     // Single MDI row (parser mode — O(M) memory)
     let mut mmx = vec![f32x4::splat(0.0); q];
@@ -55,21 +58,19 @@ pub fn forward_filter(dsq: &[u8], l: usize, om: &OptimizedProfile) -> ForwardRes
         let mut dpv = shr_f32x4(zero_v, dmx[q - 1]);
         let mut ipv = shr_f32x4(zero_v, imx[q - 1]);
 
-        let mut tsc_idx = 0usize;
-
-        for qi in 0..q {
-            // Load emission odds ratios
-            let rsc_v = f32x4::from_slice(&rsc[qi * 4..qi * 4 + 4]);
-
-            // Load transitions for this q-block
-            let tbm_v = f32x4::from_slice(&om.tfv[tsc_idx * 4..tsc_idx * 4 + 4]);
-            tsc_idx += 1;
-            let tmm_v = f32x4::from_slice(&om.tfv[tsc_idx * 4..tsc_idx * 4 + 4]);
-            tsc_idx += 1;
-            let tim_v = f32x4::from_slice(&om.tfv[tsc_idx * 4..tsc_idx * 4 + 4]);
-            tsc_idx += 1;
-            let tdm_v = f32x4::from_slice(&om.tfv[tsc_idx * 4..tsc_idx * 4 + 4]);
-            tsc_idx += 1;
+        // Each q-block contains seven adjacent SIMD transition vectors.
+        // Chunking exposes that layout directly and removes the incrementing
+        // transition index and its repeated scale/address calculations.
+        for (qi, (rsc_q, tsc_q)) in rsc
+            .chunks_exact(4)
+            .zip(regular_tfv.chunks_exact(NTSC_PER_Q * 4))
+            .enumerate()
+        {
+            let rsc_v = f32x4::from_slice(rsc_q);
+            let tbm_v = f32x4::from_slice(&tsc_q[0..4]);
+            let tmm_v = f32x4::from_slice(&tsc_q[4..8]);
+            let tim_v = f32x4::from_slice(&tsc_q[8..12]);
+            let tdm_v = f32x4::from_slice(&tsc_q[12..16]);
 
             // M(i,q) = (B*tBM + M(i-1,q-1)*tMM + I(i-1,q-1)*tIM + D(i-1,q-1)*tDM) * rsc
             let mut sv = xb_v * tbm_v;
@@ -89,24 +90,21 @@ pub fn forward_filter(dsq: &[u8], l: usize, om: &OptimizedProfile) -> ForwardRes
             dmx[qi] = dcv;
 
             // D->D carry: D(i,q+1) partial via M->D
-            let tmd_v = f32x4::from_slice(&om.tfv[tsc_idx * 4..tsc_idx * 4 + 4]);
-            tsc_idx += 1;
+            let tmd_v = f32x4::from_slice(&tsc_q[16..20]);
             dcv = sv * tmd_v;
 
             // I(i,q) = M(i-1,q)*tMI + I(i-1,q)*tII
-            let tmi_v = f32x4::from_slice(&om.tfv[tsc_idx * 4..tsc_idx * 4 + 4]);
-            tsc_idx += 1;
-            let tii_v = f32x4::from_slice(&om.tfv[tsc_idx * 4..tsc_idx * 4 + 4]);
-            tsc_idx += 1;
+            let tmi_v = f32x4::from_slice(&tsc_q[20..24]);
+            let tii_v = f32x4::from_slice(&tsc_q[24..28]);
             imx[qi] = mpv * tmi_v + ipv * tii_v;
         }
 
         // DD passes: propagate D->D transitions across the stripe boundary
         // First pass
         dcv = shr_f32x4(zero_v, dcv);
-        dmx[0] = f32x4::splat(0.0);
 
-        let dd_base = NTSC_PER_Q * q; // DD transitions start after 7*Q regular blocks
+        // The main loop has already written its initially-zero carry to
+        // dmx[0], so clearing that element again would be a redundant store.
         for (qi, dmx_qi) in dmx.iter_mut().enumerate() {
             let dd_v = f32x4::from_slice(&om.tfv[(dd_base + qi) * 4..(dd_base + qi) * 4 + 4]);
             *dmx_qi += dcv;
@@ -199,11 +197,10 @@ pub fn forward_filter(dsq: &[u8], l: usize, om: &OptimizedProfile) -> ForwardRes
 /// This is the Farrar shift that propagates the last lane of the previous
 /// q-vector into the first lane of the current one.
 #[inline(always)]
-fn shr_f32x4(_zero: Simd<f32, 4>, v: Simd<f32, 4>) -> Simd<f32, 4> {
-    // Indices 0..3 index `v`, indices 4..7 index `zero` (all zeros)
-    // We want: [zero[0], v[0], v[1], v[2]] = [idx 4, idx 0, idx 1, idx 2]
-    let zero_v = Simd::<f32, 4>::splat(0.0);
-    simd_swizzle!(v, zero_v, [4, 0, 1, 2])
+fn shr_f32x4(zero: Simd<f32, 4>, v: Simd<f32, 4>) -> Simd<f32, 4> {
+    // Reuse the caller's loop-invariant zero vector instead of constructing
+    // another splat at every source-level shift.
+    simd_swizzle!(v, zero, [4, 0, 1, 2])
 }
 
 #[cfg(test)]

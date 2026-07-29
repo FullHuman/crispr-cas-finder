@@ -138,34 +138,34 @@ impl HmmFile {
         let mut eff_nseq: f32 = -1.0;
         let mut checksum: u32 = 0;
         let mut map_flag = false;
-        let _compo_vals: Option<Vec<f32>> = None;
         let mut max_length: i32 = -1;
 
-        // Parse header fields
+        // Parse header fields using one reusable line allocation.
+        let mut header_line = String::new();
         loop {
-            let mut line = String::new();
+            header_line.clear();
             let bytes = reader
-                .read_line(&mut line)
+                .read_line(&mut header_line)
                 .map_err(|e| HmmerError::Internal(format!("Read error: {}", e)))?;
             if bytes == 0 {
                 return Err(HmmerError::Format("Premature EOF in HMM header".into()));
             }
 
-            let trimmed = line.trim().to_string();
+            let trimmed = header_line.trim();
             if trimmed.starts_with("HMM ") || trimmed.starts_with("HMM\t") {
-                // End of header; start of model body
-                // Skip the transition header line
-                let mut _skip = String::new();
-                let _ = reader.read_line(&mut _skip);
+                header_line.clear();
+                let _ = reader.read_line(&mut header_line);
                 break;
             }
 
-            let parts: Vec<&str> = trimmed.splitn(2, char::is_whitespace).collect();
-            if parts.len() < 2 {
+            let mut parts = trimmed.splitn(2, char::is_whitespace);
+            let Some(tag) = parts.next() else {
                 continue;
-            }
-            let tag = parts[0];
-            let val = parts[1].trim();
+            };
+            let Some(val) = parts.next() else {
+                continue;
+            };
+            let val = val.trim();
 
             match tag {
                 "NAME" => name = val.to_string(),
@@ -323,8 +323,10 @@ impl HmmFile {
             let _ = reader.read_line(&mut line);
         }
         // Current line = insert emissions for node 0 (parse but we mostly ignore node 0 inserts)
-        let toks: Vec<&str> = line.split_whitespace().collect();
-        for (tok, ins_val) in toks.iter().zip(hmm.insert_emissions_mut(0).iter_mut()) {
+        for (tok, ins_val) in line
+            .split_whitespace()
+            .zip(hmm.insert_emissions_mut(0).iter_mut())
+        {
             if let Ok(val) = tok.parse::<f32>() {
                 *ins_val = if val >= 99999.0 { 0.0 } else { (-val).exp() };
             }
@@ -333,9 +335,20 @@ impl HmmFile {
         // Read transition line for node 0
         line.clear();
         let _ = reader.read_line(&mut line);
-        let toks: Vec<&str> = line.split_whitespace().collect();
-        if toks.len() >= 7 {
-            for (&tok, t_val) in toks.iter().zip(hmm.transitions_mut(0)[..7].iter_mut()) {
+        let mut toks = line.split_whitespace();
+        if let (Some(a), Some(b), Some(c), Some(d), Some(e), Some(f), Some(g)) = (
+            toks.next(),
+            toks.next(),
+            toks.next(),
+            toks.next(),
+            toks.next(),
+            toks.next(),
+            toks.next(),
+        ) {
+            for (tok, t_val) in [a, b, c, d, e, f, g]
+                .into_iter()
+                .zip(hmm.transitions_mut(0)[..7].iter_mut())
+            {
                 *t_val = Self::parse_hmm_prob(tok);
             }
         }
@@ -345,67 +358,54 @@ impl HmmFile {
             // Match emission line: k e1 e2 ... eK [MAP CS RF MM CONS]
             line.clear();
             let _ = reader.read_line(&mut line);
-            let toks: Vec<&str> = line.split_whitespace().collect();
-            if toks.len() > abc.canonical_size {
-                let mat = hmm.match_emissions_mut(k);
-                for a in 0..abc.canonical_size {
-                    if let Ok(val) = toks[a + 1].parse::<f32>() {
-                        mat[a] = if val >= 99999.0 { 0.0 } else { (-val).exp() };
+            let mut toks = line.split_whitespace();
+            if toks.clone().count() > abc.canonical_size {
+                toks.next(); // node number
+                for (tok, mat_val) in toks
+                    .by_ref()
+                    .take(abc.canonical_size)
+                    .zip(hmm.match_emissions_mut(k).iter_mut())
+                {
+                    if let Ok(val) = tok.parse::<f32>() {
+                        *mat_val = if val >= 99999.0 { 0.0 } else { (-val).exp() };
                     }
                 }
-                // Parse optional annotation fields after emissions
-                let extra_start = abc.canonical_size + 1;
+
                 if map_flag
+                    && let Some(tok) = toks.next()
                     && let Some(map) = &mut hmm.map
-                    && let Some(tok) = toks.get(extra_start)
                 {
                     map[k] = tok.parse().unwrap_or(0);
                 }
-                // Parse consensus character if CONS flag is set
+                if flags & HMM_FLAG_CS != 0 {
+                    if hmm.consensus_structure.is_none() {
+                        hmm.consensus_structure = Some(vec![b' '; m + 2]);
+                    }
+                    if let Some(c) = toks.next().and_then(|tok| tok.bytes().next())
+                        && let Some(cs) = &mut hmm.consensus_structure
+                    {
+                        cs[k] = c;
+                    }
+                }
+                if flags & HMM_FLAG_RF != 0 {
+                    if hmm.reference_annotation.is_none() {
+                        hmm.reference_annotation = Some(vec![b' '; m + 2]);
+                    }
+                    if let Some(c) = toks.next().and_then(|tok| tok.bytes().next())
+                        && let Some(rf) = &mut hmm.reference_annotation
+                    {
+                        rf[k] = c;
+                    }
+                }
+                if flags & HMM_FLAG_MMASK != 0 {
+                    toks.next();
+                }
                 if flags & HMM_FLAG_CONS != 0 {
-                    // Consensus is at position extra_start + (1 if MAP) + (1 if CS) + (1 if RF) + (1 if MM)
-                    // Actually the order is: MAP CS RF MM CONS
-                    let mut idx = extra_start;
-                    if map_flag {
-                        idx += 1;
-                    }
-                    // CS
-                    if flags & HMM_FLAG_CS != 0 {
-                        if hmm.consensus_structure.is_none() {
-                            hmm.consensus_structure = Some(vec![b' '; m + 2]);
-                        }
-                        if let Some(ref mut cs) = hmm.consensus_structure
-                            && let Some(tok) = toks.get(idx)
-                            && let Some(c) = tok.bytes().next()
-                        {
-                            cs[k] = c;
-                        }
-                        idx += 1;
-                    }
-                    // RF
-                    if flags & HMM_FLAG_RF != 0 {
-                        if hmm.reference_annotation.is_none() {
-                            hmm.reference_annotation = Some(vec![b' '; m + 2]);
-                        }
-                        if let Some(ref mut rf) = hmm.reference_annotation
-                            && let Some(tok) = toks.get(idx)
-                            && let Some(c) = tok.bytes().next()
-                        {
-                            rf[k] = c;
-                        }
-                        idx += 1;
-                    }
-                    // MM
-                    if flags & HMM_FLAG_MMASK != 0 {
-                        idx += 1;
-                    }
-                    // CONS
                     if hmm.consensus.is_none() {
                         hmm.consensus = Some(vec![b' '; m + 2]);
                     }
-                    if let Some(ref mut cons) = hmm.consensus
-                        && let Some(tok) = toks.get(idx)
-                        && let Some(c) = tok.bytes().next()
+                    if let Some(c) = toks.next().and_then(|tok| tok.bytes().next())
+                        && let Some(cons) = &mut hmm.consensus
                     {
                         cons[k] = c;
                     }
@@ -415,8 +415,10 @@ impl HmmFile {
             // Insert emission line
             line.clear();
             let _ = reader.read_line(&mut line);
-            let toks: Vec<&str> = line.split_whitespace().collect();
-            for (tok, ins_val) in toks.iter().zip(hmm.insert_emissions_mut(k).iter_mut()) {
+            for (tok, ins_val) in line
+                .split_whitespace()
+                .zip(hmm.insert_emissions_mut(k).iter_mut())
+            {
                 if let Ok(val) = tok.parse::<f32>() {
                     *ins_val = if val >= 99999.0 { 0.0 } else { (-val).exp() };
                 }
@@ -425,9 +427,20 @@ impl HmmFile {
             // Transition line (7 values: MM MI MD IM II DM DD)
             line.clear();
             let _ = reader.read_line(&mut line);
-            let toks: Vec<&str> = line.split_whitespace().collect();
-            if toks.len() >= 7 {
-                for (&tok, t_val) in toks.iter().zip(hmm.transitions_mut(k)[..7].iter_mut()) {
+            let mut toks = line.split_whitespace();
+            if let (Some(a), Some(b), Some(c), Some(d), Some(e), Some(f), Some(g)) = (
+                toks.next(),
+                toks.next(),
+                toks.next(),
+                toks.next(),
+                toks.next(),
+                toks.next(),
+                toks.next(),
+            ) {
+                for (tok, t_val) in [a, b, c, d, e, f, g]
+                    .into_iter()
+                    .zip(hmm.transitions_mut(k)[..7].iter_mut())
+                {
                     *t_val = Self::parse_hmm_prob(tok);
                 }
             }

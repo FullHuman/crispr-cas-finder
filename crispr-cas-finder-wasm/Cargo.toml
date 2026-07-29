@@ -18,8 +18,10 @@ serde_json = "1"
 wasm-bindgen = "0.2"
 serde-wasm-bindgen = "0.6"
 console_error_panic_hook = "0.1"
-getrandom = { version = "0.2", features = ["js"] }
-bio = "3"
+getrandom = { version = "0.4.3", features = ["wasm_js"] }
+# orphos-core currently pulls getrandom 0.2 through bio 2; enable its WASM backend too.
+getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
+bio = "4"
 rayon = "1.11"
 wasm-bindgen-rayon = { version = "1.3", features = ["no-bundler"] }
 web-sys = { version = "0.3", features = ["console"] }

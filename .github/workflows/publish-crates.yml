@@ -52,7 +52,7 @@ jobs:
           fi
 
       - name: Wait for crispr-cas-finder-core to be available
-        if: (inputs.crate == 'all') && (inputs.dry_run == false)
+        if: (inputs.crate == 'all') && (inputs.dry_run != 'true')
         run: |
           echo "Waiting 30 seconds for crispr-cas-finder-core to be available on crates.io..."
           sleep 30

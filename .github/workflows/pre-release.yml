@@ -87,7 +87,7 @@ jobs:
       - name: Build WASM
         if: matrix.os == 'ubuntu-latest'
         run: |
-          curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+          cargo install wasm-pack --version 0.14.0 --locked
           cd crispr-cas-finder-wasm
           wasm-pack build --target web --release
 

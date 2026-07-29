@@ -22,8 +22,16 @@ target
 
 .DS_Store
 
+# Python tooling
+__pycache__/
+*.py[cod]
+.venv/
+
 # Original CRISPRCasFinder (cloned for benchmarking, not part of the repo)
 vendor/
 
 # WASM
 crispr-cas-finder-wasm/www/pkg/
+
+# OpenEvolve generated programs, checkpoints, and isolated build state
+openevolve/

@@ -28,11 +28,11 @@ include!(concat!(env!("OUT_DIR"), "/flogsum_table.rs"));
 #[inline]
 pub fn flogsum(a: f32, b: f32) -> f32 {
     let max = a.max(b);
-    let min = a.min(b);
-    if min == f32::NEG_INFINITY || (max - min) >= 15.7 {
+    let diff = (a - b).abs();
+    if diff >= 15.7 {
         max
     } else {
-        max + FLOGSUM_LOOKUP[((max - min) * LOGSUM_SCALE) as usize]
+        max + FLOGSUM_LOOKUP[(diff * LOGSUM_SCALE) as usize]
     }
 }
 

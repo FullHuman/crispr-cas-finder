@@ -7,7 +7,8 @@
 //
 // To run: cargo bench -p hmmer-core
 
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use std::hint::black_box;
 
 use hmmer_core::alphabet::{Alphabet, Dsq};
 use hmmer_core::background::BackgroundModel;

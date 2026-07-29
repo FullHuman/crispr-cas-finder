@@ -4,7 +4,7 @@
 
 use std::io;
 
-use bio::io::fasta;
+use bio::io::fasta::{self, FastaRead};
 
 use hmmer_core::alphabet::Alphabet;
 use hmmer_core::errors::HmmerError;
@@ -15,21 +15,32 @@ pub fn sqfile_open_digital(
     abc: &Alphabet,
     filename: &str,
 ) -> Result<Vec<DigitalSequence>, HmmerError> {
-    let reader = fasta::Reader::from_file(filename)
+    let mut reader = fasta::Reader::from_file(filename)
         .map_err(|e| HmmerError::NotFound(format!("Failed to open {}: {}", filename, e)))?;
+    let mut record = fasta::Record::new();
     let mut seqs = Vec::new();
-    for result in reader.records() {
-        let record = result.map_err(|e| HmmerError::Internal(format!("Read error: {}", e)))?;
-        let desc = record.desc().unwrap_or("");
-        let sq = DigitalSequence::from_bytes(record.id(), desc, record.seq(), abc);
-        seqs.push(sq);
+
+    loop {
+        reader
+            .read(&mut record)
+            .map_err(|e| HmmerError::Internal(format!("Read error: {}", e)))?;
+        if record.is_empty() {
+            return Ok(seqs);
+        }
+
+        seqs.push(DigitalSequence::from_bytes(
+            record.id(),
+            record.desc().unwrap_or(""),
+            record.seq(),
+            abc,
+        ));
     }
-    Ok(seqs)
 }
 
 /// Streaming FASTA reader that yields one digitized sequence at a time.
 pub struct FastaReader {
-    records: fasta::Records<io::BufReader<std::fs::File>>,
+    reader: fasta::Reader<io::BufReader<std::fs::File>>,
+    record: fasta::Record,
     abc: Alphabet,
 }
 
@@ -38,21 +49,27 @@ impl FastaReader {
         let reader = fasta::Reader::from_file(filename)
             .map_err(|e| HmmerError::NotFound(format!("Failed to open {}: {}", filename, e)))?;
         Ok(FastaReader {
-            records: reader.records(),
+            reader,
+            record: fasta::Record::new(),
             abc: abc.clone(),
         })
     }
 
     /// Read the next sequence. Returns None at EOF.
     pub fn read(&mut self) -> Result<Option<DigitalSequence>, HmmerError> {
-        match self.records.next() {
-            Some(Ok(record)) => {
-                let desc = record.desc().unwrap_or("");
-                let sq = DigitalSequence::from_bytes(record.id(), desc, record.seq(), &self.abc);
-                Ok(Some(sq))
-            }
-            Some(Err(e)) => Err(HmmerError::Internal(format!("Read error: {}", e))),
-            None => Ok(None),
+        self.reader
+            .read(&mut self.record)
+            .map_err(|e| HmmerError::Internal(format!("Read error: {}", e)))?;
+
+        if self.record.is_empty() {
+            return Ok(None);
         }
+
+        Ok(Some(DigitalSequence::from_bytes(
+            self.record.id(),
+            self.record.desc().unwrap_or(""),
+            self.record.seq(),
+            &self.abc,
+        )))
     }
 }
