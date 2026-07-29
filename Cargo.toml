@@ -5,7 +5,6 @@ members = [
   "crispr-cas-finder-wasm",
   "hmmer-core",
   "hmmer-io",
-  "openevolve/bench",
 ]
 exclude = ["crispr-cas-finder-python", "hmmer-py"]
 resolver = "2"
