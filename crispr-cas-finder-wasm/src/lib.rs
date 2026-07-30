@@ -152,7 +152,7 @@ pub fn cas_prepare(
         translation_table: Some(genetic_code as u8),
         ..OrphosConfig::default()
     };
-    let mut analyzer = OrphosAnalyzer::new(config);
+    let analyzer = OrphosAnalyzer::new(config);
     let sequences = parse_fasta_sequences(fasta_content);
 
     let mut all_genes: Vec<GeneRecord> = Vec::new();

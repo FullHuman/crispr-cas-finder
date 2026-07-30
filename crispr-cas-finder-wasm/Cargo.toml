@@ -10,7 +10,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 crispr-cas-finder-core = { path = "../crispr-cas-finder-core" }
-orphos-core = "0.2.0"
+orphos-core = "0.3.0"
 hmmer-core = { path = "../hmmer-core" }
 hmmer-io = { path = "../hmmer-io" }
 serde = { version = "1", features = ["derive"] }
@@ -19,7 +19,7 @@ wasm-bindgen = "0.2"
 serde-wasm-bindgen = "0.6"
 console_error_panic_hook = "0.1"
 getrandom = { version = "0.4.3", features = ["wasm_js"] }
-# orphos-core currently pulls getrandom 0.2 through bio 2; enable its WASM backend too.
+# bio still pulls getrandom 0.2; enable its WASM backend too.
 getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
 bio = "4"
 rayon = "1.11"

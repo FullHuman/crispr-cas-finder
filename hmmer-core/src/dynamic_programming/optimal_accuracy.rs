@@ -99,74 +99,8 @@ fn build_transition_delta_table(transition_scores: &[f32], num_nodes: usize) -> 
         .collect()
 }
 
-// ── Per-cell DP recurrences ──────────────────────────────────────────────────
-
-/// Compute the OA **match** score for node `k` at sequence position `i`.
-///
-/// ```text
-/// M(i,k) = pp_M(i,k) + max(
-///     δ(M→M, k-1) · M(i-1, k-1),
-///     δ(I→M, k-1) · I(i-1, k-1),
-///     δ(D→M, k-1) · D(i-1, k-1),
-///     δ(B→M, k-1) · B(i-1),
-/// )
-/// ```
-/// where `pp_M(i,k)` is the posterior probability of emitting residue `i` from
-/// match state `k`, and `prev_b` is the OA score of the Begin state at row `i-1`.
-#[inline]
-fn compute_match(
-    i: usize,
-    k: usize,
-    prev_b: f32,
-    dp: &ScoreMatrix,
-    pp: &ScoreMatrix,
-    td: &[f32],
-) -> f32 {
-    let base = (k - 1) * PROFILE_NUM_TRANSITIONS;
-    pp.match_score(i, k)
-        + f32::max(
-            f32::max(
-                td[base + PTsc::MatchToMatch as usize] * dp.match_score(i - 1, k - 1),
-                td[base + PTsc::InsertToMatch as usize] * dp.insert_score(i - 1, k - 1),
-            ),
-            f32::max(
-                td[base + PTsc::DeleteToMatch as usize] * dp.delete_score(i - 1, k - 1),
-                td[base + PTsc::BeginToMatch as usize] * prev_b,
-            ),
-        )
-}
-
-/// Compute the OA **insert** score for node `k` at sequence position `i`.
-///
-/// ```text
-/// I(i,k) = pp_I(i,k) + max(δ(M→I, k) · M(i-1, k),  δ(I→I, k) · I(i-1, k))
-/// ```
-#[inline]
-fn compute_insert(i: usize, k: usize, dp: &ScoreMatrix, pp: &ScoreMatrix, td: &[f32]) -> f32 {
-    let base = k * PROFILE_NUM_TRANSITIONS;
-    pp.insert_score(i, k)
-        + f32::max(
-            td[base + PTsc::MatchToInsert as usize] * dp.match_score(i - 1, k),
-            td[base + PTsc::InsertToInsert as usize] * dp.insert_score(i - 1, k),
-        )
-}
-
-/// Compute the OA **delete** score for node `k` at sequence position `i`.
-///
-/// Delete states are non-emitting, so the recurrence reads from the *current*
-/// row (already filled left-to-right for `k-1`):
-///
-/// ```text
-/// D(i,k) = max(δ(M→D, k-1) · M(i, k-1),  δ(D→D, k-1) · D(i, k-1))
-/// ```
-#[inline]
-fn compute_delete(i: usize, k: usize, dp: &ScoreMatrix, td: &[f32]) -> f32 {
-    let base = (k - 1) * PROFILE_NUM_TRANSITIONS;
-    f32::max(
-        td[base + PTsc::MatchToDelete as usize] * dp.match_score(i, k - 1),
-        td[base + PTsc::DeleteToDelete as usize] * dp.delete_score(i, k - 1),
-    )
-}
+// The main-state recurrences are fused into the row loop below. Besides reducing
+// indexing overhead, this lets adjacent cells reuse values from both DP rows.
 
 // ── Per-row fill helpers ─────────────────────────────────────────────────────
 
@@ -189,28 +123,77 @@ fn fill_main_nodes(
 ) -> f32 {
     let mut x_e = f32::NEG_INFINITY;
 
-    // Interior nodes k = 1 ..< M: match, insert, and delete are all defined.
+    // Values at node k-1 are reused by the next match recurrence. The current
+    // row's values also directly feed the left-to-right delete recurrence.
+    let mut prev_match = f32::NEG_INFINITY;
+    let mut prev_insert = f32::NEG_INFINITY;
+    let mut prev_delete = f32::NEG_INFINITY;
+    let mut left_match = f32::NEG_INFINITY;
+    let mut left_delete = f32::NEG_INFINITY;
+
     for k in 1..num_nodes {
-        let mm = compute_match(i, k, prev_b, dp, pp, td);
+        let base = (k - 1) * PROFILE_NUM_TRANSITIONS;
+
+        let mm = pp.match_score(i, k)
+            + f32::max(
+                f32::max(
+                    td[base + PTsc::MatchToMatch as usize] * prev_match,
+                    td[base + PTsc::InsertToMatch as usize] * prev_insert,
+                ),
+                f32::max(
+                    td[base + PTsc::DeleteToMatch as usize] * prev_delete,
+                    td[base + PTsc::BeginToMatch as usize] * prev_b,
+                ),
+            );
         dp.set_match_score(i, k, mm);
-        // In local mode every match state can exit; accumulate into x_e.
         x_e = f32::max(x_e, exit_gate * mm);
 
-        let im = compute_insert(i, k, dp, pp, td);
+        // These values become the k-1 predecessors on the next iteration.
+        let next_prev_match = dp.match_score(i - 1, k);
+        let next_prev_insert = dp.insert_score(i - 1, k);
+        let next_prev_delete = dp.delete_score(i - 1, k);
+
+        let insert_base = base + PROFILE_NUM_TRANSITIONS;
+        let im = pp.insert_score(i, k)
+            + f32::max(
+                td[insert_base + PTsc::MatchToInsert as usize] * next_prev_match,
+                td[insert_base + PTsc::InsertToInsert as usize] * next_prev_insert,
+            );
         dp.set_insert_score(i, k, im);
 
-        // Delete reads from the current row (left-to-right dependency).
-        let dm = compute_delete(i, k, dp, td);
+        let dm = f32::max(
+            td[base + PTsc::MatchToDelete as usize] * left_match,
+            td[base + PTsc::DeleteToDelete as usize] * left_delete,
+        );
         dp.set_delete_score(i, k, dm);
+
+        prev_match = next_prev_match;
+        prev_insert = next_prev_insert;
+        prev_delete = next_prev_delete;
+        left_match = mm;
+        left_delete = dm;
     }
 
-    // Final node k = M: no insert state; both M and D always exit the model.
-    let mm = compute_match(i, num_nodes, prev_b, dp, pp, td);
+    // Final node k = M has no insert state.
+    let base = (num_nodes - 1) * PROFILE_NUM_TRANSITIONS;
+    let mm = pp.match_score(i, num_nodes)
+        + f32::max(
+            f32::max(
+                td[base + PTsc::MatchToMatch as usize] * prev_match,
+                td[base + PTsc::InsertToMatch as usize] * prev_insert,
+            ),
+            f32::max(
+                td[base + PTsc::DeleteToMatch as usize] * prev_delete,
+                td[base + PTsc::BeginToMatch as usize] * prev_b,
+            ),
+        );
     dp.set_match_score(i, num_nodes, mm);
 
-    let dm = compute_delete(i, num_nodes, dp, td);
+    let dm = f32::max(
+        td[base + PTsc::MatchToDelete as usize] * left_match,
+        td[base + PTsc::DeleteToDelete as usize] * left_delete,
+    );
     dp.set_delete_score(i, num_nodes, dm);
-
     dp.set_insert_score(i, num_nodes, f32::NEG_INFINITY);
 
     x_e = f32::max(x_e, f32::max(mm, dm));

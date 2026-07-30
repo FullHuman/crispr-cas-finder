@@ -8,7 +8,7 @@ import init, {
   cas_finalize,
   init_panic_hook,
   initThreadPool,
-} from "./pkg/crisprcas_wasm.js";
+} from "./pkg/crispr_cas_finder_wasm.js";
 
 let wasmReady = false;
 let casModelsData = null; // cached { models: [...], profiles: [...] }

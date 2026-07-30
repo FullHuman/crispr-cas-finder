@@ -79,6 +79,7 @@ pub fn backward_decode_prob_space(
     let zero_v = f32x4::splat(0.0);
 
     posterior_matrix.resize(m, l)?;
+    let main_row_stride = (m + 1) * 3;
 
     // Special transition probabilities
     let sp_e_move = om.xf[oprofile::XST_E][oprofile::XTR_MOVE];
@@ -464,47 +465,51 @@ pub fn backward_decode_prob_space(
             let spec_corr = ((fwd_ts_prev - fwd_ts) as f32).exp();
 
             let mut denom_v = zero_v;
-            let mut denom = 0.0f32;
-            posterior_matrix.main[[i, 0, MATCH_CELL]] = 0.0;
-            posterior_matrix.main[[i, 0, INSERT_CELL]] = 0.0;
-            posterior_matrix.main[[i, 0, DELETE_CELL]] = 0.0;
 
+            // The old backward row is dead now, so use it as posterior scratch.
             for qi in 0..q {
-                let fwd_m_v = seg_buf.m_odds_vec(local_row, qi);
-                let fwd_i_v = seg_buf.i_odds_vec(local_row, qi);
-                let mm_v = fwd_m_v * bmx2[qi];
-                let im_v = fwd_i_v * bix2[qi];
+                let mm_v = seg_buf.m_odds_vec(local_row, qi) * bmx2[qi];
+                let im_v = seg_buf.i_odds_vec(local_row, qi) * bix2[qi];
+                bmx[qi] = mm_v;
+                bix[qi] = im_v;
                 denom_v += mm_v + im_v;
-                let mm_a = mm_v.to_array();
-                let im_a = im_v.to_array();
-                for z in 0..4usize {
-                    let k = qi + 1 + z * q;
-                    if k <= m {
-                        posterior_matrix.main[[i, k, MATCH_CELL]] = mm_a[z];
-                        posterior_matrix.main[[i, k, INSERT_CELL]] = im_a[z];
-                        posterior_matrix.main[[i, k, DELETE_CELL]] = 0.0;
-                    }
-                }
             }
-            denom += denom_v.reduce_sum();
+            let mut denom = denom_v.reduce_sum();
 
             let fwd_odds = &simd_data.odds_specials[i - 1];
             let n_pp = fwd_odds[N_STATE] * sp_n_loop * bck_n * spec_corr;
             let j_pp = fwd_odds[J_STATE] * sp_j_loop * bck_j * spec_corr;
             let c_pp = fwd_odds[C_STATE] * sp_c_loop * bck_c * spec_corr;
-            posterior_matrix.set_special_row(i, [0.0, n_pp, j_pp, 0.0, c_pp]);
             denom += n_pp + j_pp + c_pp;
 
-            if denom > 0.0 {
-                let inv = 1.0 / denom;
-                for k in 1..=m {
-                    posterior_matrix.main[[i, k, MATCH_CELL]] *= inv;
-                    posterior_matrix.main[[i, k, INSERT_CELL]] *= inv;
+            let inv = if denom > 0.0 { 1.0 / denom } else { 1.0 };
+            let inv_v = f32x4::splat(inv);
+
+            let row_base = i * main_row_stride;
+            let main = posterior_matrix
+                .main
+                .as_slice_mut()
+                .expect("score matrix must be contiguous");
+            let main_row = &mut main[row_base..row_base + main_row_stride];
+            main_row[MATCH_CELL] = 0.0;
+            main_row[INSERT_CELL] = 0.0;
+            main_row[DELETE_CELL] = 0.0;
+
+            for qi in 0..q {
+                let mm_a = (bmx[qi] * inv_v).to_array();
+                let im_a = (bix[qi] * inv_v).to_array();
+                for z in 0..4usize {
+                    let k = qi + 1 + z * q;
+                    if k <= m {
+                        let cell = k * 3;
+                        main_row[cell + MATCH_CELL] = mm_a[z];
+                        main_row[cell + INSERT_CELL] = im_a[z];
+                        main_row[cell + DELETE_CELL] = 0.0;
+                    }
                 }
-                posterior_matrix.special[[i, N_STATE]] *= inv;
-                posterior_matrix.special[[i, J_STATE]] *= inv;
-                posterior_matrix.special[[i, C_STATE]] *= inv;
             }
+
+            posterior_matrix.set_special_row(i, [0.0, n_pp * inv, j_pp * inv, 0.0, c_pp * inv]);
 
             std::mem::swap(&mut bmx, &mut bmx2);
             std::mem::swap(&mut bix, &mut bix2);

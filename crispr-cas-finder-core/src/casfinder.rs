@@ -54,7 +54,7 @@ pub fn run_casfinder(
         translation_table: Some(cfg.genetic_code as u8),
         ..OrphosConfig::default()
     };
-    let mut analyzer = OrphosAnalyzer::new(config);
+    let analyzer = OrphosAnalyzer::new(config);
     let results = analyzer
         .analyze_fasta_file(input.to_str().unwrap())
         .context("Orphos gene prediction failed")?;

@@ -106,19 +106,19 @@ pub fn forward_checkpointed_simd(
         let mut dpv = shr_f32x4(zero_v, dmx[q - 1]);
         let mut ipv = shr_f32x4(zero_v, imx[q - 1]);
 
-        let mut tsc_idx = 0usize;
-
-        for qi in 0..q {
-            let rsc_v = f32x4::from_slice(&rsc[qi * 4..qi * 4 + 4]);
-
-            let tbm_v = f32x4::from_slice(&om.tfv[tsc_idx * 4..tsc_idx * 4 + 4]);
-            tsc_idx += 1;
-            let tmm_v = f32x4::from_slice(&om.tfv[tsc_idx * 4..tsc_idx * 4 + 4]);
-            tsc_idx += 1;
-            let tim_v = f32x4::from_slice(&om.tfv[tsc_idx * 4..tsc_idx * 4 + 4]);
-            tsc_idx += 1;
-            let tdm_v = f32x4::from_slice(&om.tfv[tsc_idx * 4..tsc_idx * 4 + 4]);
-            tsc_idx += 1;
+        let score_len = q * 4;
+        let transition_len = q * NTSC_PER_Q * 4;
+        for (qi, ((rsc4, isc4), tsc)) in rsc[..score_len]
+            .chunks_exact(4)
+            .zip(isc[..score_len].chunks_exact(4))
+            .zip(om.tfv[..transition_len].chunks_exact(NTSC_PER_Q * 4))
+            .enumerate()
+        {
+            let rsc_v = f32x4::from_slice(rsc4);
+            let tbm_v = f32x4::from_slice(&tsc[0..4]);
+            let tmm_v = f32x4::from_slice(&tsc[4..8]);
+            let tim_v = f32x4::from_slice(&tsc[8..12]);
+            let tdm_v = f32x4::from_slice(&tsc[12..16]);
 
             let mut sv = xb_v * tbm_v;
             sv += mpv * tmm_v;
@@ -135,15 +135,12 @@ pub fn forward_checkpointed_simd(
             mmx[qi] = sv;
             dmx[qi] = dcv;
 
-            let tmd_v = f32x4::from_slice(&om.tfv[tsc_idx * 4..tsc_idx * 4 + 4]);
-            tsc_idx += 1;
+            let tmd_v = f32x4::from_slice(&tsc[16..20]);
             dcv = sv * tmd_v;
 
-            let tmi_v = f32x4::from_slice(&om.tfv[tsc_idx * 4..tsc_idx * 4 + 4]);
-            tsc_idx += 1;
-            let tii_v = f32x4::from_slice(&om.tfv[tsc_idx * 4..tsc_idx * 4 + 4]);
-            tsc_idx += 1;
-            let isc_v = f32x4::from_slice(&isc[qi * 4..qi * 4 + 4]);
+            let tmi_v = f32x4::from_slice(&tsc[20..24]);
+            let tii_v = f32x4::from_slice(&tsc[24..28]);
+            let isc_v = f32x4::from_slice(isc4);
             imx[qi] = (mpv * tmi_v + ipv * tii_v) * isc_v;
         }
 
@@ -152,8 +149,9 @@ pub fn forward_checkpointed_simd(
         dmx[0] = f32x4::splat(0.0);
 
         let dd_base = NTSC_PER_Q * q;
-        for (qi, dmx_qi) in dmx.iter_mut().enumerate() {
-            let dd_v = f32x4::from_slice(&om.tfv[(dd_base + qi) * 4..(dd_base + qi) * 4 + 4]);
+        let dd_tfv = &om.tfv[dd_base * 4..(dd_base + q) * 4];
+        for (dmx_qi, dd) in dmx.iter_mut().zip(dd_tfv.chunks_exact(4)) {
+            let dd_v = f32x4::from_slice(dd);
             *dmx_qi += dcv;
             dcv = *dmx_qi * dd_v;
         }
@@ -161,9 +159,8 @@ pub fn forward_checkpointed_simd(
         if om.m < 100 {
             for _pass in 1..4 {
                 dcv = shr_f32x4(zero_v, dcv);
-                for (qi, dmx_qi) in dmx.iter_mut().enumerate() {
-                    let dd_v =
-                        f32x4::from_slice(&om.tfv[(dd_base + qi) * 4..(dd_base + qi) * 4 + 4]);
+                for (dmx_qi, dd) in dmx.iter_mut().zip(dd_tfv.chunks_exact(4)) {
+                    let dd_v = f32x4::from_slice(dd);
                     *dmx_qi += dcv;
                     dcv *= dd_v;
                 }
@@ -172,9 +169,8 @@ pub fn forward_checkpointed_simd(
             for _pass in 1..4 {
                 dcv = shr_f32x4(zero_v, dcv);
                 let mut any_change = false;
-                for (qi, dmx_qi) in dmx.iter_mut().enumerate() {
-                    let dd_v =
-                        f32x4::from_slice(&om.tfv[(dd_base + qi) * 4..(dd_base + qi) * 4 + 4]);
+                for (dmx_qi, dd) in dmx.iter_mut().zip(dd_tfv.chunks_exact(4)) {
+                    let dd_v = f32x4::from_slice(dd);
                     let old = *dmx_qi;
                     let new_val = old + dcv;
                     if new_val.simd_gt(old).any() {
@@ -280,6 +276,9 @@ fn convert_checkpoints_to_log(
     {
         let offset = cp_totscale[cp_idx] as f32;
         let mut row = Array2::from_elem((m + 1, score_matrix::NUM_MAIN_STATES), neg_inf);
+        let row_data = row
+            .as_slice_mut()
+            .expect("newly allocated Array2 is contiguous");
         for qi in 0..q {
             let ma = mm[qi].to_array();
             let ia = im[qi].to_array();
@@ -287,17 +286,18 @@ fn convert_checkpoints_to_log(
             for z in 0..4 {
                 let k = qi + 1 + z * q;
                 if k <= m {
-                    row[[k, score_matrix::MATCH_CELL]] = if ma[z] > 0.0 {
+                    let base = k * score_matrix::NUM_MAIN_STATES;
+                    row_data[base + score_matrix::MATCH_CELL] = if ma[z] > 0.0 {
                         ma[z].ln() + offset
                     } else {
                         neg_inf
                     };
-                    row[[k, score_matrix::INSERT_CELL]] = if ia[z] > 0.0 {
+                    row_data[base + score_matrix::INSERT_CELL] = if ia[z] > 0.0 {
                         ia[z].ln() + offset
                     } else {
                         neg_inf
                     };
-                    row[[k, score_matrix::DELETE_CELL]] = if da[z] > 0.0 {
+                    row_data[base + score_matrix::DELETE_CELL] = if da[z] > 0.0 {
                         da[z].ln() + offset
                     } else {
                         neg_inf
@@ -317,11 +317,15 @@ fn convert_specials_to_log(
 ) -> Array2<f32> {
     let neg_inf = f32::NEG_INFINITY;
     let mut specials = Array2::from_elem((l + 1, score_matrix::NUM_SPECIAL_STATES), neg_inf);
+    let data = specials
+        .as_slice_mut()
+        .expect("newly allocated Array2 is contiguous");
     for i in 0..=l {
         let offset = per_row_totscale[i] as f32;
+        let base = i * score_matrix::NUM_SPECIAL_STATES;
         for s in 0..5 {
             let v = xmx_odds[i][s];
-            specials[[i, s]] = if v > 0.0 { v.ln() + offset } else { neg_inf };
+            data[base + s] = if v > 0.0 { v.ln() + offset } else { neg_inf };
         }
     }
     specials
@@ -363,7 +367,11 @@ pub fn recompute_forward_segment_simd(
         let row_totscale = simd_data.per_row_totscale[i - 1];
         let scale_diff = (row_totscale - current_totscale) as f32;
         let x_b_abs = simd_data.odds_specials[i - 1][3]; // B state
-        let x_b = x_b_abs * (-scale_diff).exp(); // adjust to current scale context
+        let x_b = if scale_diff == 0.0 {
+            x_b_abs
+        } else {
+            x_b_abs * (-scale_diff).exp()
+        };
 
         let mut dcv = f32x4::splat(0.0);
         let xb_v = f32x4::splat(x_b);
@@ -528,17 +536,22 @@ impl OddsSegmentBuf {
         dmx: &[f32x4],
         totscale: f64,
     ) {
-        for qi in 0..self.q {
-            let m_off = self.row_offset(local_row, 0, qi);
-            let i_off = self.row_offset(local_row, 1, qi);
-            let d_off = self.row_offset(local_row, 2, qi);
-            let ma = mmx[qi].to_array();
-            let ia = imx[qi].to_array();
-            let da = dmx[qi].to_array();
-            self.data[m_off..m_off + 4].copy_from_slice(&ma);
-            self.data[i_off..i_off + 4].copy_from_slice(&ia);
-            self.data[d_off..d_off + 4].copy_from_slice(&da);
+        let state_width = self.q * 4;
+        let row_start = local_row * 3 * state_width;
+        let row_data = &mut self.data[row_start..row_start + 3 * state_width];
+        let (m_data, rest) = row_data.split_at_mut(state_width);
+        let (i_data, d_data) = rest.split_at_mut(state_width);
+
+        for (dst, &src) in m_data.chunks_exact_mut(4).zip(mmx.iter()) {
+            dst.copy_from_slice(&src.to_array());
         }
+        for (dst, &src) in i_data.chunks_exact_mut(4).zip(imx.iter()) {
+            dst.copy_from_slice(&src.to_array());
+        }
+        for (dst, &src) in d_data.chunks_exact_mut(4).zip(dmx.iter()) {
+            dst.copy_from_slice(&src.to_array());
+        }
+
         self.totscales[local_row] = totscale;
     }
 
@@ -642,7 +655,11 @@ pub fn replay_segment_odds_buf(
         let row_totscale = simd_data.per_row_totscale[i - 1];
         let scale_diff = (row_totscale - current_totscale) as f32;
         let x_b_abs = simd_data.odds_specials[i - 1][3];
-        let x_b = x_b_abs * (-scale_diff).exp();
+        let x_b = if scale_diff == 0.0 {
+            x_b_abs
+        } else {
+            x_b_abs * (-scale_diff).exp()
+        };
 
         let mut dcv = f32x4::splat(0.0);
         let xb_v = f32x4::splat(x_b);

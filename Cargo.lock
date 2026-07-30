@@ -99,51 +99,13 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
 name = "bio"
-version = "2.3.0"
+version = "4.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "add46f280e82963d4abb6f2c78f491a1f45be23ba27516856a1efbf194107bb7"
-dependencies = [
- "anyhow",
- "approx",
- "bio-types",
- "bit-set 0.8.0",
- "bv",
- "bytecount",
- "csv",
- "custom_derive",
- "editdistancek",
- "enum-map",
- "fxhash",
- "itertools 0.14.0",
- "itertools-num",
- "lazy_static",
- "multimap",
- "ndarray 0.16.1",
- "newtype_derive",
- "num-integer",
- "num-traits",
- "ordered-float",
- "petgraph",
- "regex",
- "serde",
- "serde_derive",
- "statrs",
- "strum 0.26.3",
- "strum_macros 0.26.4",
- "thiserror 2.0.18",
- "triple_accel",
- "vec_map",
-]
-
-[[package]]
-name = "bio"
-version = "4.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5f190fb013f81cc8abf5e5a663e1e96bdb87a7b3dfe908900860fe1f6ae0ecd0"
+checksum = "7ec70754e9fc444b545c0f4e3ac5547885dd83f297d642be4a260672aa59610b"
 dependencies = [
  "approx",
  "bio-types",
- "bit-set 0.10.0",
+ "bit-set",
  "bv",
  "bytecount",
  "csv",
@@ -156,7 +118,7 @@ dependencies = [
  "itertools 0.14.0",
  "itertools-num",
  "multimap",
- "ndarray 0.17.2",
+ "ndarray",
  "newtype_derive",
  "num-integer",
  "num-traits",
@@ -166,9 +128,9 @@ dependencies = [
  "serde",
  "serde_derive",
  "statrs",
- "strum 0.28.0",
+ "strum",
  "strum_macros 0.28.0",
- "thiserror 2.0.18",
+ "thiserror 2.0.19",
  "triple_accel",
  "vec_map",
 ]
@@ -188,27 +150,12 @@ dependencies = [
 
 [[package]]
 name = "bit-set"
-version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "08807e080ed7f9d5433fa9b275196cfc35414f66a0c79d864dc51a0d825231a3"
-dependencies = [
- "bit-vec 0.8.0",
-]
-
-[[package]]
-name = "bit-set"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "09ec2f926cc3060f09db9ebc5b52823d85268d24bb917e472c0c4bea35780a7d"
 dependencies = [
- "bit-vec 0.9.1",
+ "bit-vec",
 ]
-
-[[package]]
-name = "bit-vec"
-version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5e764a1d40d510daf35e07be9eb06e75770908c27d411ee6c92109c9840eaaf7"
 
 [[package]]
 name = "bit-vec"
@@ -369,7 +316,7 @@ name = "crispr-cas-finder-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "bio 4.0.0",
+ "bio",
  "clap",
  "crispr-cas-finder-core",
  "criterion",
@@ -384,7 +331,7 @@ name = "crispr-cas-finder-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "bio 4.0.0",
+ "bio",
  "hmmer-core",
  "hmmer-io",
  "log",
@@ -398,7 +345,7 @@ dependencies = [
 name = "crispr-cas-finder-wasm"
 version = "0.1.0"
 dependencies = [
- "bio 4.0.0",
+ "bio",
  "console_error_panic_hook",
  "crispr-cas-finder-core",
  "getrandom 0.2.17",
@@ -748,27 +695,19 @@ version = "0.1.0"
 dependencies = [
  "bitflags",
  "criterion",
- "ndarray 0.17.2",
+ "ndarray",
  "rayon",
  "serde",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "hmmer-evolve-bench"
-version = "0.1.0"
-dependencies = [
- "hmmer-core",
- "hmmer-io",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
 name = "hmmer-io"
 version = "0.1.0"
 dependencies = [
- "bio 4.0.0",
+ "bio",
  "hmmer-core",
- "thiserror 2.0.18",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
@@ -929,21 +868,6 @@ dependencies = [
 
 [[package]]
 name = "ndarray"
-version = "0.16.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "882ed72dce9365842bf196bdeedf5055305f11fc8c03dee7bb0194a6cad34841"
-dependencies = [
- "matrixmultiply",
- "num-complex",
- "num-integer",
- "num-traits",
- "portable-atomic",
- "portable-atomic-util",
- "rawpointer",
-]
-
-[[package]]
-name = "ndarray"
 version = "0.17.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "520080814a7a6b4a6e9070823bb24b4531daac8c4627e08ba5de8c5ef2f2752d"
@@ -1044,14 +968,14 @@ dependencies = [
 
 [[package]]
 name = "orphos-core"
-version = "0.2.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d349d5cef809c8cd0333a9ef0d82eaee359d0c3f9d5898a2d8e659131f363199"
+checksum = "a20a04e65b7597ff725b241171f51da19eeb3f068d7ac4ac48dd307820635f6f"
 dependencies = [
- "bio 2.3.0",
+ "bio",
  "rayon",
- "thiserror 2.0.18",
- "wide",
+ "thiserror 2.0.19",
+ "wide 1.5.0",
 ]
 
 [[package]]
@@ -1323,6 +1247,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "safe_arch"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3a52ec151f024d703f9fd65abb7cbe81e7cdb39f18917a3a37e3014470dc7c59"
+dependencies = [
+ "bytemuck",
+]
+
+[[package]]
 name = "same-file"
 version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1407,7 +1340,7 @@ dependencies = [
  "num-complex",
  "num-traits",
  "paste",
- "wide",
+ "wide 0.7.33",
 ]
 
 [[package]]
@@ -1433,12 +1366,6 @@ name = "strsim"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
-
-[[package]]
-name = "strum"
-version = "0.26.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8fec0f0aef304996cf250b31b5a10dee7980c85da9d759361292b8bca5a18f06"
 
 [[package]]
 name = "strum"
@@ -1494,6 +1421,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "syn"
+version = "3.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "53e9bae58849f64dfa4f5d5ae372c8341f7305f82a3868709269343628b659a3"
+dependencies = [
+ "proc-macro2 1.0.106",
+ "quote 1.0.45",
+ "unicode-ident",
+]
+
+[[package]]
 name = "tempfile"
 version = "3.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1517,11 +1455,11 @@ dependencies = [
 
 [[package]]
 name = "thiserror"
-version = "2.0.18"
+version = "2.0.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4288b5bcbc7920c07a1149a35cf9590a2aa808e0bc1eafaade0b80947865fbc4"
+checksum = "09a43598840e33d5b0331f38c5e30d13bb11c11210a4b58f0d9b18a5a5eefcd9"
 dependencies = [
- "thiserror-impl 2.0.18",
+ "thiserror-impl 2.0.19",
 ]
 
 [[package]]
@@ -1537,13 +1475,13 @@ dependencies = [
 
 [[package]]
 name = "thiserror-impl"
-version = "2.0.18"
+version = "2.0.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ebc4ee7f67670e9b64d05fa4253e753e016c6c95ff35b89b7941d6b856dec1d5"
+checksum = "43cbfe0cf76104d42a574802844187e84a305e531ed54455f11fbde0f10541cd"
 dependencies = [
  "proc-macro2 1.0.106",
  "quote 1.0.45",
- "syn 2.0.118",
+ "syn 3.0.3",
 ]
 
 [[package]]
@@ -1696,7 +1634,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0ce5da8ecb62bcd8ec8b7ea19f69a51275e91299be594ea5cc6ef7819e16cd03"
 dependencies = [
  "bytemuck",
- "safe_arch",
+ "safe_arch 0.7.4",
+]
+
+[[package]]
+name = "wide"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dfdfe6a32973f2d1b268b8895845a8a96cac2f0191e72c27cc929036060dbf89"
+dependencies = [
+ "bytemuck",
+ "safe_arch 1.1.0",
 ]
 
 [[package]]

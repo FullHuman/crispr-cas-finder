@@ -16,58 +16,43 @@ pub fn null2_by_expectation(profile: &Profile, posterior_matrix: &ScoreMatrix) -
     let log_ld = (ld as f32).ln();
 
     // Sum state usage across rows 1..=ld into local accumulators.
-    let mut match_sums = vec![0.0f32; m + 1];
-    let mut insert_sums = vec![0.0f32; m + 1];
+    // Keep match and insert accumulators together: both are consumed as a
+    // pair, and this requires only one allocation.
+    let mut state_sums = vec![[0.0f32; 2]; m + 1];
     let mut n_sum = 0.0f32;
     let mut j_sum = 0.0f32;
     let mut c_sum = 0.0f32;
 
     for i in 1..=ld {
-        for k in 0..=m {
-            match_sums[k] += posterior_matrix.main[[i, k, MATCH_CELL]];
-            insert_sums[k] += posterior_matrix.main[[i, k, INSERT_CELL]];
+        // M_0 and I_0 are unused, as is I_M. Avoid reading and
+        // accumulating posterior cells that cannot affect the result.
+        for (k, sums) in state_sums.iter_mut().enumerate().take(m).skip(1) {
+            sums[0] += posterior_matrix.main[[i, k, MATCH_CELL]];
+            sums[1] += posterior_matrix.main[[i, k, INSERT_CELL]];
         }
+        state_sums[m][0] += posterior_matrix.main[[i, m, MATCH_CELL]];
+
         n_sum += posterior_matrix.special[[i, N_STATE]];
         j_sum += posterior_matrix.special[[i, J_STATE]];
         c_sum += posterior_matrix.special[[i, C_STATE]];
     }
 
-    // Convert summed counts to frequencies (exp of log-frequency)
-    let mmx_freq: Vec<f32> = match_sums
-        .iter()
-        .map(|&v| {
-            if v > 0.0 {
-                (v.ln() - log_ld).exp()
-            } else {
-                0.0
-            }
-        })
-        .collect();
-    let imx_freq: Vec<f32> = insert_sums
-        .iter()
-        .map(|&v| {
-            if v > 0.0 {
-                (v.ln() - log_ld).exp()
-            } else {
-                0.0
-            }
-        })
-        .collect();
+    // Preserve the original floating-point transformation exactly. Replacing
+    // this with multiplication by 1/Ld changes rounded results.
+    let normalize = |sum: f32| {
+        if sum > 0.0 {
+            (sum.ln() - log_ld).exp()
+        } else {
+            0.0
+        }
+    };
+    for sums in state_sums.iter_mut().take(m).skip(1) {
+        sums[0] = normalize(sums[0]);
+        sums[1] = normalize(sums[1]);
+    }
+    state_sums[m][0] = normalize(state_sums[m][0]);
 
-    // xfactor in probability space
-    let xfactor_prob = (if n_sum > 0.0 {
-        (n_sum.ln() - log_ld).exp()
-    } else {
-        0.0
-    }) + (if c_sum > 0.0 {
-        (c_sum.ln() - log_ld).exp()
-    } else {
-        0.0
-    }) + (if j_sum > 0.0 {
-        (j_sum.ln() - log_ld).exp()
-    } else {
-        0.0
-    });
+    let xfactor_prob = normalize(n_sum) + normalize(c_sum) + normalize(j_sum);
 
     // Calculate null2 odds ratios directly in probability space.
     // This avoids the sequential flogsum dependency chain, enabling
@@ -80,12 +65,12 @@ pub fn null2_by_expectation(profile: &Profile, posterior_matrix: &ScoreMatrix) -
         let residue_scores = profile.residue_scores_for(x);
         let mut sum = 0.0f32;
         for k in 1..m {
-            sum += mmx_freq[k]
+            sum += state_sums[k][0]
                 * residue_scores[k * PROFILE_NUM_EMISSIONS + PRsc::MatchScore as usize].exp();
-            sum += imx_freq[k]
+            sum += state_sums[k][1]
                 * residue_scores[k * PROFILE_NUM_EMISSIONS + PRsc::InsertScore as usize].exp();
         }
-        sum += mmx_freq[m]
+        sum += state_sums[m][0]
             * residue_scores[m * PROFILE_NUM_EMISSIONS + PRsc::MatchScore as usize].exp();
         sum += xfactor_prob;
         *null2_x = sum;

@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Build the WASM crate with threading support (SharedArrayBuffer + rayon).
 # Requires: nightly-2026-04-01 toolchain with rust-src and wasm32-unknown-unknown target.
-# Requires: wasm-bindgen-cli v0.2.114
+# Requires: wasm-bindgen-cli matching the wasm-bindgen version in Cargo.lock.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
@@ -14,7 +14,20 @@ rustup component add rust-src 2>/dev/null || true
 rustup target add wasm32-unknown-unknown 2>/dev/null || true
 
 # Ensure wasm-bindgen-cli is installed (must match the wasm-bindgen version in Cargo.lock).
-WASM_BINDGEN_VERSION="0.2.118"
+WASM_BINDGEN_VERSION="$(
+  awk '
+    $0 == "name = \"wasm-bindgen\"" { found = 1; next }
+    found && /^version = / {
+      gsub(/^version = "|"$|"/, "")
+      print
+      exit
+    }
+  ' Cargo.lock
+)"
+if [[ -z "$WASM_BINDGEN_VERSION" ]]; then
+  echo "error: could not determine the wasm-bindgen version from Cargo.lock" >&2
+  exit 1
+fi
 if ! command -v wasm-bindgen &>/dev/null || [[ "$(wasm-bindgen --version)" != *"$WASM_BINDGEN_VERSION"* ]]; then
   echo "==> Installing wasm-bindgen-cli@${WASM_BINDGEN_VERSION}..."
   cargo install wasm-bindgen-cli --version "$WASM_BINDGEN_VERSION"
