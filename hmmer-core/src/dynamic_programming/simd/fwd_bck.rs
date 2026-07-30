@@ -109,9 +109,16 @@ pub fn forward_checkpointed_simd(
         let score_len = q * 4;
         let transition_len = q * NTSC_PER_Q * 4;
         for (qi, ((rsc4, isc4), tsc)) in rsc[..score_len]
-            .chunks_exact(4)
-            .zip(isc[..score_len].chunks_exact(4))
-            .zip(om.tfv[..transition_len].chunks_exact(NTSC_PER_Q * 4))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(isc[..score_len].as_chunks::<4>().0.iter())
+            .zip(
+                om.tfv[..transition_len]
+                    .as_chunks::<{ NTSC_PER_Q * 4 }>()
+                    .0
+                    .iter(),
+            )
             .enumerate()
         {
             let rsc_v = f32x4::from_slice(rsc4);
@@ -150,7 +157,7 @@ pub fn forward_checkpointed_simd(
 
         let dd_base = NTSC_PER_Q * q;
         let dd_tfv = &om.tfv[dd_base * 4..(dd_base + q) * 4];
-        for (dmx_qi, dd) in dmx.iter_mut().zip(dd_tfv.chunks_exact(4)) {
+        for (dmx_qi, dd) in dmx.iter_mut().zip(dd_tfv.as_chunks::<4>().0.iter()) {
             let dd_v = f32x4::from_slice(dd);
             *dmx_qi += dcv;
             dcv = *dmx_qi * dd_v;
@@ -159,7 +166,7 @@ pub fn forward_checkpointed_simd(
         if om.m < 100 {
             for _pass in 1..4 {
                 dcv = shr_f32x4(zero_v, dcv);
-                for (dmx_qi, dd) in dmx.iter_mut().zip(dd_tfv.chunks_exact(4)) {
+                for (dmx_qi, dd) in dmx.iter_mut().zip(dd_tfv.as_chunks::<4>().0.iter()) {
                     let dd_v = f32x4::from_slice(dd);
                     *dmx_qi += dcv;
                     dcv *= dd_v;
@@ -169,7 +176,7 @@ pub fn forward_checkpointed_simd(
             for _pass in 1..4 {
                 dcv = shr_f32x4(zero_v, dcv);
                 let mut any_change = false;
-                for (dmx_qi, dd) in dmx.iter_mut().zip(dd_tfv.chunks_exact(4)) {
+                for (dmx_qi, dd) in dmx.iter_mut().zip(dd_tfv.as_chunks::<4>().0.iter()) {
                     let dd_v = f32x4::from_slice(dd);
                     let old = *dmx_qi;
                     let new_val = old + dcv;
@@ -542,13 +549,13 @@ impl OddsSegmentBuf {
         let (m_data, rest) = row_data.split_at_mut(state_width);
         let (i_data, d_data) = rest.split_at_mut(state_width);
 
-        for (dst, &src) in m_data.chunks_exact_mut(4).zip(mmx.iter()) {
+        for (dst, &src) in m_data.as_chunks_mut::<4>().0.iter_mut().zip(mmx.iter()) {
             dst.copy_from_slice(&src.to_array());
         }
-        for (dst, &src) in i_data.chunks_exact_mut(4).zip(imx.iter()) {
+        for (dst, &src) in i_data.as_chunks_mut::<4>().0.iter_mut().zip(imx.iter()) {
             dst.copy_from_slice(&src.to_array());
         }
-        for (dst, &src) in d_data.chunks_exact_mut(4).zip(dmx.iter()) {
+        for (dst, &src) in d_data.as_chunks_mut::<4>().0.iter_mut().zip(dmx.iter()) {
             dst.copy_from_slice(&src.to_array());
         }
 

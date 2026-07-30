@@ -203,7 +203,7 @@ impl AliDisplay {
             "  {:width$} {:>5} {} {:<5}\n",
             qname,
             self.hmm_from,
-            &self.model,
+            self.model,
             self.hmm_to,
             width = name_width
         ));
@@ -212,7 +212,7 @@ impl AliDisplay {
         out.push_str(&format!(
             "  {:width$}       {}\n",
             "",
-            &self.match_line,
+            self.match_line,
             width = name_width
         ));
 
@@ -221,7 +221,7 @@ impl AliDisplay {
             "  {:width$} {:>5} {} {:<5}\n",
             tname,
             self.sequence_from,
-            &self.aligned_sequence,
+            self.aligned_sequence,
             self.sequence_to,
             width = name_width
         ));

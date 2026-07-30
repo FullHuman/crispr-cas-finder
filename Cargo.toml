@@ -6,12 +6,13 @@ members = [
   "hmmer-core",
   "hmmer-io",
 ]
-exclude = ["crispr-cas-finder-python", "hmmer-py"]
-resolver = "2"
+exclude = ["crispr-cas-finder-python", "hmmer-py", "openevolve/bench"]
+resolver = "3"
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.97.1"
 license = "GPL-3.0-or-later"
 
 [profile.release]

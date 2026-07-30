@@ -62,8 +62,10 @@ pub fn forward_filter(dsq: &[u8], l: usize, om: &OptimizedProfile) -> ForwardRes
         // Chunking exposes that layout directly and removes the incrementing
         // transition index and its repeated scale/address calculations.
         for (qi, (rsc_q, tsc_q)) in rsc
-            .chunks_exact(4)
-            .zip(regular_tfv.chunks_exact(NTSC_PER_Q * 4))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(regular_tfv.as_chunks::<{ NTSC_PER_Q * 4 }>().0.iter())
             .enumerate()
         {
             let rsc_v = f32x4::from_slice(rsc_q);

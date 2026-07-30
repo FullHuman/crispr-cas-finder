@@ -1,6 +1,6 @@
 use crispr_cas_finder_core::{
-    detect_crisprs_in_fasta_str, CrisprArray as CoreCrisprArray, DetectionParams, Orientation,
-    Repeat as CoreRepeat, Spacer as CoreSpacer,
+    CrisprArray as CoreCrisprArray, DetectionParams, Orientation, Repeat as CoreRepeat,
+    Spacer as CoreSpacer, detect_crisprs_in_fasta_str,
 };
 use pyo3::exceptions::{PyFileNotFoundError, PyIOError, PyValueError};
 use pyo3::prelude::*;
@@ -248,6 +248,10 @@ fn crispr_array_from_core(a: &CoreCrisprArray) -> CrisprArray {
     min_spacer_count = 1,
     min_evidence_level = 1,
 ))]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the Python API exposes detection settings as keyword arguments"
+)]
 fn find_crispr_arrays(
     fasta_content: &str,
     min_repeat_length: usize,
@@ -329,6 +333,10 @@ fn find_crispr_arrays(
     min_spacer_count = 1,
     min_evidence_level = 1,
 ))]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the Python API exposes detection settings as keyword arguments"
+)]
 fn find_crispr_arrays_in_file(
     path: &str,
     min_repeat_length: usize,
