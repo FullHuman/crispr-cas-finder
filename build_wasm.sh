@@ -2,16 +2,30 @@
 set -euo pipefail
 
 # Build the WASM crate with threading support (SharedArrayBuffer + rayon).
-# Requires: nightly-2026-04-01 toolchain with rust-src and wasm32-unknown-unknown target.
+# Requires: the toolchain, rust-src component, and wasm target pinned in
+# rust-toolchain.toml.
 # Requires: wasm-bindgen-cli matching the wasm-bindgen version in Cargo.lock.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
 # Ensure the toolchain, components, and targets from rust-toolchain.toml are installed.
-rustup show active-toolchain >/dev/null 2>&1 || true
-rustup component add rust-src 2>/dev/null || true
-rustup target add wasm32-unknown-unknown 2>/dev/null || true
+TOOLCHAIN="$(
+  awk -F'"' '$1 ~ /^channel = / { print $2; exit }' rust-toolchain.toml
+)"
+if [[ -z "$TOOLCHAIN" ]]; then
+  echo "error: could not determine the channel from rust-toolchain.toml" >&2
+  exit 1
+fi
+if ! rustup toolchain list | grep -q "^${TOOLCHAIN}-"; then
+  rustup toolchain install "$TOOLCHAIN" \
+    --profile minimal \
+    --component rust-src \
+    --target wasm32-unknown-unknown
+else
+  rustup component add --toolchain "$TOOLCHAIN" rust-src
+  rustup target add --toolchain "$TOOLCHAIN" wasm32-unknown-unknown
+fi
 
 # Ensure wasm-bindgen-cli is installed (must match the wasm-bindgen version in Cargo.lock).
 WASM_BINDGEN_VERSION="$(
@@ -30,7 +44,7 @@ if [[ -z "$WASM_BINDGEN_VERSION" ]]; then
 fi
 if ! command -v wasm-bindgen &>/dev/null || [[ "$(wasm-bindgen --version)" != *"$WASM_BINDGEN_VERSION"* ]]; then
   echo "==> Installing wasm-bindgen-cli@${WASM_BINDGEN_VERSION}..."
-  cargo install wasm-bindgen-cli --version "$WASM_BINDGEN_VERSION"
+  cargo install wasm-bindgen-cli --version "$WASM_BINDGEN_VERSION" --locked
 fi
 
 echo "==> Building crispr-cas-finder-wasm (release, threaded)..."
