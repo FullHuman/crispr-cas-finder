@@ -2,8 +2,62 @@ use crate::types::{DetectionParams, Orientation};
 use bio::alignment::AlignmentOperation;
 use bio::alignment::pairwise::{Aligner, Scoring};
 use rayon::prelude::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::hash::{BuildHasherDefault, Hasher};
 const PARALLEL_PAIR_SCAN_MIN_POSITIONS: usize = 8_192;
+
+#[derive(Default)]
+struct U64IdentityHasher(u64);
+
+impl Hasher for U64IdentityHasher {
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        self.0 = fnv1a(bytes);
+    }
+
+    #[inline]
+    fn write_u64(&mut self, value: u64) {
+        self.0 = value;
+    }
+}
+
+enum SeedPositions {
+    One(usize),
+    Many(Vec<usize>),
+}
+
+impl SeedPositions {
+    #[inline]
+    fn push(&mut self, position: usize) {
+        match self {
+            Self::One(first) => {
+                let first = *first;
+                *self = Self::Many(vec![first, position]);
+            }
+            Self::Many(positions) => positions.push(position),
+        }
+    }
+
+    #[inline]
+    fn as_slice(&self) -> &[usize] {
+        match self {
+            Self::One(position) => std::slice::from_ref(position),
+            Self::Many(positions) => positions,
+        }
+    }
+}
+
+type SeedMap = HashMap<u64, SeedPositions, BuildHasherDefault<U64IdentityHasher>>;
+
+struct SeedIndex {
+    positions: SeedMap,
+    hashes: Vec<u64>,
+}
 
 /// Compute AT% of a DNA sequence (fraction of A+T bases, as a percentage).
 ///
@@ -149,23 +203,29 @@ fn fnv1a(data: &[u8]) -> u64 {
     h
 }
 
-/// Build a position index:  hash(seq[i .. i+seed_len]) → sorted list of positions
-fn build_seed_index(seq: &[u8], seed_len: usize) -> HashMap<u64, Vec<usize>> {
-    let n = seq.len();
-    let mut index: HashMap<u64, Vec<usize>> = HashMap::new();
-    if n < seed_len {
-        return index;
+/// Build a position index and retain each window hash for the scan passes.
+fn build_seed_index(seq: &[u8], seed_len: usize) -> SeedIndex {
+    if seq.len() < seed_len {
+        return SeedIndex {
+            positions: SeedMap::default(),
+            hashes: Vec::new(),
+        };
     }
-    for i in 0..=(n - seed_len) {
-        index
-            .entry(fnv1a(&seq[i..i + seed_len]))
-            .or_default()
-            .push(i);
+
+    let window_count = seq.len() - seed_len + 1;
+    let mut positions = SeedMap::default();
+    let mut hashes = Vec::with_capacity(window_count);
+
+    for (i, window) in seq.windows(seed_len).enumerate() {
+        let hash = fnv1a(window);
+        hashes.push(hash);
+        positions
+            .entry(hash)
+            .and_modify(|bucket| bucket.push(i))
+            .or_insert(SeedPositions::One(i));
     }
-    for v in index.values_mut() {
-        v.sort_unstable();
-    }
-    index
+
+    SeedIndex { positions, hashes }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -245,17 +305,11 @@ fn match_extends_beyond(
     a: usize,
     b: usize,
     dr_len: usize,
+    core_mm: usize,
     max_mism: usize,
     limit: usize,
 ) -> bool {
     let n = seq.len();
-    // Count actual mismatches in the core
-    let mut core_mm = 0usize;
-    for k in 0..dr_len {
-        if seq[a + k] != seq[b + k] {
-            core_mm += 1;
-        }
-    }
     let budget = max_mism - core_mm;
 
     // Pass 1: simple extension from fixed boundaries
@@ -332,7 +386,6 @@ fn match_extends_beyond(
 #[derive(Clone, Copy)]
 struct PairSearchConfig {
     seed_offset: usize,
-    seed: usize,
     min_repeat_length: usize,
     max_repeat_length: usize,
     min_spacer_length: usize,
@@ -342,13 +395,13 @@ struct PairSearchConfig {
 
 fn find_pairs_at_position(
     seq: &[u8],
-    index: &HashMap<u64, Vec<usize>>,
+    index: &SeedIndex,
     i: usize,
     config: PairSearchConfig,
-) -> Vec<(usize, usize, usize)> {
+    pairs: &mut Vec<(usize, usize, usize)>,
+) {
     let PairSearchConfig {
         seed_offset,
-        seed,
         min_repeat_length,
         max_repeat_length,
         min_spacer_length,
@@ -357,64 +410,71 @@ fn find_pairs_at_position(
     } = config;
 
     let n = seq.len();
-    let seed_end = i + seed_offset + seed;
-    if seed_end > n {
-        return Vec::new();
-    }
-
-    let h = fnv1a(&seq[i + seed_offset..seed_end]);
-    let positions = match index.get(&h) {
-        Some(v) => v,
-        None => return Vec::new(),
+    let seed_position = i + seed_offset;
+    let hash = match index.hashes.get(seed_position) {
+        Some(&hash) => hash,
+        None => return,
+    };
+    let positions = match index.positions.get(&hash) {
+        Some(positions) => positions.as_slice(),
+        None => return,
     };
 
     let j_min = i + min_repeat_length + min_spacer_length;
     let j_max =
         (i + max_repeat_length + max_spacer_length).min(n.saturating_sub(min_repeat_length));
     if j_min > j_max {
-        return Vec::new();
+        return;
     }
 
-    let lo = positions.partition_point(|&p| p < j_min);
-    let hi = positions.partition_point(|&p| p <= j_max);
-    let mut pairs = Vec::new();
+    // The shared index stores seed positions. For right-half searches, convert
+    // the desired repeat-position range to its corresponding seed-position range.
+    let indexed_min = j_min + seed_offset;
+    let indexed_max = j_max + seed_offset;
+    let lo = positions.partition_point(|&p| p < indexed_min);
+    let hi = positions.partition_point(|&p| p <= indexed_max);
 
-    for &j in &positions[lo..hi] {
+    for &indexed_j in &positions[lo..hi] {
+        let j = indexed_j - seed_offset;
         let gap = j - i;
         let dr_lo = gap.saturating_sub(max_spacer_length).max(min_repeat_length);
         let dr_hi = match gap.checked_sub(min_spacer_length) {
-            Some(v) => v.min(max_repeat_length),
+            Some(v) => v.min(max_repeat_length).min(n - j),
             None => continue,
         };
         if dr_lo > dr_hi {
             continue;
         }
 
-        // Take the longest valid DR length to maximise information.
-        'dr: for dr_len in (dr_lo..=dr_hi).rev() {
-            if j + dr_len > n {
-                continue;
-            }
-            if hamming_le(&seq[i..i + dr_len], &seq[j..j + dr_len], max_mism) {
-                // Mimic vmatch + sel392v2.so: reject if the maximum
-                // matchable region at this offset exceeds max_repeat_length.
-                if max_mism > 0
-                    && match_extends_beyond(seq, i, j, dr_len, max_mism, max_repeat_length)
-                {
-                    break 'dr;
+        // Mismatch count is monotonic with prefix length. Find the longest
+        // acceptable prefix once instead of rechecking every shorter length.
+        let mut core_mm = 0usize;
+        let mut dr_len = dr_hi;
+        for k in 0..dr_hi {
+            if seq[i + k] != seq[j + k] {
+                if core_mm == max_mism {
+                    dr_len = k;
+                    break;
                 }
-                pairs.push((i, j, dr_len));
-                break 'dr;
+                core_mm += 1;
             }
         }
-    }
+        if dr_len < dr_lo {
+            continue;
+        }
 
-    pairs
+        if max_mism > 0
+            && match_extends_beyond(seq, i, j, dr_len, core_mm, max_mism, max_repeat_length)
+        {
+            continue;
+        }
+        pairs.push((i, j, dr_len));
+    }
 }
 
 fn find_pairs_with_index(
     seq: &[u8],
-    index: &HashMap<u64, Vec<usize>>,
+    index: &SeedIndex,
     config: PairSearchConfig,
 ) -> Vec<(usize, usize, usize)> {
     let n = seq.len();
@@ -426,7 +486,10 @@ fn find_pairs_with_index(
     if pair_scan_len >= PARALLEL_PAIR_SCAN_MIN_POSITIONS {
         return (0..pair_scan_len)
             .into_par_iter()
-            .map(|i| find_pairs_at_position(seq, index, i, config))
+            .fold(Vec::new, |mut pairs, i| {
+                find_pairs_at_position(seq, index, i, config, &mut pairs);
+                pairs
+            })
             .reduce(Vec::new, |mut acc, mut pairs| {
                 acc.append(&mut pairs);
                 acc
@@ -435,7 +498,7 @@ fn find_pairs_with_index(
 
     let mut pairs = Vec::new();
     for i in 0..pair_scan_len {
-        pairs.extend(find_pairs_at_position(seq, index, i, config));
+        find_pairs_at_position(seq, index, i, config, &mut pairs);
     }
     pairs
 }
@@ -455,31 +518,11 @@ pub fn find_direct_repeats(seq: &[u8], seq_id: &str, params: &DetectionParams) -
         return Vec::new();
     }
 
-    // Left-half index
-    let left_index = build_seed_index(seq, seed);
-
-    // Right-half index
-    let right_index: HashMap<u64, Vec<usize>> = {
-        let mut idx: HashMap<u64, Vec<usize>> = HashMap::new();
-        if n >= min_repeat_length {
-            let roff = min_repeat_length - seed;
-            for i in 0..=(n - min_repeat_length) {
-                idx.entry(fnv1a(&seq[i + roff..i + min_repeat_length]))
-                    .or_default()
-                    .push(i);
-            }
-            for v in idx.values_mut() {
-                v.sort_unstable();
-            }
-        }
-        idx
-    };
-
-    let mut seen: HashSet<(usize, usize)> = HashSet::new();
-    let mut hits: Vec<RepeatHit> = Vec::new();
+    // One index serves both seed halves: right-half seed positions are simply
+    // repeat positions shifted by `min_repeat_length - seed`.
+    let seed_index = build_seed_index(seq, seed);
     let pair_config = PairSearchConfig {
         seed_offset: 0,
-        seed,
         min_repeat_length,
         max_repeat_length,
         min_spacer_length,
@@ -487,58 +530,46 @@ pub fn find_direct_repeats(seq: &[u8], seq_id: &str, params: &DetectionParams) -
         max_mism,
     };
 
-    let record = |hits: &mut Vec<RepeatHit>,
-                  seen: &mut HashSet<(usize, usize)>,
-                  pos: usize,
-                  dr_len: usize| {
-        if seen.insert((pos, dr_len)) {
-            hits.push(RepeatHit {
-                seq_id: seq_id.to_string(),
-                repeat_length: dr_len,
-                pos1: pos + 1, // 1-based
-                repeat_sequence: String::from_utf8_lossy(&seq[pos..pos + dr_len]).to_string(),
-            });
-        }
-    };
-
-    // Pass 1 — left-half seeds (catches mismatches in the right half)
-    for (i, j, dr_len) in find_pairs_with_index(seq, &left_index, pair_config) {
-        record(&mut hits, &mut seen, i, dr_len);
-        record(&mut hits, &mut seen, j, dr_len);
+    let left_pairs = find_pairs_with_index(seq, &seed_index, pair_config);
+    let mut candidates = Vec::with_capacity(left_pairs.len() * 2);
+    for (i, j, dr_len) in left_pairs {
+        candidates.push((i, dr_len));
+        candidates.push((j, dr_len));
     }
 
-    // Pass 2 — right-half seeds (catches mismatches in the left half)
     if max_mism > 0 {
         for (i, j, dr_len) in find_pairs_with_index(
             seq,
-            &right_index,
+            &seed_index,
             PairSearchConfig {
                 seed_offset: min_repeat_length - seed,
                 ..pair_config
             },
         ) {
-            record(&mut hits, &mut seen, i, dr_len);
-            record(&mut hits, &mut seen, j, dr_len);
+            candidates.push((i, dr_len));
+            candidates.push((j, dr_len));
         }
     }
 
-    // Deduplicate overlapping hits: keep the leftmost in each group, preferring
-    // the longer DR on position ties.  Without this, every 1-bp shift of a
-    // window that spans two DRs looks like a valid pair (1-mismatch budget is
-    // consumed by the boundary byte), inflating DR/spacer counts ~dr_len×.
-    hits.sort_unstable_by(|a, b| {
-        a.pos1
-            .cmp(&b.pos1)
-            .then(b.repeat_length.cmp(&a.repeat_length))
-    });
+    // Sort and discard candidates before allocating their owned strings.
+    // This preserves the former position-ascending, length-descending policy.
+    candidates.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
+    candidates.dedup();
+
+    let seq_id_owned = seq_id.to_owned();
     let mut deduped: Vec<RepeatHit> = Vec::new();
-    for hit in hits {
-        if deduped
-            .last()
-            .is_none_or(|prev: &RepeatHit| hit.pos1 >= prev.pos1 + prev.repeat_length)
-        {
-            deduped.push(hit);
+    let mut next_free = 0usize;
+    for (pos, dr_len) in candidates {
+        if !deduped.is_empty() && pos < next_free {
+            continue;
         }
+        next_free = pos + dr_len;
+        deduped.push(RepeatHit {
+            seq_id: seq_id_owned.clone(),
+            repeat_length: dr_len,
+            pos1: pos + 1,
+            repeat_sequence: String::from_utf8_lossy(&seq[pos..pos + dr_len]).to_string(),
+        });
     }
 
     // ── Array extension ───────────────────────────────────────────────────────
