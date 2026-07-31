@@ -21,14 +21,6 @@ pub struct Cli {
     input: PathBuf,
     #[arg(long, alias = "out", value_name = "DIR")]
     outdir: Option<String>,
-    #[arg(long = "keep-all", alias = "keepAll", action = clap::ArgAction::SetTrue)]
-    keep_all: bool,
-    #[arg(long, action = clap::ArgAction::SetTrue)]
-    log: bool,
-    #[arg(long, action = clap::ArgAction::SetTrue)]
-    html: bool,
-    #[arg(long = "copy-css", alias = "copyCSS", value_name = "CSS_FILE")]
-    css_file: Option<String>,
     #[arg(short = 'q', long, action = clap::ArgAction::SetTrue)]
     quiet: bool,
     #[arg(long = "fast", alias = "faster", action = clap::ArgAction::SetTrue)]
@@ -55,18 +47,10 @@ pub struct Cli {
     max_spacer_to_repeat_ratio: f64,
     #[arg(long, alias = "spSim", value_name = "FLOAT", default_value_t = 60.0)]
     spacer_similarity_threshold: f64,
-    #[arg(long = "crispr-db", alias = "DBcrispr", value_name = "FILE")]
-    crispr_db: Option<String>,
-    #[arg(long, value_name = "FILE")]
-    repeats_file: Option<String>,
-    #[arg(long = "repeat-direction", alias = "DIRrepeat", value_name = "FILE")]
-    dir_repeat: Option<String>,
     #[arg(long, value_name = "INT", default_value_t = 100)]
     flank: usize,
     #[arg(long, alias = "levelMin", value_name = "INT", default_value_t = 1)]
     min_evidence_level: usize,
-    #[arg(long = "classify-small-arrays", alias = "classifySmallArrays", action = clap::ArgAction::SetTrue)]
-    classify_small: bool,
     #[arg(long, alias = "forceDetection", action = clap::ArgAction::SetTrue)]
     force_detection: bool,
     #[arg(
@@ -80,12 +64,6 @@ pub struct Cli {
     foster_repeat_begin: String,
     #[arg(long, alias = "fosterDREnd", value_name = "STR", default_value = "AA.")]
     foster_repeat_end: String,
-    #[arg(
-        long = "matching-repeats",
-        alias = "MatchingRepeats",
-        value_name = "FILE"
-    )]
-    matching_repeats: Option<String>,
     #[arg(long, alias = "minNbSpacers", value_name = "INT", default_value_t = 1)]
     min_spacer_count: usize,
     #[arg(long, alias = "betterDetectTrunc", action = clap::ArgAction::SetTrue)]
@@ -99,8 +77,6 @@ pub struct Cli {
     truncated_mismatch_percent: f64,
     #[arg(long = "cas", action = clap::ArgAction::SetTrue)]
     launch_cas_finder: bool,
-    #[arg(long = "full-report", alias = "ccvRep", action = clap::ArgAction::SetTrue)]
-    write_full_report: bool,
     #[arg(long, value_name = "INT", default_value_t = 600)]
     vicinity: usize,
     #[arg(
@@ -110,14 +86,8 @@ pub struct Cli {
         default_value_t = 0
     )]
     workers: usize,
-    #[arg(long, action = clap::ArgAction::SetTrue)]
-    rcfowce: bool,
     #[arg(long, value_name = "STR", default_value = "SubTyping")]
     definition: String,
-    #[arg(long = "annotation-gff", alias = "gffAnnot", value_name = "FILE")]
-    user_gff: Option<String>,
-    #[arg(long, alias = "faa", value_name = "FILE")]
-    proteome: Option<String>,
     #[arg(
         long = "clustering-threshold",
         alias = "cluster",
@@ -125,8 +95,6 @@ pub struct Cli {
         default_value_t = 0
     )]
     clustering_threshold: usize,
-    #[arg(long = "summary", alias = "getSummaryCasfinder", action = clap::ArgAction::SetTrue)]
-    get_summary: bool,
     #[arg(long, alias = "geneticCode", value_name = "INT", default_value_t = 11)]
     genetic_code: usize,
     #[arg(long, action = clap::ArgAction::SetTrue)]
