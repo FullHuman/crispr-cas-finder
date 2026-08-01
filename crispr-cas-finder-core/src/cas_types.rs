@@ -67,7 +67,7 @@ pub struct SystemHit {
     pub position: usize,
     pub gene_ref: String,
     pub gene_status: GeneStatus,
-    pub model_fqn: String,
+    pub model_fully_qualified_name: String,
     pub is_exchangeable: bool,
     pub locus_num: usize,
     pub counterpart: String,
@@ -89,12 +89,14 @@ impl SequenceIndex {
     }
 
     pub fn from_ids(ids: &[&str]) -> Self {
-        let id_to_position = ids
+        let id_to_position_map = ids
             .iter()
             .enumerate()
-            .map(|(i, id)| (id.to_string(), i))
+            .map(|(position_index, sequence_id)| (sequence_id.to_string(), position_index))
             .collect();
-        Self { id_to_position }
+        Self {
+            id_to_position: id_to_position_map,
+        }
     }
 
     pub fn position(&self, id: &str) -> Option<usize> {
@@ -120,7 +122,7 @@ pub struct GeneDefinition {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemModel {
-    pub fqn: String,
+    pub fully_qualified_name: String,
     pub family: String,
     pub name: String,
     pub version: Option<String>,
@@ -159,16 +161,16 @@ impl SystemModel {
     }
 
     pub fn all_profile_names(&self) -> Vec<&str> {
-        let mut names: Vec<&str> = self
+        let mut profile_names: Vec<&str> = self
             .genes
             .iter()
             .flat_map(|g| {
                 std::iter::once(g.name.as_str()).chain(g.exchangeables.iter().map(|e| e.as_str()))
             })
             .collect();
-        names.sort_unstable();
-        names.dedup();
-        names
+        profile_names.sort_unstable();
+        profile_names.dedup();
+        profile_names
     }
 }
 
@@ -187,11 +189,12 @@ impl ModelRegistry {
     }
 
     pub fn add(&mut self, model: SystemModel) {
-        self.models.insert(model.fqn.clone(), model);
+        self.models
+            .insert(model.fully_qualified_name.clone(), model);
     }
 
-    pub fn get(&self, fqn: &str) -> Option<&SystemModel> {
-        self.models.get(fqn)
+    pub fn get(&self, fully_qualified_model_name: &str) -> Option<&SystemModel> {
+        self.models.get(fully_qualified_model_name)
     }
 }
 
@@ -232,7 +235,7 @@ pub fn cluster_hits(
     hits: &mut [SystemHit],
     inter_gene_max_space: u32,
     replicon_length: usize,
-    topology: RepliconTopology,
+    replicon_topology: RepliconTopology,
 ) -> Vec<Cluster> {
     if hits.is_empty() {
         return Vec::new();
@@ -241,34 +244,35 @@ pub fn cluster_hits(
     hits.sort_by_key(|h| h.position);
 
     let mut clusters: Vec<Cluster> = Vec::new();
-    let mut current = Cluster::new();
-    current.hits.push(hits[0].clone());
+    let mut current_cluster = Cluster::new();
+    current_cluster.hits.push(hits[0].clone());
 
     for hit in &hits[1..] {
-        let prev_pos = current.hits.last().unwrap().position;
-        let gap = if hit.position > prev_pos {
-            hit.position - prev_pos - 1
+        let previous_position = current_cluster.hits.last().unwrap().position;
+        let gap_between_hits = if hit.position > previous_position {
+            hit.position - previous_position - 1
         } else {
             0
         };
-        if gap > inter_gene_max_space as usize {
-            clusters.push(current);
-            current = Cluster::new();
+        if gap_between_hits > inter_gene_max_space as usize {
+            clusters.push(current_cluster);
+            current_cluster = Cluster::new();
         }
-        current.hits.push(hit.clone());
+        current_cluster.hits.push(hit.clone());
     }
-    clusters.push(current);
+    clusters.push(current_cluster);
 
     // Circular wrap-around merge
-    if topology == RepliconTopology::Circular && clusters.len() > 1 && replicon_length > 0 {
+    if replicon_topology == RepliconTopology::Circular && clusters.len() > 1 && replicon_length > 0
+    {
         let first_start = clusters.first().unwrap().hits.first().unwrap().position;
         let last_end = clusters.last().unwrap().hits.last().unwrap().position;
         let wrap_gap = (replicon_length.saturating_sub(last_end).saturating_sub(1)) + first_start;
         if wrap_gap <= inter_gene_max_space as usize {
-            let mut last = clusters.pop().unwrap();
-            last.hits.extend(clusters.remove(0).hits);
-            last.wraps_origin = true;
-            clusters.insert(0, last);
+            let mut last_cluster = clusters.pop().unwrap();
+            last_cluster.hits.extend(clusters.remove(0).hits);
+            last_cluster.wraps_origin = true;
+            clusters.insert(0, last_cluster);
         }
     }
 
@@ -283,7 +287,7 @@ pub fn cluster_hits(
 pub struct DetectedSystem {
     pub id: String,
     pub replicon: String,
-    pub model_fqn: String,
+    pub model_fully_qualified_name: String,
     pub score: f64,
     pub wholeness: f64,
     pub loci_count: usize,
@@ -299,8 +303,12 @@ impl DetectedSystem {
     /// Two systems overlap if they share any hit (by sequence id).
     fn overlaps_with(&self, other: &DetectedSystem) -> bool {
         use std::collections::HashSet;
-        let ids: HashSet<&str> = self.hits.iter().map(|h| h.hit.id.as_str()).collect();
-        other.hits.iter().any(|h| ids.contains(h.hit.id.as_str()))
+        let this_system_hit_ids: HashSet<&str> =
+            self.hits.iter().map(|h| h.hit.id.as_str()).collect();
+        other
+            .hits
+            .iter()
+            .any(|h| this_system_hit_ids.contains(h.hit.id.as_str()))
     }
 }
 
@@ -313,38 +321,47 @@ pub fn select_best_solution(systems: Vec<DetectedSystem>) -> Vec<DetectedSystem>
     }
 
     // Sort by score desc, tie-break by wholeness desc
-    let mut indexed: Vec<(usize, &DetectedSystem)> = systems.iter().enumerate().collect();
-    indexed.sort_by(|a, b| {
-        b.1.score
-            .partial_cmp(&a.1.score)
+    let mut indexed_systems: Vec<(usize, &DetectedSystem)> = systems.iter().enumerate().collect();
+    indexed_systems.sort_by(|left, right| {
+        right
+            .1
+            .score
+            .partial_cmp(&left.1.score)
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| {
-                b.1.wholeness
-                    .partial_cmp(&a.1.wholeness)
+                right
+                    .1
+                    .wholeness
+                    .partial_cmp(&left.1.wholeness)
                     .unwrap_or(std::cmp::Ordering::Equal)
             })
     });
 
-    let n = systems.len();
-    let mut excluded = vec![false; n];
-    let mut selected = Vec::new();
+    let system_count = systems.len();
+    let mut is_excluded = vec![false; system_count];
+    let mut selected_indices = Vec::new();
 
-    for (idx, _sys) in &indexed {
-        if excluded[*idx] {
+    for (system_index, _system) in &indexed_systems {
+        if is_excluded[*system_index] {
             continue;
         }
-        selected.push(*idx);
+        selected_indices.push(*system_index);
         // Exclude all overlapping systems
-        for (other_idx, other_sys) in &indexed {
-            if !excluded[*other_idx] && *other_idx != *idx && systems[*idx].overlaps_with(other_sys)
+        for (other_system_index, other_system) in &indexed_systems {
+            if !is_excluded[*other_system_index]
+                && *other_system_index != *system_index
+                && systems[*system_index].overlaps_with(other_system)
             {
-                excluded[*other_idx] = true;
+                is_excluded[*other_system_index] = true;
             }
         }
     }
 
-    selected.sort_unstable();
-    selected.into_iter().map(|i| systems[i].clone()).collect()
+    selected_indices.sort_unstable();
+    selected_indices
+        .into_iter()
+        .map(|index| systems[index].clone())
+        .collect()
 }
 
 // ---------------------------------------------------------------------------

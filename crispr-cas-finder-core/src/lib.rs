@@ -106,8 +106,8 @@ fn process_cluster(
     params: &DetectionParams,
     min_repeat_count: usize,
 ) -> Option<CrisprArray> {
-    let dr_cands = get_repeat_candidates(hits, cluster);
-    if dr_cands.is_empty() {
+    let repeat_candidates = get_repeat_candidates(hits, cluster);
+    if repeat_candidates.is_empty() {
         return None;
     }
 
@@ -115,15 +115,15 @@ fn process_cluster(
     let mut best_refined: Vec<RepeatHit> = Vec::new();
     let mut best_spacers: Vec<String> = Vec::new();
 
-    for consensus in &dr_cands {
+    for consensus in &repeat_candidates {
         let refined = refine_cluster_with_consensus(consensus, cluster, seq_id, seq, params);
         if refined.len() < min_repeat_count {
             continue;
         }
 
         // DR error rate filter
-        let dr_len = consensus.len();
-        let cons_bytes = consensus.as_bytes();
+        let repeat_length = consensus.len();
+        let consensus_bytes = consensus.as_bytes();
         let total_mism_frac: f64 = refined
             .iter()
             .map(|h| {
@@ -131,10 +131,10 @@ fn process_cluster(
                     .repeat_sequence
                     .as_bytes()
                     .iter()
-                    .zip(cons_bytes.iter())
+                    .zip(consensus_bytes.iter())
                     .filter(|(a, b)| a != b)
                     .count();
-                mismatches as f64 / dr_len as f64
+                mismatches as f64 / repeat_length as f64
             })
             .sum();
         let avg_mism_frac = total_mism_frac / refined.len() as f64;
@@ -216,13 +216,13 @@ fn process_cluster(
     let spacers: Vec<Spacer> = best_refined
         .windows(2)
         .zip(best_spacers.iter())
-        .map(|(w, sp_seq)| {
-            let sp_start = w[0].pos1 + w[0].repeat_length;
-            let sp_end = w[1].pos1 - 1;
+        .map(|(repeat_window, spacer_sequence)| {
+            let spacer_start = repeat_window[0].pos1 + repeat_window[0].repeat_length;
+            let spacer_end = repeat_window[1].pos1 - 1;
             Spacer {
-                start: sp_start,
-                end: sp_end,
-                sequence: sp_seq.clone(),
+                start: spacer_start,
+                end: spacer_end,
+                sequence: spacer_sequence.clone(),
             }
         })
         .collect();

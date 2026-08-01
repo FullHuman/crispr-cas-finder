@@ -128,14 +128,14 @@ impl HmmFile {
         use hmmer_core::config::*;
 
         let mut name = String::new();
-        let mut acc = None;
-        let mut desc = None;
-        let mut m: usize = 0;
-        let mut abc_type = AlphabetKind::Amino;
-        let mut evparam = [EV_PARAM_UNSET; NUM_EV_PARAMS];
+        let mut accession = None;
+        let mut description = None;
+        let mut model_length: usize = 0;
+        let mut alphabet_kind = AlphabetKind::Amino;
+        let mut ev_params_array = [EV_PARAM_UNSET; NUM_EV_PARAMS];
         let mut flags: u32 = 0;
-        let mut nseq: i32 = -1;
-        let mut eff_nseq: f32 = -1.0;
+        let mut num_sequences: i32 = -1;
+        let mut effective_num_sequences: f32 = -1.0;
         let mut checksum: u32 = 0;
         let mut map_flag = false;
         let mut max_length: i32 = -1;
@@ -170,17 +170,17 @@ impl HmmFile {
             match tag {
                 "NAME" => name = val.to_string(),
                 "ACC" => {
-                    acc = Some(val.to_string());
+                    accession = Some(val.to_string());
                     flags |= HMM_FLAG_ACC;
                 }
                 "DESC" => {
-                    desc = Some(val.to_string());
+                    description = Some(val.to_string());
                     flags |= HMM_FLAG_DESC;
                 }
-                "LENG" => m = val.parse().unwrap_or(0),
+                "LENG" => model_length = val.parse().unwrap_or(0),
                 "MAXL" => max_length = val.parse().unwrap_or(-1),
                 "ALPH" => {
-                    abc_type = match val {
+                    alphabet_kind = match val {
                         "amino" => AlphabetKind::Amino,
                         "DNA" => AlphabetKind::Dna,
                         "RNA" => AlphabetKind::Rna,
@@ -204,10 +204,10 @@ impl HmmFile {
                     flags |= HMM_FLAG_MAP;
                 }
                 "NSEQ" => {
-                    nseq = val.parse().unwrap_or(-1);
+                    num_sequences = val.parse().unwrap_or(-1);
                 }
                 "EFFN" => {
-                    eff_nseq = val.parse().unwrap_or(-1.0);
+                    effective_num_sequences = val.parse().unwrap_or(-1.0);
                 }
                 "CKSUM" => {
                     checksum = val.parse().unwrap_or(0);
@@ -215,26 +215,26 @@ impl HmmFile {
                 }
                 "STATS" => {
                     // "LOCAL MSV -9.9014 0.71847" or similar
-                    let stoks: Vec<&str> = val.split_whitespace().collect();
-                    if stoks.len() >= 3 && stoks[0] == "LOCAL" {
-                        let p1: f32 = stoks[2].parse().unwrap_or(0.0);
-                        let p2: f32 = if stoks.len() > 3 {
-                            stoks[3].parse().unwrap_or(0.0)
+                    let stat_tokens: Vec<&str> = val.split_whitespace().collect();
+                    if stat_tokens.len() >= 3 && stat_tokens[0] == "LOCAL" {
+                        let first_param: f32 = stat_tokens[2].parse().unwrap_or(0.0);
+                        let second_param: f32 = if stat_tokens.len() > 3 {
+                            stat_tokens[3].parse().unwrap_or(0.0)
                         } else {
                             0.0
                         };
-                        match stoks[1] {
+                        match stat_tokens[1] {
                             "MSV" => {
-                                evparam[EvParam::MsvMu.idx()] = p1;
-                                evparam[EvParam::MsvLambda.idx()] = p2;
+                                ev_params_array[EvParam::MsvMu.idx()] = first_param;
+                                ev_params_array[EvParam::MsvLambda.idx()] = second_param;
                             }
                             "VITERBI" => {
-                                evparam[EvParam::ViterbiMu.idx()] = p1;
-                                evparam[EvParam::ViterbiLambda.idx()] = p2;
+                                ev_params_array[EvParam::ViterbiMu.idx()] = first_param;
+                                ev_params_array[EvParam::ViterbiLambda.idx()] = second_param;
                             }
                             "FORWARD" => {
-                                evparam[EvParam::ForwardTau.idx()] = p1;
-                                evparam[EvParam::ForwardLambda.idx()] = p2;
+                                ev_params_array[EvParam::ForwardTau.idx()] = first_param;
+                                ev_params_array[EvParam::ForwardLambda.idx()] = second_param;
                             }
                             _ => {}
                         }
@@ -255,27 +255,31 @@ impl HmmFile {
             }
         }
 
-        if m == 0 {
+        if model_length == 0 {
             return Err(HmmerError::Format("Zero-length model".into()));
         }
 
-        let abc = match abc_type {
+        let alphabet = match alphabet_kind {
             AlphabetKind::Amino => Alphabet::amino(),
             AlphabetKind::Dna => Alphabet::dna(),
             AlphabetKind::Rna => Alphabet::rna(),
         };
-        let mut hmm = Hmm::new(m, &abc);
+        let mut hmm = Hmm::new(model_length, &alphabet);
         hmm.name = name;
-        hmm.accession = acc;
-        hmm.description = desc;
+        hmm.accession = accession;
+        hmm.description = description;
         hmm.ev_params = if flags & HMM_FLAG_STATS != 0 {
-            Some(EvParams::from_array(&evparam))
+            Some(EvParams::from_array(&ev_params_array))
         } else {
             None
         };
-        hmm.num_sequences = if nseq >= 0 { Some(nseq as u32) } else { None };
-        hmm.effective_num_seq_float = if eff_nseq >= 0.0 {
-            Some(eff_nseq)
+        hmm.num_sequences = if num_sequences >= 0 {
+            Some(num_sequences as u32)
+        } else {
+            None
+        };
+        hmm.effective_num_seq_float = if effective_num_sequences >= 0.0 {
+            Some(effective_num_sequences)
         } else {
             None
         };
@@ -290,7 +294,7 @@ impl HmmFile {
             None
         };
         if map_flag {
-            hmm.map = Some(vec![0; m + 1]);
+            hmm.map = Some(vec![0; model_length + 1]);
         }
 
         // Parse model body
@@ -298,7 +302,7 @@ impl HmmFile {
         //   COMPO line (optional)
         //   Insert emissions for node 0
         //   Transitions for node 0
-        //   Then for each k=1..M: match emiss, insert emiss, transitions
+        //   Then for each node=1..M: match emiss, insert emiss, transitions
 
         let mut line = String::new();
 
@@ -307,15 +311,19 @@ impl HmmFile {
         let _ = reader.read_line(&mut line);
         if line.trim().starts_with("COMPO") {
             // Parse composition
-            let toks: Vec<&str> = line.split_whitespace().collect();
-            if toks.len() > abc.canonical_size {
-                let mut compo_vec = vec![0.0f32; abc.canonical_size];
-                for a in 0..abc.canonical_size.min(MAX_CANONICAL_ALPHABET) {
-                    if let Ok(val) = toks[a + 1].parse::<f32>() {
-                        compo_vec[a] = val; // stored as -ln(p)
+            let tokens: Vec<&str> = line.split_whitespace().collect();
+            if tokens.len() > alphabet.canonical_size {
+                let mut composition_values = vec![0.0f32; alphabet.canonical_size];
+                for residue_index in 0..alphabet.canonical_size.min(MAX_CANONICAL_ALPHABET) {
+                    if let Ok(value) = tokens[residue_index + 1].parse::<f32>() {
+                        composition_values[residue_index] = if value >= 99999.0 {
+                            0.0
+                        } else {
+                            (-value).exp()
+                        };
                     }
                 }
-                hmm.model_composition = Some(compo_vec);
+                hmm.model_composition = Some(composition_values);
                 flags |= HMM_FLAG_COMPO;
             }
             // Read insert emissions for node 0
@@ -335,15 +343,15 @@ impl HmmFile {
         // Read transition line for node 0
         line.clear();
         let _ = reader.read_line(&mut line);
-        let mut toks = line.split_whitespace();
+        let mut transition_tokens = line.split_whitespace();
         if let (Some(a), Some(b), Some(c), Some(d), Some(e), Some(f), Some(g)) = (
-            toks.next(),
-            toks.next(),
-            toks.next(),
-            toks.next(),
-            toks.next(),
-            toks.next(),
-            toks.next(),
+            transition_tokens.next(),
+            transition_tokens.next(),
+            transition_tokens.next(),
+            transition_tokens.next(),
+            transition_tokens.next(),
+            transition_tokens.next(),
+            transition_tokens.next(),
         ) {
             for (tok, t_val) in [a, b, c, d, e, f, g]
                 .into_iter()
@@ -354,17 +362,17 @@ impl HmmFile {
         }
 
         // Parse nodes 1..M
-        for k in 1..=m {
+        for node_index in 1..=model_length {
             // Match emission line: k e1 e2 ... eK [MAP CS RF MM CONS]
             line.clear();
             let _ = reader.read_line(&mut line);
-            let mut toks = line.split_whitespace();
-            if toks.clone().count() > abc.canonical_size {
-                toks.next(); // node number
-                for (tok, mat_val) in toks
+            let mut tokens = line.split_whitespace();
+            if tokens.clone().count() > alphabet.canonical_size {
+                tokens.next(); // node number
+                for (tok, mat_val) in tokens
                     .by_ref()
-                    .take(abc.canonical_size)
-                    .zip(hmm.match_emissions_mut(k).iter_mut())
+                    .take(alphabet.canonical_size)
+                    .zip(hmm.match_emissions_mut(node_index).iter_mut())
                 {
                     if let Ok(val) = tok.parse::<f32>() {
                         *mat_val = if val >= 99999.0 { 0.0 } else { (-val).exp() };
@@ -372,42 +380,42 @@ impl HmmFile {
                 }
 
                 if map_flag
-                    && let Some(tok) = toks.next()
+                    && let Some(tok) = tokens.next()
                     && let Some(map) = &mut hmm.map
                 {
-                    map[k] = tok.parse().unwrap_or(0);
+                    map[node_index] = tok.parse().unwrap_or(0);
                 }
                 if flags & HMM_FLAG_CS != 0 {
                     if hmm.consensus_structure.is_none() {
-                        hmm.consensus_structure = Some(vec![b' '; m + 2]);
+                        hmm.consensus_structure = Some(vec![b' '; model_length + 2]);
                     }
-                    if let Some(c) = toks.next().and_then(|tok| tok.bytes().next())
+                    if let Some(c) = tokens.next().and_then(|tok| tok.bytes().next())
                         && let Some(cs) = &mut hmm.consensus_structure
                     {
-                        cs[k] = c;
+                        cs[node_index] = c;
                     }
                 }
                 if flags & HMM_FLAG_RF != 0 {
                     if hmm.reference_annotation.is_none() {
-                        hmm.reference_annotation = Some(vec![b' '; m + 2]);
+                        hmm.reference_annotation = Some(vec![b' '; model_length + 2]);
                     }
-                    if let Some(c) = toks.next().and_then(|tok| tok.bytes().next())
+                    if let Some(c) = tokens.next().and_then(|tok| tok.bytes().next())
                         && let Some(rf) = &mut hmm.reference_annotation
                     {
-                        rf[k] = c;
+                        rf[node_index] = c;
                     }
                 }
                 if flags & HMM_FLAG_MMASK != 0 {
-                    toks.next();
+                    tokens.next();
                 }
                 if flags & HMM_FLAG_CONS != 0 {
                     if hmm.consensus.is_none() {
-                        hmm.consensus = Some(vec![b' '; m + 2]);
+                        hmm.consensus = Some(vec![b' '; model_length + 2]);
                     }
-                    if let Some(c) = toks.next().and_then(|tok| tok.bytes().next())
+                    if let Some(c) = tokens.next().and_then(|tok| tok.bytes().next())
                         && let Some(cons) = &mut hmm.consensus
                     {
-                        cons[k] = c;
+                        cons[node_index] = c;
                     }
                 }
             }
@@ -417,7 +425,7 @@ impl HmmFile {
             let _ = reader.read_line(&mut line);
             for (tok, ins_val) in line
                 .split_whitespace()
-                .zip(hmm.insert_emissions_mut(k).iter_mut())
+                .zip(hmm.insert_emissions_mut(node_index).iter_mut())
             {
                 if let Ok(val) = tok.parse::<f32>() {
                     *ins_val = if val >= 99999.0 { 0.0 } else { (-val).exp() };
@@ -427,19 +435,19 @@ impl HmmFile {
             // Transition line (7 values: MM MI MD IM II DM DD)
             line.clear();
             let _ = reader.read_line(&mut line);
-            let mut toks = line.split_whitespace();
+            let mut transition_tokens = line.split_whitespace();
             if let (Some(a), Some(b), Some(c), Some(d), Some(e), Some(f), Some(g)) = (
-                toks.next(),
-                toks.next(),
-                toks.next(),
-                toks.next(),
-                toks.next(),
-                toks.next(),
-                toks.next(),
+                transition_tokens.next(),
+                transition_tokens.next(),
+                transition_tokens.next(),
+                transition_tokens.next(),
+                transition_tokens.next(),
+                transition_tokens.next(),
+                transition_tokens.next(),
             ) {
                 for (tok, t_val) in [a, b, c, d, e, f, g]
                     .into_iter()
-                    .zip(hmm.transitions_mut(k)[..7].iter_mut())
+                    .zip(hmm.transitions_mut(node_index)[..7].iter_mut())
                 {
                     *t_val = Self::parse_hmm_prob(tok);
                 }
@@ -457,7 +465,7 @@ impl HmmFile {
             }
         }
 
-        Ok((abc, hmm))
+        Ok((alphabet, hmm))
     }
 
     /// Parse a probability value from HMMER3/f format.
@@ -474,26 +482,26 @@ impl HmmFile {
 
     /// Write an HMM to a file in HMMER3/f format.
     pub fn write_ascii<W: Write>(
-        w: &mut W,
+        writer: &mut W,
         hmm: &Hmm,
-        abc: &Alphabet,
+        alphabet: &Alphabet,
     ) -> Result<(), std::io::Error> {
-        writeln!(w, "HMMER3/f [hmmer-rust | port]")?;
-        writeln!(w, "NAME  {}", hmm.name)?;
-        if let Some(ref acc) = hmm.accession {
-            writeln!(w, "ACC   {}", acc)?;
+        writeln!(writer, "HMMER3/f [hmmer-rust | port]")?;
+        writeln!(writer, "NAME  {}", hmm.name)?;
+        if let Some(ref accession) = hmm.accession {
+            writeln!(writer, "ACC   {}", accession)?;
         }
-        if let Some(ref desc) = hmm.description {
-            writeln!(w, "DESC  {}", desc)?;
+        if let Some(ref description) = hmm.description {
+            writeln!(writer, "DESC  {}", description)?;
         }
-        writeln!(w, "LENG  {}", hmm.num_nodes)?;
-        let alph = match abc.kind {
+        writeln!(writer, "LENG  {}", hmm.num_nodes)?;
+        let alphabet_name = match alphabet.kind {
             AlphabetKind::Amino => "amino",
             AlphabetKind::Dna => "DNA",
             AlphabetKind::Rna => "RNA",
         };
-        writeln!(w, "ALPH  {}", alph)?;
-        writeln!(w, "//")?;
+        writeln!(writer, "ALPH  {}", alphabet_name)?;
+        writeln!(writer, "//")?;
         Ok(())
     }
 }

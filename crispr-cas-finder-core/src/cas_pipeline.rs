@@ -43,22 +43,22 @@ pub fn gene_coordinates_from_records(records: &[GeneRecord]) -> HashMap<String, 
 }
 
 pub fn build_faa_content(genes: &[GeneRecord]) -> String {
-    let mut faa = String::new();
+    let mut fasta_amino_acid_content = String::new();
     for gene in genes {
-        let strand_int: i32 = if gene.strand == "-" { -1 } else { 1 };
-        faa.push_str(&format!(
+        let strand_numeric_value: i32 = if gene.strand == "-" { -1 } else { 1 };
+        fasta_amino_acid_content.push_str(&format!(
             ">{id} # {start} # {end} # {strand_int} # ID={id}\n",
             id = gene.id,
             start = gene.start,
             end = gene.end,
-            strand_int = strand_int,
+            strand_int = strand_numeric_value,
         ));
         for chunk in gene.protein.as_bytes().chunks(60) {
-            faa.push_str(std::str::from_utf8(chunk).unwrap_or(""));
-            faa.push('\n');
+            fasta_amino_acid_content.push_str(std::str::from_utf8(chunk).unwrap_or(""));
+            fasta_amino_acid_content.push('\n');
         }
     }
-    faa
+    fasta_amino_acid_content
 }
 
 /// Build a model registry from in-memory XML definitions.
@@ -80,7 +80,7 @@ pub fn parse_cas_model_xml(
 ) -> Result<SystemModel, String> {
     let converted = convert_cas_xml(content);
 
-    let fqn = format!("{}/{}", family, model_name);
+    let fully_qualified_model_name = format!("{}/{}", family, model_name);
     let mut inter_gene_max_space: u32 = 20;
     let mut min_mandatory_genes_required: u32 = 0;
     let mut min_genes_required: u32 = 0;
@@ -131,7 +131,7 @@ pub fn parse_cas_model_xml(
     }
 
     Ok(SystemModel {
-        fqn,
+        fully_qualified_name: fully_qualified_model_name,
         family: family.to_string(),
         name: model_name.to_string(),
         version: None,
@@ -164,7 +164,7 @@ pub fn assign_hits_to_model(
                             position,
                             gene_ref: gene.name.clone(),
                             gene_status: gene.status,
-                            model_fqn: model.fqn.clone(),
+                            model_fully_qualified_name: model.fully_qualified_name.clone(),
                             is_exchangeable,
                             locus_num: 1,
                             counterpart: String::new(),
@@ -197,12 +197,12 @@ pub fn assign_hits_to_model(
     best_by_protein.into_values().map(|(hit, _)| hit).collect()
 }
 
-pub fn evaluate_cluster(c: &Cluster, model: &SystemModel) -> Option<DetectedSystem> {
+pub fn evaluate_cluster(cluster: &Cluster, model: &SystemModel) -> Option<DetectedSystem> {
     let mandatory_names: HashSet<&str> = model.mandatory_genes().map(|g| g.name.as_str()).collect();
     let accessory_names: HashSet<&str> = model.accessory_genes().map(|g| g.name.as_str()).collect();
     let forbidden_names: HashSet<&str> = model.forbidden_genes().map(|g| g.name.as_str()).collect();
 
-    let found_genes: HashSet<&str> = c.hits.iter().map(|h| h.gene_ref.as_str()).collect();
+    let found_genes: HashSet<&str> = cluster.hits.iter().map(|h| h.gene_ref.as_str()).collect();
 
     let mandatory_found: Vec<String> = mandatory_names
         .iter()
@@ -232,7 +232,7 @@ pub fn evaluate_cluster(c: &Cluster, model: &SystemModel) -> Option<DetectedSyst
         return None;
     }
 
-    let score: f64 = c.hits.iter().map(|h| h.hit.score).sum();
+    let score: f64 = cluster.hits.iter().map(|h| h.hit.score).sum();
     let max_nb_genes = model.mandatory_count() + model.accessory_count();
     let wholeness = if max_nb_genes > 0 {
         total_found as f64 / max_nb_genes as f64
@@ -243,12 +243,12 @@ pub fn evaluate_cluster(c: &Cluster, model: &SystemModel) -> Option<DetectedSyst
     Some(DetectedSystem {
         id: String::new(),
         replicon: String::new(),
-        model_fqn: model.fqn.clone(),
+        model_fully_qualified_name: model.fully_qualified_name.clone(),
         score,
         wholeness,
         loci_count: 1,
         occurrence: 0,
-        hits: c.hits.clone(),
+        hits: cluster.hits.clone(),
         state: "single_locus".to_string(),
         mandatory_found,
         accessory_found,
@@ -256,7 +256,7 @@ pub fn evaluate_cluster(c: &Cluster, model: &SystemModel) -> Option<DetectedSyst
     })
 }
 
-pub fn revcomp_dna(seq: &[u8]) -> Vec<u8> {
+pub fn reverse_complement_dna(seq: &[u8]) -> Vec<u8> {
     seq.iter()
         .rev()
         .map(|&b| match b {

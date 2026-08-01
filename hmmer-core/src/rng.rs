@@ -1,7 +1,3 @@
-// rng.rs — Random number generator
-//
-// Replaces EslRandomness with a named xorshift64 implementation.
-
 use std::fmt;
 
 /// A simple xorshift64 random number generator.

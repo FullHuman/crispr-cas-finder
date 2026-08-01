@@ -1,6 +1,6 @@
 use crate::cas_pipeline::{
     ModelDefinition, assign_hits_to_model, build_model_registry, codon_table, evaluate_cluster,
-    revcomp_dna, translate_dna,
+    reverse_complement_dna, translate_dna,
 };
 use crate::cas_types::{
     HmmerHit, ModelRegistry, RepliconTopology, SearchResults, SequenceIndex, cluster_hits,
@@ -39,7 +39,7 @@ pub fn run_casfinder(
     input: &Path,
     basename: &str,
     outdir: &Path,
-    cfg: &CasFinderConfig,
+    config: &CasFinderConfig,
 ) -> Result<SearchResults> {
     // Prepare annotation directory
     let annotation_dir = outdir.join(format!("orphos_{}", basename));
@@ -47,32 +47,32 @@ pub fn run_casfinder(
 
     // Predict genes with Orphos
     info!("Running Orphos gene prediction on {}", input.display());
-    let config = OrphosConfig {
-        metagenomic: cfg.metagenome,
+    let orphos_config = OrphosConfig {
+        metagenomic: config.metagenome,
         closed_ends: true,
-        quiet: cfg.quiet,
-        translation_table: Some(cfg.genetic_code as u8),
+        quiet: config.quiet,
+        translation_table: Some(config.genetic_code as u8),
         ..OrphosConfig::default()
     };
-    let analyzer = OrphosAnalyzer::new(config);
+    let analyzer = OrphosAnalyzer::new(orphos_config);
     let results = analyzer
         .analyze_fasta_file(input.to_str().unwrap())
         .context("Orphos gene prediction failed")?;
 
     // Write GFF3
-    let gff = annotation_dir.join(format!("{}.gff", basename));
-    let mut gff_file = fs::File::create(&gff).context("Creating .gff output")?;
-    for r in &results {
-        write_results(&mut gff_file, r, OutputFormat::Gff)
+    let gff_path = annotation_dir.join(format!("{}.gff", basename));
+    let mut gff_file = fs::File::create(&gff_path).context("Creating .gff output")?;
+    for gene_prediction_result in &results {
+        write_results(&mut gff_file, gene_prediction_result, OutputFormat::Gff)
             .context("Writing GFF from orphos results")?;
     }
 
     // Write FAA
-    let faa = annotation_dir.join(format!("{}.faa", basename));
-    write_faa_from_genes(input, &results, cfg.genetic_code, &faa)
+    let faa_path = annotation_dir.join(format!("{}.faa", basename));
+    write_faa_from_genes(input, &results, config.genetic_code, &faa_path)
         .context("Writing .faa from orphos gene predictions")?;
 
-    let proteome = faa;
+    let proteome = faa_path;
     let metadata = fs::metadata(&proteome)
         .with_context(|| format!("Cannot stat proteome file: {:?}", proteome))?;
     if metadata.len() == 0 {
@@ -81,49 +81,56 @@ pub fn run_casfinder(
     }
 
     // ---- Load proteins as digital sequences via hmmer-core ----
-    let abc = Alphabet::amino();
-    let seqs = hmmer_io::sqfile_open_digital(&abc, proteome.to_str().unwrap())
-        .map_err(|e| anyhow::anyhow!("Failed to load proteins: {}", e))?;
+    let amino_alphabet = Alphabet::amino();
+    let protein_sequences =
+        hmmer_io::read_fasta_digital_sequences(&amino_alphabet, proteome.to_str().unwrap())
+            .map_err(|e| anyhow::anyhow!("Failed to load proteins: {}", e))?;
 
-    info!("Loaded {} protein sequences", seqs.len());
+    info!("Loaded {} protein sequences", protein_sequences.len());
 
-    let seq_names: Vec<&str> = seqs.iter().map(|s| s.name.as_str()).collect();
+    let seq_names: Vec<&str> = protein_sequences.iter().map(|s| s.name.as_str()).collect();
     let seq_index = SequenceIndex::from_ids(&seq_names);
 
     // ---- Build model registry from CAS XML definitions ----
-    let models_dir = resolve_models_dir(cfg)?;
-    let profiles_dir = resolve_profiles_dir(cfg)?;
+    let models_dir = resolve_models_dir(config)?;
+    let profiles_dir = resolve_profiles_dir(config)?;
 
-    let (registry, model_fqns) = build_model_registry_from_dir(&models_dir)?;
+    let (registry, model_fully_qualified_names) = build_model_registry_from_dir(&models_dir)?;
 
     let mut needed_profiles: HashSet<String> = HashSet::new();
-    for fqn in &model_fqns {
-        if let Some(model) = registry.get(fqn) {
+    for model_fully_qualified_name in &model_fully_qualified_names {
+        if let Some(model) = registry.get(model_fully_qualified_name) {
             for name in model.all_profile_names() {
                 needed_profiles.insert(name.to_string());
             }
         }
     }
 
-    if model_fqns.is_empty() {
+    if model_fully_qualified_names.is_empty() {
         anyhow::bail!("No CAS model definitions found in {:?}", models_dir);
     }
     info!(
         "Need {} HMM profiles for {} models",
         needed_profiles.len(),
-        model_fqns.len()
+        model_fully_qualified_names.len()
     );
 
     // ---- HMM search using hmmer-core pipeline ----
-    let all_hits = run_hmm_search(&profiles_dir, &needed_profiles, &seqs, &abc, cfg.workers)?;
+    let all_hits = run_hmm_search(
+        &profiles_dir,
+        &needed_profiles,
+        &protein_sequences,
+        &amino_alphabet,
+        config.workers,
+    )?;
 
     info!("HMM search found hits for {} profiles", all_hits.len());
 
     // ---- Cluster hits and evaluate systems ----
     let mut detected_systems = Vec::new();
 
-    for fqn in &model_fqns {
-        let model = match registry.get(fqn) {
+    for model_fully_qualified_name in &model_fully_qualified_names {
+        let model = match registry.get(model_fully_qualified_name) {
             Some(m) => m,
             None => continue,
         };
@@ -137,15 +144,15 @@ pub fn run_casfinder(
         let clusters = cluster_hits(
             &mut hits_for_clustering,
             model.inter_gene_max_space,
-            seqs.len(),
+            protein_sequences.len(),
             RepliconTopology::Circular,
         );
 
-        for c in &clusters {
-            if c.is_empty() {
+        for cluster in &clusters {
+            if cluster.is_empty() {
                 continue;
             }
-            if let Some(system) = evaluate_cluster(c, model) {
+            if let Some(system) = evaluate_cluster(cluster, model) {
                 detected_systems.push(system);
             }
         }
@@ -166,7 +173,7 @@ pub fn run_casfinder(
         if best < MIN_BEST_HIT_SCORE {
             info!(
                 "Filtering low-confidence system {} (best hit score {:.1} < {})",
-                sys.model_fqn, best, MIN_BEST_HIT_SCORE
+                sys.model_fully_qualified_name, best, MIN_BEST_HIT_SCORE
             );
             return false;
         }
@@ -191,48 +198,48 @@ pub fn run_casfinder(
 }
 
 /// Resolve the directory containing CAS model definitions (XML files).
-fn resolve_models_dir(cfg: &CasFinderConfig) -> Result<PathBuf> {
-    if let Some(ref dir) = cfg.cas_models_dir {
-        return Ok(dir.clone());
+fn resolve_models_dir(config: &CasFinderConfig) -> Result<PathBuf> {
+    if let Some(ref models_dir_path) = config.cas_models_dir {
+        return Ok(models_dir_path.clone());
     }
-    let def_suffix = format!("DEF-{}", cfg.definition);
-    let candidates = [
-        PathBuf::from(format!("CasFinder-2.0.3/{}-2.0.3", def_suffix)),
+    let definition_suffix = format!("DEF-{}", config.definition);
+    let candidate_directories = [
+        PathBuf::from(format!("CasFinder-2.0.3/{}-2.0.3", definition_suffix)),
         PathBuf::from(format!(
             "../CRISPRCasFinder/CasFinder-2.0.3/{}-2.0.3",
-            def_suffix
+            definition_suffix
         )),
     ];
-    for p in &candidates {
-        if p.is_dir() {
-            return Ok(p.clone());
+    for candidate_directory in &candidate_directories {
+        if candidate_directory.is_dir() {
+            return Ok(candidate_directory.clone());
         }
     }
     anyhow::bail!(
         "Cannot find CAS model definitions directory. \
          Tried: {:?}. Use --cas-models-dir to specify the path.",
-        candidates
+        candidate_directories
     )
 }
 
 /// Resolve the directory containing CAS HMM profiles.
-fn resolve_profiles_dir(cfg: &CasFinderConfig) -> Result<PathBuf> {
-    if let Some(ref dir) = cfg.cas_profiles_dir {
-        return Ok(dir.clone());
+fn resolve_profiles_dir(config: &CasFinderConfig) -> Result<PathBuf> {
+    if let Some(ref profiles_dir_path) = config.cas_profiles_dir {
+        return Ok(profiles_dir_path.clone());
     }
-    let candidates = [
+    let candidate_directories = [
         PathBuf::from("CasFinder-2.0.3/CASprofiles-2.0.3"),
         PathBuf::from("../CRISPRCasFinder/CasFinder-2.0.3/CASprofiles-2.0.3"),
     ];
-    for p in &candidates {
-        if p.is_dir() {
-            return Ok(p.clone());
+    for candidate_directory in &candidate_directories {
+        if candidate_directory.is_dir() {
+            return Ok(candidate_directory.clone());
         }
     }
     anyhow::bail!(
         "Cannot find CAS HMM profiles directory. \
          Tried: {:?}. Use --cas-profiles-dir to specify the path.",
-        candidates
+        candidate_directories
     )
 }
 
@@ -262,13 +269,13 @@ fn build_model_registry_from_dir(models_dir: &Path) -> Result<(ModelRegistry, Ve
         }
     }
 
-    let fqns: Vec<String> = models
+    let model_fully_qualified_names: Vec<String> = models
         .iter()
         .map(|model| format!("{}/{}", model.family, model.name))
         .collect();
     let registry = build_model_registry(&models)
         .map_err(|e| anyhow::anyhow!("Failed to build CAS model registry: {}", e))?;
-    Ok((registry, fqns))
+    Ok((registry, model_fully_qualified_names))
 }
 
 // ---------------------------------------------------------------------------
@@ -280,28 +287,28 @@ fn build_model_registry_from_dir(models_dir: &Path) -> Result<(ModelRegistry, Ve
 fn run_hmm_search(
     profiles_dir: &Path,
     needed_profiles: &HashSet<String>,
-    seqs: &[DigitalSequence],
-    abc: &Alphabet,
+    protein_sequences: &[DigitalSequence],
+    alphabet: &Alphabet,
     workers: usize,
 ) -> Result<HashMap<String, Vec<HmmerHit>>> {
-    let avg_len = if seqs.is_empty() {
+    let average_sequence_length = if protein_sequences.is_empty() {
         400
     } else {
-        seqs.iter().map(|s| s.len()).sum::<usize>() / seqs.len()
+        protein_sequences.iter().map(|s| s.len()).sum::<usize>() / protein_sequences.len()
     };
 
     let coverage_threshold = 0.4;
     let mut all_hits: HashMap<String, Vec<HmmerHit>> = HashMap::new();
     let mut profile_names: Vec<String> = needed_profiles.iter().cloned().collect();
     profile_names.sort_unstable();
-    let mut sequence_search_order: Vec<usize> = (0..seqs.len()).collect();
-    sequence_search_order.sort_unstable_by_key(|&index| (seqs[index].len(), index));
+    let mut sequence_search_order: Vec<usize> = (0..protein_sequences.len()).collect();
+    sequence_search_order.sort_unstable_by_key(|&index| (protein_sequences[index].len(), index));
 
     let pool = build_hmm_search_pool(workers)?;
     info!(
         "Searching {} HMM profiles across {} protein sequences with {} thread(s)",
         profile_names.len(),
-        seqs.len(),
+        protein_sequences.len(),
         pool.current_num_threads()
     );
     let search_results = pool.install(|| {
@@ -311,10 +318,10 @@ fn run_hmm_search(
                 search_profile_hits(
                     profiles_dir,
                     profile_name,
-                    seqs,
+                    protein_sequences,
                     &sequence_search_order,
-                    abc,
-                    avg_len,
+                    alphabet,
+                    average_sequence_length,
                     coverage_threshold,
                 )
             })
@@ -333,10 +340,10 @@ fn run_hmm_search(
 fn search_profile_hits(
     profiles_dir: &Path,
     profile_name: &str,
-    seqs: &[DigitalSequence],
+    protein_sequences: &[DigitalSequence],
     sequence_search_order: &[usize],
-    abc: &Alphabet,
-    avg_len: usize,
+    alphabet: &Alphabet,
+    average_sequence_length: usize,
     coverage_threshold: f64,
 ) -> Result<Option<(String, Vec<HmmerHit>)>> {
     let hmm_path = profiles_dir.join(format!("{}.hmm", profile_name));
@@ -344,34 +351,40 @@ fn search_profile_hits(
         return Ok(None);
     }
 
-    let bg = BackgroundModel::new(abc);
-    let mut hfp = HmmFile::open(hmm_path.to_str().unwrap(), None)
+    let background_model = BackgroundModel::new(alphabet);
+    let mut hmm_file = HmmFile::open(hmm_path.to_str().unwrap(), None)
         .map_err(|e| anyhow::anyhow!("Failed to open {}: {}", profile_name, e))?;
-    let (_abc, hmm) = hfp
+    let (_hmm_alphabet, hmm) = hmm_file
         .read()
         .map_err(|e| anyhow::anyhow!("Failed to parse {}: {}", profile_name, e))?;
 
     let num_nodes = hmm.num_nodes;
-    let mut gm = Profile::new(num_nodes, abc);
-    modelconfig::profile_config(&hmm, &bg, &mut gm, avg_len, SearchMode::Local);
+    let mut configured_profile = Profile::new(num_nodes, alphabet);
+    modelconfig::profile_config(
+        &hmm,
+        &background_model,
+        &mut configured_profile,
+        average_sequence_length,
+        SearchMode::Local,
+    );
 
-    let query = SearchQuery::from_configured_profile(gm, bg.clone())
+    let query = SearchQuery::from_configured_profile(configured_profile, background_model.clone())
         .map_err(|e| anyhow::anyhow!("Query config failed for {}: {}", profile_name, e))?;
     let plan = SearchPlan::builder(query)
         .filters(FilterPolicy::default())
         .build();
     let mut worker = plan
         .spawn_worker(CapacityHints {
-            target_length: avg_len,
+            target_length: average_sequence_length,
         })
         .map_err(|e| anyhow::anyhow!("Spawn worker failed for {}: {}", profile_name, e))?;
 
     let mut profile_hits: Vec<(usize, HmmerHit)> = Vec::new();
 
-    for &seq_index in sequence_search_order {
-        let seq = &seqs[seq_index];
+    for &sequence_index in sequence_search_order {
+        let target_sequence = &protein_sequences[sequence_index];
         let report = worker
-            .search(seq)
+            .search(target_sequence)
             .map_err(|e| anyhow::anyhow!("Search error {}: {}", profile_name, e))?;
 
         match &report.outcome {
@@ -380,22 +393,24 @@ fn search_profile_hits(
                     if !domain.is_included {
                         continue;
                     }
-                    let prof_cov = (domain.hmm_to - domain.hmm_from + 1) as f64 / num_nodes as f64;
-                    if prof_cov < coverage_threshold {
+                    let profile_coverage =
+                        (domain.hmm_to - domain.hmm_from + 1) as f64 / num_nodes as f64;
+                    if profile_coverage < coverage_threshold {
                         continue;
                     }
-                    let seq_cov = (domain.alignment_end - domain.alignment_start + 1) as f64
-                        / seq.len() as f64;
+                    let sequence_coverage = (domain.alignment_end - domain.alignment_start + 1)
+                        as f64
+                        / target_sequence.len() as f64;
                     profile_hits.push((
-                        seq_index,
+                        sequence_index,
                         HmmerHit {
                             id: hit.name.clone(),
                             gene_name: profile_name.to_string(),
-                            seq_len: seq.len() as u32,
+                            seq_len: target_sequence.len() as u32,
                             i_evalue: domain.log_pvalue.exp(),
                             score: domain.bitscore as f64,
-                            profile_coverage: prof_cov,
-                            seq_coverage: seq_cov,
+                            profile_coverage,
+                            seq_coverage: sequence_coverage,
                             begin_match: domain.alignment_start as u32,
                             end_match: domain.alignment_end as u32,
                         },
@@ -407,20 +422,21 @@ fn search_profile_hits(
                     (report.trace.forward_raw_score, report.trace.null_score)
                 {
                     let bitscore = (fwd_raw - null_sc) / std::f32::consts::LN_2;
-                    let prof_cov = seq.len().min(num_nodes) as f64 / num_nodes as f64;
-                    if prof_cov >= coverage_threshold {
+                    let profile_coverage =
+                        target_sequence.len().min(num_nodes) as f64 / num_nodes as f64;
+                    if profile_coverage >= coverage_threshold {
                         profile_hits.push((
-                            seq_index,
+                            sequence_index,
                             HmmerHit {
-                                id: seq.name.clone(),
+                                id: target_sequence.name.clone(),
                                 gene_name: profile_name.to_string(),
-                                seq_len: seq.len() as u32,
+                                seq_len: target_sequence.len() as u32,
                                 i_evalue: 0.0,
                                 score: bitscore as f64,
-                                profile_coverage: prof_cov,
+                                profile_coverage,
                                 seq_coverage: 1.0,
                                 begin_match: 1,
-                                end_match: seq.len() as u32,
+                                end_match: target_sequence.len() as u32,
                             },
                         ));
                     }
@@ -430,7 +446,7 @@ fn search_profile_hits(
         }
     }
 
-    profile_hits.sort_by_key(|(seq_index, _)| *seq_index);
+    profile_hits.sort_by_key(|(sequence_index, _)| *sequence_index);
     let profile_hits: Vec<HmmerHit> = profile_hits.into_iter().map(|(_, hit)| hit).collect();
 
     if profile_hits.is_empty() {
@@ -475,32 +491,32 @@ fn write_faa_from_genes(
         sequences.push((record.id().to_string(), record.seq().to_vec()));
     }
 
-    let table = codon_table(genetic_code);
-    let mut out = fs::File::create(faa_path).context("Creating .faa file")?;
+    let translation_table = codon_table(genetic_code);
+    let mut output_file = fs::File::create(faa_path).context("Creating .faa file")?;
     let mut gene_count = 0usize;
 
-    for (seq_idx, r) in results.iter().enumerate() {
-        let genomic_seq = if seq_idx < sequences.len() {
-            &sequences[seq_idx].1
+    for (sequence_index, orphos_result) in results.iter().enumerate() {
+        let genomic_sequence = if sequence_index < sequences.len() {
+            &sequences[sequence_index].1
         } else {
             continue;
         };
 
-        for gene in &r.genes {
+        for gene in &orphos_result.genes {
             let begin = gene.coordinates.begin.saturating_sub(1);
             let end = gene.coordinates.end.saturating_sub(1);
 
-            if end >= genomic_seq.len() {
+            if end >= genomic_sequence.len() {
                 continue;
             }
 
-            let cds_nt = &genomic_seq[begin..=end];
-            let cds_nt = match format!("{}", gene.coordinates.strand).as_str() {
-                "-" => revcomp_dna(cds_nt),
-                _ => cds_nt.to_vec(),
+            let coding_dna_nucleotides = &genomic_sequence[begin..=end];
+            let coding_dna_nucleotides = match format!("{}", gene.coordinates.strand).as_str() {
+                "-" => reverse_complement_dna(coding_dna_nucleotides),
+                _ => coding_dna_nucleotides.to_vec(),
             };
 
-            let protein = translate_dna(&cds_nt, &table);
+            let protein = translate_dna(&coding_dna_nucleotides, &translation_table);
             if protein.is_empty() {
                 continue;
             }
@@ -512,17 +528,17 @@ fn write_faa_from_genes(
             };
             let gene_id = format!(
                 "{}_{} # {} # {} # {} # ID={}",
-                r.sequence_info.header,
+                orphos_result.sequence_info.header,
                 gene_count,
                 gene.coordinates.begin,
                 gene.coordinates.end,
                 strand_int,
                 gene_count
             );
-            writeln!(out, ">{}", gene_id)?;
+            writeln!(output_file, ">{}", gene_id)?;
             for chunk in protein.as_bytes().chunks(60) {
-                out.write_all(chunk)?;
-                out.write_all(b"\n")?;
+                output_file.write_all(chunk)?;
+                output_file.write_all(b"\n")?;
             }
         }
     }
@@ -564,7 +580,7 @@ mod tests {
     #[test]
     fn assign_hits_prefers_local_gene_over_inherited_duplicate() {
         let model = SystemModel {
-            fqn: "CASFinder/CAS-TypeIE".to_string(),
+            fully_qualified_name: "CASFinder/CAS-TypeIE".to_string(),
             family: "CASFinder".to_string(),
             name: "CAS-TypeIE".to_string(),
             version: None,
@@ -600,7 +616,7 @@ mod tests {
     #[test]
     fn assign_hits_keeps_best_scoring_hit_for_same_gene_and_orf() {
         let model = SystemModel {
-            fqn: "CASFinder/CAS-TypeIE".to_string(),
+            fully_qualified_name: "CASFinder/CAS-TypeIE".to_string(),
             family: "CASFinder".to_string(),
             name: "CAS-TypeIE".to_string(),
             version: None,

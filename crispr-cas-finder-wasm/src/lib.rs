@@ -2,7 +2,8 @@ use crispr_cas_finder_core::{
     DetectionParams,
     cas_pipeline::{
         GeneRecord, ModelDefinition, assign_hits_to_model, build_faa_content, build_model_registry,
-        codon_table, evaluate_cluster, gene_coordinates_from_records, revcomp_dna, translate_dna,
+        codon_table, evaluate_cluster, gene_coordinates_from_records, reverse_complement_dna,
+        translate_dna,
     },
     cas_types::{
         HmmerHit, HmmerOptions, ModelRegistry, RepliconTopology, SequenceIndex, cluster_hits,
@@ -68,7 +69,7 @@ pub struct CasOptions {
 }
 
 fn parse_fasta_sequences(fasta_content: &str) -> Vec<(String, Vec<u8>)> {
-    let mut seqs: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut parsed_sequences: Vec<(String, Vec<u8>)> = Vec::new();
     let mut current_id: Option<String> = None;
 
     for line in fasta_content.lines() {
@@ -76,7 +77,7 @@ fn parse_fasta_sequences(fasta_content: &str) -> Vec<(String, Vec<u8>)> {
             let id = header.split_whitespace().next().unwrap_or("").to_string();
             if !id.is_empty() {
                 current_id = Some(id.clone());
-                seqs.push((id, Vec::new()));
+                parsed_sequences.push((id, Vec::new()));
             } else {
                 current_id = None;
             }
@@ -86,14 +87,14 @@ fn parse_fasta_sequences(fasta_content: &str) -> Vec<(String, Vec<u8>)> {
         if current_id.is_some() {
             let clean = line.trim().as_bytes();
             if !clean.is_empty()
-                && let Some((_, seq)) = seqs.last_mut()
+                && let Some((_, sequence_bytes)) = parsed_sequences.last_mut()
             {
-                seq.extend_from_slice(clean);
+                sequence_bytes.extend_from_slice(clean);
             }
         }
     }
 
-    seqs
+    parsed_sequences
 }
 
 #[wasm_bindgen]
@@ -120,7 +121,7 @@ pub fn find_repeats(fasta_content: &str, options_js: JsValue) -> Result<JsValue,
 struct CasContext {
     genes: Vec<GeneRecord>,
     targets: Vec<DigitalSequence>,
-    abc: Alphabet,
+    amino_alphabet: Alphabet,
     registry: ModelRegistry,
     needed_profiles: HashSet<String>,
     hmmer_options: HmmerOptions,
@@ -172,7 +173,7 @@ pub fn cas_prepare(
             let cds_nt = &seq_bytes[begin..=end];
             let strand_str = format!("{}", gene.coordinates.strand);
             let cds_nt = if strand_str == "-" {
-                revcomp_dna(cds_nt)
+                reverse_complement_dna(cds_nt)
             } else {
                 cds_nt.to_vec()
             };
@@ -196,7 +197,7 @@ pub fn cas_prepare(
         }
     }
 
-    let abc = Alphabet::amino();
+    let amino_alphabet = Alphabet::amino();
     let faa_content = build_faa_content(&all_genes);
     log!(
         "[CAS] Gene prediction done: {} genes found",
@@ -213,18 +214,18 @@ pub fn cas_prepare(
         );
     }
     let targets: Vec<DigitalSequence> = {
-        let mut seqs = Vec::new();
+        let mut digital_sequences = Vec::new();
         let mut current_name = String::new();
         let mut current_desc = String::new();
         let mut current_seq = Vec::new();
         for line in faa_content.lines() {
             if let Some(header) = line.strip_prefix('>') {
                 if !current_name.is_empty() && !current_seq.is_empty() {
-                    seqs.push(DigitalSequence::from_bytes(
+                    digital_sequences.push(DigitalSequence::from_bytes(
                         &current_name,
                         &current_desc,
                         &current_seq,
-                        &abc,
+                        &amino_alphabet,
                     ));
                 }
                 let parts: Vec<&str> = header.splitn(2, char::is_whitespace).collect();
@@ -236,22 +237,22 @@ pub fn cas_prepare(
             }
         }
         if !current_name.is_empty() && !current_seq.is_empty() {
-            seqs.push(DigitalSequence::from_bytes(
+            digital_sequences.push(DigitalSequence::from_bytes(
                 &current_name,
                 &current_desc,
                 &current_seq,
-                &abc,
+                &amino_alphabet,
             ));
         }
-        seqs
+        digital_sequences
     };
 
     let registry = build_model_registry(&models).map_err(|e| JsValue::from_str(&e))?;
 
     let mut needed_profiles: HashSet<String> = HashSet::new();
     for model_def in &models {
-        let fqn = format!("{}/{}", model_def.family, model_def.name);
-        if let Some(model) = registry.get(&fqn) {
+        let model_fully_qualified_name = format!("{}/{}", model_def.family, model_def.name);
+        if let Some(model) = registry.get(&model_fully_qualified_name) {
             for name in model.all_profile_names() {
                 needed_profiles.insert(name.to_string());
             }
@@ -267,7 +268,7 @@ pub fn cas_prepare(
     *CAS_CTX.lock().unwrap() = Some(CasContext {
         genes: all_genes,
         targets,
-        abc,
+        amino_alphabet,
         registry,
         needed_profiles,
         hmmer_options: HmmerOptions {
@@ -303,14 +304,14 @@ pub fn cas_search_profile(profile_name: &str, profile_data: &str) -> Result<u32,
     let (_abc, hmm) = read_hmm(&mut reader)
         .map_err(|e| JsValue::from_str(&format!("Failed to parse HMM {profile_name}: {e}")))?;
 
-    let bg = BackgroundModel::new(&ctx.abc);
+    let bg = BackgroundModel::new(&ctx.amino_alphabet);
     let avg_len = if ctx.targets.is_empty() {
         400
     } else {
         ctx.targets.iter().map(|s| s.len()).sum::<usize>() / ctx.targets.len()
     };
     let num_nodes = hmm.num_nodes;
-    let mut gm = Profile::new(num_nodes, &ctx.abc);
+    let mut gm = Profile::new(num_nodes, &ctx.amino_alphabet);
     modelconfig::profile_config(&hmm, &bg, &mut gm, avg_len, SearchMode::Local);
 
     let query = SearchQuery::from_configured_profile(gm, bg)
@@ -403,7 +404,7 @@ pub fn cas_search_all_profiles(profiles_js: JsValue) -> Result<u32, JsValue> {
     let profiles: Vec<ProfileEntry> = serde_wasm_bindgen::from_value(profiles_js)
         .map_err(|e| JsValue::from_str(&format!("invalid profiles: {e}")))?;
 
-    let (targets, hmmer_options, needed_profiles, abc) = {
+    let (targets, hmmer_options, needed_profiles, amino_alphabet) = {
         let guard = CAS_CTX.lock().unwrap();
         let ctx = guard
             .as_ref()
@@ -412,7 +413,7 @@ pub fn cas_search_all_profiles(profiles_js: JsValue) -> Result<u32, JsValue> {
             ctx.targets.clone(),
             ctx.hmmer_options.clone(),
             ctx.needed_profiles.clone(),
-            ctx.abc.clone(),
+            ctx.amino_alphabet.clone(),
         )
     };
 
@@ -431,8 +432,8 @@ pub fn cas_search_all_profiles(profiles_js: JsValue) -> Result<u32, JsValue> {
             let (_abc, hmm) = read_hmm(&mut reader).ok()?;
             let num_nodes = hmm.num_nodes;
 
-            let bg = BackgroundModel::new(&abc);
-            let mut gm = Profile::new(num_nodes, &abc);
+            let bg = BackgroundModel::new(&amino_alphabet);
+            let mut gm = Profile::new(num_nodes, &amino_alphabet);
             modelconfig::profile_config(&hmm, &bg, &mut gm, avg_len, SearchMode::Local);
 
             let query = SearchQuery::from_configured_profile(gm, bg).ok()?;
@@ -568,8 +569,8 @@ pub fn cas_finalize() -> Result<JsValue, JsValue> {
     );
 
     for model_def in &ctx.models_raw {
-        let fqn = format!("{}/{}", model_def.family, model_def.name);
-        let model = match ctx.registry.get(&fqn) {
+        let model_fully_qualified_name = format!("{}/{}", model_def.family, model_def.name);
+        let model = match ctx.registry.get(&model_fully_qualified_name) {
             Some(m) => m,
             None => continue,
         };
@@ -580,7 +581,7 @@ pub fn cas_finalize() -> Result<JsValue, JsValue> {
         }
         log!(
             "[CAS] Model {}: {} system_hits assigned",
-            fqn,
+            model_fully_qualified_name,
             system_hits.len()
         );
 
@@ -593,7 +594,7 @@ pub fn cas_finalize() -> Result<JsValue, JsValue> {
         );
         log!(
             "[CAS] Model {}: {} clusters formed (inter_gene_max_space={})",
-            fqn,
+            model_fully_qualified_name,
             clusters.len(),
             model.inter_gene_max_space
         );
@@ -604,7 +605,7 @@ pub fn cas_finalize() -> Result<JsValue, JsValue> {
             }
             log!(
                 "[CAS] Model {} cluster {}: {} hits, positions {:?}",
-                fqn,
+                model_fully_qualified_name,
                 ci,
                 c.hits.len(),
                 c.hits.iter().map(|h| h.position).collect::<Vec<_>>()
@@ -612,7 +613,7 @@ pub fn cas_finalize() -> Result<JsValue, JsValue> {
             if let Some(system) = evaluate_cluster(c, model) {
                 log!(
                     "[CAS] Model {} cluster {}: ACCEPTED (score={:.1}, mandatory={:?}, accessory={:?})",
-                    fqn,
+                    model_fully_qualified_name,
                     ci,
                     system.score,
                     system.mandatory_found,
@@ -642,7 +643,7 @@ pub fn cas_finalize() -> Result<JsValue, JsValue> {
                     .collect();
                 log!(
                     "[CAS] Model {} cluster {}: REJECTED (min_mandatory={}, min_genes={}, mandatory_found={:?}, accessory_found={:?}, forbidden_found={:?})",
-                    fqn,
+                    model_fully_qualified_name,
                     ci,
                     model.min_mandatory_genes_required,
                     model.min_genes_required,
@@ -673,7 +674,7 @@ pub fn cas_finalize() -> Result<JsValue, JsValue> {
         if !keep {
             log!(
                 "[CAS] Filtered out system {} (max_score={:.1} < {})",
-                sys.model_fqn,
+                sys.model_fully_qualified_name,
                 max_score,
                 MIN_BEST_HIT_SCORE
             );
@@ -757,7 +758,7 @@ mod tests {
     #[test]
     fn assign_hits_prefers_local_gene_over_inherited_duplicate() {
         let model = SystemModel {
-            fqn: "CASFinder/CAS-TypeIE".to_string(),
+            fully_qualified_name: "CASFinder/CAS-TypeIE".to_string(),
             family: "CASFinder".to_string(),
             name: "CAS-TypeIE".to_string(),
             version: None,
@@ -793,7 +794,7 @@ mod tests {
     #[test]
     fn assign_hits_keeps_best_scoring_hit_for_same_gene_and_orf() {
         let model = SystemModel {
-            fqn: "CASFinder/CAS-TypeIE".to_string(),
+            fully_qualified_name: "CASFinder/CAS-TypeIE".to_string(),
             family: "CASFinder".to_string(),
             name: "CAS-TypeIE".to_string(),
             version: None,

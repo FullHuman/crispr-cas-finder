@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use hmmer_core::alphabet::{Alphabet, AlphabetKind};
-use hmmer_io::{FastaReader, read_hmm, sqfile_open_digital};
+use hmmer_io::{FastaReader, read_fasta_digital_sequences, read_hmm};
 
 static NEXT_FILE_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -39,9 +39,10 @@ fn bulk_and_streaming_fasta_readers_agree() {
         b">alpha first protein\nACDEFG\nHIK\n>beta\nMNPQRSTVWY\n>empty description\nA-X*\n",
     );
     let alphabet = Alphabet::amino();
-    let bulk = sqfile_open_digital(&alphabet, fixture.as_str()).expect("bulk read");
+    let bulk = read_fasta_digital_sequences(&alphabet, fixture.as_str()).expect("bulk read");
 
-    let mut reader = FastaReader::open_digital(&alphabet, fixture.as_str()).expect("stream open");
+    let mut reader =
+        FastaReader::open_digital_fasta(&alphabet, fixture.as_str()).expect("stream open");
     let mut streamed = Vec::new();
     while let Some(sequence) = reader.read().expect("stream read") {
         streamed.push(sequence);
@@ -107,6 +108,9 @@ COMPO 2.995732 2.995732 2.995732 2.995732 2.995732 2.995732 2.995732 2.995732 2.
     assert_eq!(hmm.checksum, Some(1234));
     assert_eq!(hmm.map.as_ref().expect("map")[1..], [10, 20]);
     assert!(hmm.ev_params.is_some());
+    let composition = hmm.model_composition.as_ref().expect("composition");
+    assert!((composition.iter().sum::<f32>() - 1.0).abs() < 1e-5);
+    assert!((composition[0] - 0.05).abs() < 1e-5);
     assert_eq!(hmm.match_emissions(1).len(), 20);
     assert!((hmm.match_emissions(1)[0] - 0.05).abs() < 1e-5);
     assert!((hmm.transitions(1)[0] - 0.5).abs() < 1e-5);

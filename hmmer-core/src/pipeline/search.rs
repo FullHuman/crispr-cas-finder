@@ -132,6 +132,7 @@ impl SearchMetrics {
 #[derive(Debug, Clone)]
 pub struct FilterPolicy {
     pub max_mode: bool,
+    pub bias_filter: bool,
     pub msv_threshold: f64,
     pub viterbi_threshold: f64,
     pub forward_threshold: f64,
@@ -141,6 +142,7 @@ impl Default for FilterPolicy {
     fn default() -> Self {
         Self {
             max_mode: false,
+            bias_filter: true,
             msv_threshold: DEFAULT_MSV_THRESHOLD,
             viterbi_threshold: DEFAULT_VITERBI_THRESHOLD,
             forward_threshold: DEFAULT_FORWARD_THRESHOLD,
@@ -160,8 +162,13 @@ impl SearchQuery {
     /// Build a reusable search query from a configured profile and background model.
     pub fn from_configured_profile(
         profile: Profile,
-        background: BackgroundModel,
+        mut background: BackgroundModel,
     ) -> Result<Self, HmmerError> {
+        let canonical_size = profile.alphabet.canonical_size;
+        background.set_filter(
+            profile.num_nodes,
+            &profile.model_composition[..canonical_size],
+        )?;
         let optimized_template = OptimizedProfile::from_profile(&profile);
         Ok(Self {
             profile_template: profile,
@@ -264,6 +271,7 @@ pub enum FilterReason {
 pub struct SearchTrace {
     pub sequence_length: usize,
     pub null_score: Option<f32>,
+    pub bias_filter_score: Option<f32>,
     pub msv_raw_score: Option<f32>,
     pub viterbi_raw_score: Option<f32>,
     pub forward_raw_score: Option<f32>,
@@ -332,6 +340,7 @@ impl SearchWorker {
         let mut engine =
             SearchEngine::new(plan.query.profile_template.num_nodes, hints.target_length);
         engine.do_max = plan.filters.max_mode;
+        engine.do_biasfilter = plan.filters.bias_filter && !plan.filters.max_mode;
         engine.msv_threshold = plan.filters.msv_threshold;
         engine.viterbi_threshold = plan.filters.viterbi_threshold;
         engine.forward_threshold = plan.filters.forward_threshold;
@@ -467,9 +476,24 @@ impl<'w, 's> TargetRun<'w, 's, Prepared> {
         self.worker.engine.stats.sequences_past_msv += 1;
         self.worker.engine.stats.residues_past_msv += self.sequence_length as u64;
 
-        let seq_score_bias = (msv_raw_score - self.null_score) / LOG2;
-        let p_bias = SearchEngine::msv_pvalue(&self.worker.state.profile, seq_score_bias);
-        if !self.worker.engine.do_max && p_bias > self.worker.engine.msv_threshold {
+        let filter_score = if self.worker.engine.do_biasfilter {
+            let score = self
+                .worker
+                .state
+                .background
+                .filter_score(&self.sequence.residues, self.sequence_length);
+            self.trace.bias_filter_score = Some(score);
+
+            let seq_score_bias = (msv_raw_score - score) / LOG2;
+            let p_bias = SearchEngine::msv_pvalue(&self.worker.state.profile, seq_score_bias);
+            if p_bias > self.worker.engine.msv_threshold {
+                return ControlFlow::Break(self.trace.into_filtered_report(FilterReason::Bias));
+            }
+            score
+        } else {
+            self.null_score
+        };
+        if !filter_score.is_finite() {
             return ControlFlow::Break(self.trace.into_filtered_report(FilterReason::Bias));
         }
         self.worker.engine.stats.sequences_past_bias += 1;
@@ -479,7 +503,7 @@ impl<'w, 's> TargetRun<'w, 's, Prepared> {
             &self.worker.state.profile,
             &self.sequence.residues,
             self.sequence_length,
-            self.null_score,
+            filter_score,
         ) else {
             return ControlFlow::Break(self.trace.into_filtered_report(FilterReason::Viterbi));
         };
@@ -489,7 +513,7 @@ impl<'w, 's> TargetRun<'w, 's, Prepared> {
             &self.worker.state.profile,
             &self.sequence.residues,
             self.sequence_length,
-            self.null_score,
+            filter_score,
         ) else {
             return ControlFlow::Break(self.trace.into_filtered_report(FilterReason::Forward));
         };
@@ -615,6 +639,7 @@ struct SearchEngine {
 
     // Filter thresholds
     do_max: bool,
+    do_biasfilter: bool,
     msv_threshold: f64,     // MSV filter threshold (default 0.02)
     viterbi_threshold: f64, // Viterbi filter threshold (default 1e-3)
     forward_threshold: f64, // Forward filter threshold (default 1e-5)
@@ -648,6 +673,7 @@ impl SearchEngine {
             thresholds: Thresholds::default(),
             search_space: 0.0,
             do_max: false,
+            do_biasfilter: true,
             msv_threshold: DEFAULT_MSV_THRESHOLD,
             viterbi_threshold: DEFAULT_VITERBI_THRESHOLD,
             forward_threshold: DEFAULT_FORWARD_THRESHOLD,
@@ -969,6 +995,7 @@ mod tests {
         assert!((filters.viterbi_threshold - 1e-3).abs() < 1e-10);
         assert!((filters.forward_threshold - 1e-5).abs() < 1e-10);
         assert!(!filters.max_mode);
+        assert!(filters.bias_filter);
     }
 
     #[test]
@@ -1011,6 +1038,7 @@ mod tests {
 
         let report = worker.search(&sequence).unwrap();
         assert_eq!(report.trace.sequence_length, 32);
+        assert!(report.trace.bias_filter_score.is_some());
         match report.outcome {
             SearchOutcome::Filtered(_) | SearchOutcome::Hit(_) => {}
         }

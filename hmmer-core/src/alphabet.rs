@@ -1,11 +1,3 @@
-// alphabet.rs — Biological sequence alphabets for HMMER
-//
-// Replaces the C-ported EslAlphabet with an idiomatic Rust design:
-//   - Enum-based: Amino, Dna, Rna (no unused Coins/Dice/Custom/Unknown)
-//   - O(1) case-folding digitization via 128-byte lookup table
-//   - Flat degeneracy table
-//   - Background frequencies removed (belong in BackgroundModel)
-
 use crate::config::{MAX_CANONICAL_ALPHABET, MAX_FULL_ALPHABET};
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -341,93 +333,99 @@ mod tests {
 
     #[test]
     fn test_amino_basics() {
-        let abc = Alphabet::amino();
-        assert_eq!(abc.canonical_size, 20);
-        assert_eq!(abc.full_size, 29);
-        assert_eq!(abc.kind, AlphabetKind::Amino);
+        let amino_alphabet = Alphabet::amino();
+        assert_eq!(amino_alphabet.canonical_size, 20);
+        assert_eq!(amino_alphabet.full_size, 29);
+        assert_eq!(amino_alphabet.kind, AlphabetKind::Amino);
     }
 
     #[test]
     fn test_dna_basics() {
-        let abc = Alphabet::dna();
-        assert_eq!(abc.canonical_size, 4);
-        assert_eq!(abc.full_size, 18);
-        assert_eq!(abc.kind, AlphabetKind::Dna);
+        let dna_alphabet = Alphabet::dna();
+        assert_eq!(dna_alphabet.canonical_size, 4);
+        assert_eq!(dna_alphabet.full_size, 18);
+        assert_eq!(dna_alphabet.kind, AlphabetKind::Dna);
     }
 
     #[test]
     fn test_digitize_case_insensitive() {
-        let abc = Alphabet::amino();
-        assert_eq!(abc.digitize(b'A'), 0);
-        assert_eq!(abc.digitize(b'a'), 0);
-        assert_eq!(abc.digitize(b'C'), 1);
-        assert_eq!(abc.digitize(b'c'), 1);
-        assert_eq!(abc.digitize(b'Y'), 19);
-        assert_eq!(abc.digitize(b'y'), 19);
+        let amino_alphabet = Alphabet::amino();
+        assert_eq!(amino_alphabet.digitize(b'A'), 0);
+        assert_eq!(amino_alphabet.digitize(b'a'), 0);
+        assert_eq!(amino_alphabet.digitize(b'C'), 1);
+        assert_eq!(amino_alphabet.digitize(b'c'), 1);
+        assert_eq!(amino_alphabet.digitize(b'Y'), 19);
+        assert_eq!(amino_alphabet.digitize(b'y'), 19);
     }
 
     #[test]
     fn test_digitize_unknown() {
-        let abc = Alphabet::amino();
+        let amino_alphabet = Alphabet::amino();
         // Unknown characters map to kp-1
-        assert_eq!(abc.digitize(b'?'), (abc.full_size - 1) as Dsq);
-        assert_eq!(abc.digitize(b'1'), (abc.full_size - 1) as Dsq);
+        assert_eq!(
+            amino_alphabet.digitize(b'?'),
+            (amino_alphabet.full_size - 1) as Dsq
+        );
+        assert_eq!(
+            amino_alphabet.digitize(b'1'),
+            (amino_alphabet.full_size - 1) as Dsq
+        );
     }
 
     #[test]
     fn test_digitize_dna() {
-        let abc = Alphabet::dna();
-        assert_eq!(abc.digitize(b'A'), 0);
-        assert_eq!(abc.digitize(b'C'), 1);
-        assert_eq!(abc.digitize(b'G'), 2);
-        assert_eq!(abc.digitize(b'T'), 3);
-        assert_eq!(abc.digitize(b't'), 3);
+        let dna_alphabet = Alphabet::dna();
+        assert_eq!(dna_alphabet.digitize(b'A'), 0);
+        assert_eq!(dna_alphabet.digitize(b'C'), 1);
+        assert_eq!(dna_alphabet.digitize(b'G'), 2);
+        assert_eq!(dna_alphabet.digitize(b'T'), 3);
+        assert_eq!(dna_alphabet.digitize(b't'), 3);
         // N = any = code 15
-        assert_eq!(abc.digitize(b'N'), 15);
-        assert_eq!(abc.digitize(b'n'), 15);
+        assert_eq!(dna_alphabet.digitize(b'N'), 15);
+        assert_eq!(dna_alphabet.digitize(b'n'), 15);
     }
 
     #[test]
     fn test_degeneracy_amino() {
-        let abc = Alphabet::amino();
+        let amino_alphabet = Alphabet::amino();
         // B = D(2) | N(11)
-        assert!(abc.degen_row(21)[2]);
-        assert!(abc.degen_row(21)[11]);
-        assert!(!abc.degen_row(21)[0]);
-        assert_eq!(abc.degeneracy_counts[21], 2);
+        assert!(amino_alphabet.degen_row(21)[2]);
+        assert!(amino_alphabet.degen_row(21)[11]);
+        assert!(!amino_alphabet.degen_row(21)[0]);
+        assert_eq!(amino_alphabet.degeneracy_counts[21], 2);
         // X = any (26)
-        assert_eq!(abc.degeneracy_counts[26], 20);
+        assert_eq!(amino_alphabet.degeneracy_counts[26], 20);
     }
 
     #[test]
     fn test_degeneracy_dna() {
-        let abc = Alphabet::dna();
+        let dna_alphabet = Alphabet::dna();
         // R = A(0) | G(2)
-        assert!(abc.degen_row(5)[0]);
-        assert!(abc.degen_row(5)[2]);
-        assert!(!abc.degen_row(5)[1]);
-        assert_eq!(abc.degeneracy_counts[5], 2);
+        assert!(dna_alphabet.degen_row(5)[0]);
+        assert!(dna_alphabet.degen_row(5)[2]);
+        assert!(!dna_alphabet.degen_row(5)[1]);
+        assert_eq!(dna_alphabet.degeneracy_counts[5], 2);
         // N = any (15)
-        assert_eq!(abc.degeneracy_counts[15], 4);
+        assert_eq!(dna_alphabet.degeneracy_counts[15], 4);
     }
 
     #[test]
     fn test_is_canonical() {
-        let abc = Alphabet::amino();
-        assert!(abc.is_canonical(0));
-        assert!(abc.is_canonical(19));
-        assert!(!abc.is_canonical(20)); // gap
-        assert!(!abc.is_canonical(26)); // X
+        let amino_alphabet = Alphabet::amino();
+        assert!(amino_alphabet.is_canonical(0));
+        assert!(amino_alphabet.is_canonical(19));
+        assert!(!amino_alphabet.is_canonical(20)); // gap
+        assert!(!amino_alphabet.is_canonical(26)); // X
     }
 
     #[test]
     fn test_is_degenerate() {
-        let abc = Alphabet::amino();
-        assert!(!abc.is_degenerate(0)); // canonical
-        assert!(!abc.is_degenerate(20)); // gap
-        assert!(abc.is_degenerate(21)); // B
-        assert!(abc.is_degenerate(26)); // X
-        assert!(!abc.is_degenerate(27)); // nonresidue
-        assert!(!abc.is_degenerate(28)); // missing
+        let amino_alphabet = Alphabet::amino();
+        assert!(!amino_alphabet.is_degenerate(0)); // canonical
+        assert!(!amino_alphabet.is_degenerate(20)); // gap
+        assert!(amino_alphabet.is_degenerate(21)); // B
+        assert!(amino_alphabet.is_degenerate(26)); // X
+        assert!(!amino_alphabet.is_degenerate(27)); // nonresidue
+        assert!(!amino_alphabet.is_degenerate(28)); // missing
     }
 }

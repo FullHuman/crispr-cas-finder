@@ -113,7 +113,7 @@ impl Cli {
     /// Search order:
     ///   1. Directory that contains the running binary (installed layout).
     ///   2. CARGO_MANIFEST_DIR at compile time (development layout).
-    fn default_cas_data_root() -> Option<PathBuf> {
+    fn default_cas_finder_data_root() -> Option<PathBuf> {
         // 1. Next to the binary (production / installed)
         if let Ok(exe) = std::env::current_exe()
             && let Some(exe_dir) = exe.parent()
@@ -124,9 +124,10 @@ impl Cli {
             }
         }
         // 2. Compile-time manifest directory (cargo run / dev builds)
-        let dev = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/data/CasFinder-2.0.3"));
-        if dev.is_dir() {
-            return Some(dev);
+        let development_data_root =
+            PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/data/CasFinder-2.0.3"));
+        if development_data_root.is_dir() {
+            return Some(development_data_root);
         }
         None
     }
@@ -157,7 +158,7 @@ impl Cli {
     }
 
     fn casfinder_config(&self) -> CasFinderConfig {
-        let data_root = Self::default_cas_data_root();
+        let data_root = Self::default_cas_finder_data_root();
 
         let cas_models_dir = self.cas_models_dir.as_ref().map(PathBuf::from).or_else(|| {
             data_root
@@ -223,18 +224,18 @@ pub fn run(cli: Cli) -> Result<()> {
         .with_context(|| format!("Failed to detect CRISPRs from FASTA: {:?}", input_path))?;
 
     info!("Detected {} CRISPR arrays", arrays.len());
-    for (i, a) in arrays.iter().enumerate() {
+    for (array_index, array) in arrays.iter().enumerate() {
         info!(
             "  Array {}: {} ({}..{}), DR={} (len={}), {} spacers, evidence={}, orientation={}",
-            i + 1,
-            a.seq_id,
-            a.start,
-            a.end,
-            a.consensus_repeat,
-            a.consensus_repeat.len(),
-            a.spacers.len(),
-            a.evidence_level,
-            a.orientation
+            array_index + 1,
+            array.seq_id,
+            array.start,
+            array.end,
+            array.consensus_repeat,
+            array.consensus_repeat.len(),
+            array.spacers.len(),
+            array.evidence_level,
+            array.orientation
         );
     }
 
@@ -246,7 +247,7 @@ pub fn run(cli: Cli) -> Result<()> {
         .outdir
         .as_ref()
         .map(PathBuf::from)
-        .unwrap_or_else(|| default_outdir(&basename));
+        .unwrap_or_else(|| default_output_directory(&basename));
     create_dir_all(&outdir)?;
 
     let gff_path = outdir.join(format!("{}.gff", basename));
@@ -264,8 +265,8 @@ pub fn run(cli: Cli) -> Result<()> {
     info!("GFF and JSON outputs created in {:?}", outdir);
 
     if cli.should_launch_cas() {
-        let cas_cfg = cli.casfinder_config();
-        match run_casfinder(input_path, &basename, &outdir, &cas_cfg) {
+        let casfinder_config = cli.casfinder_config();
+        match run_casfinder(input_path, &basename, &outdir, &casfinder_config) {
             Ok(search_results) => {
                 info!("CasFinder found {} systems", search_results.systems.len());
                 let faa_path = outdir.join(format!("orphos_{}/{}.faa", basename, basename));
@@ -276,8 +277,10 @@ pub fn run(cli: Cli) -> Result<()> {
                     cas_clusters,
                 };
                 let report_path = outdir.join("report.json");
-                let f = File::create(&report_path).context("Creating merged report JSON")?;
-                serde_json::to_writer_pretty(f, &report).context("Writing merged report JSON")?;
+                let report_file =
+                    File::create(&report_path).context("Creating merged report JSON")?;
+                serde_json::to_writer_pretty(report_file, &report)
+                    .context("Writing merged report JSON")?;
                 info!("Merged report written to {:?}", report_path);
             }
             Err(err) => {
@@ -289,7 +292,7 @@ pub fn run(cli: Cli) -> Result<()> {
     Ok(())
 }
 
-fn default_outdir(basename: &str) -> PathBuf {
+fn default_output_directory(basename: &str) -> PathBuf {
     let base_name = format!("Result_{}", basename);
     let mut candidate = PathBuf::from(&base_name);
     let mut suffix = 2usize;

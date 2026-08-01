@@ -18,18 +18,19 @@ pub fn profile_config(
     target_length: usize,
     mode: SearchMode,
 ) {
-    let m = hmm.num_nodes;
+    let model_length = hmm.num_nodes;
     let full_alphabet_size = hmm.alphabet.full_size;
 
     profile.mode = mode;
-    profile.num_nodes = m;
+    profile.num_nodes = model_length;
     profile.max_length = hmm.max_length.unwrap_or(0);
 
     copy_metadata(hmm, profile);
+    configure_model_composition(hmm, background, profile);
 
     // Ensure score arrays are large enough before writing any scores.
-    profile.resize_transition_scores(m);
-    profile.resize_residue_scores(full_alphabet_size, m);
+    profile.resize_transition_scores(model_length);
+    profile.resize_residue_scores(full_alphabet_size, model_length);
 
     configure_entry_scores(hmm, profile, mode);
     configure_e_state(profile, mode);
@@ -56,10 +57,53 @@ fn copy_metadata(hmm: &Hmm, profile: &mut Profile) {
         .ev_params
         .map_or([EV_PARAM_UNSET; NUM_EV_PARAMS], |e| e.to_array());
     profile.score_cutoffs = hmm.cutoffs.to_array();
+}
 
-    if let Some(ref compo) = hmm.model_composition {
-        let n = MAX_CANONICAL_ALPHABET.min(compo.len());
-        profile.model_composition[..n].copy_from_slice(&compo[..n]);
+/// Copy or derive the model's average canonical-residue composition.
+///
+/// HMMER uses this vector to configure the composition-bias filter. Models
+/// produced by modern HMMER normally carry a COMPO line; deriving it keeps
+/// programmatically constructed and older models usable as search queries.
+fn configure_model_composition(hmm: &Hmm, background: &BackgroundModel, profile: &mut Profile) {
+    profile.model_composition.fill(COMPOSITION_UNSET);
+    let canonical_size = hmm.alphabet.canonical_size.min(MAX_CANONICAL_ALPHABET);
+
+    if let Some(composition) = hmm
+        .model_composition
+        .as_deref()
+        .filter(|composition| composition.len() >= canonical_size)
+    {
+        profile.model_composition[..canonical_size].copy_from_slice(&composition[..canonical_size]);
+    } else {
+        let (occupancy, _) = hmm.calculate_occupancy();
+        let occupancy_sum: f32 = occupancy[1..=hmm.num_nodes].iter().sum();
+
+        if occupancy_sum > 0.0 {
+            for residue in 0..canonical_size {
+                let weighted_sum: f32 = (1..=hmm.num_nodes)
+                    .map(|node| occupancy[node] * hmm.match_emissions(node)[residue])
+                    .sum();
+                profile.model_composition[residue] = weighted_sum / occupancy_sum;
+            }
+        } else {
+            profile.model_composition[..canonical_size]
+                .copy_from_slice(&background.residue_frequencies[..canonical_size]);
+        }
+    }
+
+    // Keep small text-format rounding errors from changing the HMM's total
+    // probability mass, and fall back safely if the supplied vector is bad.
+    let composition = &mut profile.model_composition[..canonical_size];
+    let sum: f32 = composition.iter().sum();
+    if sum.is_finite()
+        && sum > 0.0
+        && composition
+            .iter()
+            .all(|value| value.is_finite() && *value >= 0.0)
+    {
+        composition.iter_mut().for_each(|value| *value /= sum);
+    } else {
+        composition.copy_from_slice(&background.residue_frequencies[..canonical_size]);
     }
 }
 
@@ -77,26 +121,29 @@ fn configure_entry_scores(hmm: &Hmm, profile: &mut Profile, mode: SearchMode) {
 /// Entry score for node k is log( occ[k] / sum_i(occ[i] * (M - i + 1)) ).
 /// Falls back to a uniform distribution if the occupancy sum is zero.
 fn configure_local_entry_scores(hmm: &Hmm, profile: &mut Profile) {
-    let m = hmm.num_nodes;
-    let (occ, _) = hmm.calculate_occupancy();
+    let model_length = hmm.num_nodes;
+    let (occupancy, _) = hmm.calculate_occupancy();
 
-    let occupancy_sum: f32 = occ[1..=m]
+    let occupancy_sum: f32 = occupancy[1..=model_length]
         .iter()
         .enumerate()
-        .map(|(i, &occ_k)| occ_k * (m - i) as f32) // index i here == k-1, so (M - k + 1) == (M - i)
+        .map(|(index, &occupancy_at_node)| occupancy_at_node * (model_length - index) as f32) // index here == k-1, so (M - k + 1) == (M - index)
         .sum();
 
     if occupancy_sum > 0.0 {
-        for (k, &occ_k) in occ.iter().enumerate().skip(1).take(m) {
-            profile.transition_scores_for_node_mut(k)[PTsc::BeginToMatch.idx()] =
-                (occ_k / occupancy_sum).ln();
+        for (node_index, &occupancy_at_node) in
+            occupancy.iter().enumerate().skip(1).take(model_length)
+        {
+            profile.transition_scores_for_node_mut(node_index)[PTsc::BeginToMatch.idx()] =
+                (occupancy_at_node / occupancy_sum).ln();
         }
     } else {
         // Uniform fallback when all occupancies are zero.
-        let uniform_entry_prob = 2.0 / (m * (m + 1)) as f32;
+        let uniform_entry_prob = 2.0 / (model_length * (model_length + 1)) as f32;
         let log_uniform = uniform_entry_prob.ln();
-        for k in 1..=m {
-            profile.transition_scores_for_node_mut(k)[PTsc::BeginToMatch.idx()] = log_uniform;
+        for node_index in 1..=model_length {
+            profile.transition_scores_for_node_mut(node_index)[PTsc::BeginToMatch.idx()] =
+                log_uniform;
         }
     }
 }
@@ -105,7 +152,7 @@ fn configure_local_entry_scores(hmm: &Hmm, profile: &mut Profile) {
 ///
 /// Entry to node k goes through the silent delete path D_1..D_{k-1}.
 fn configure_glocal_entry_scores(hmm: &Hmm, profile: &mut Profile) {
-    let m = hmm.num_nodes;
+    let model_length = hmm.num_nodes;
     let t0 = hmm.transitions(0);
     let md0 = t0[HTransition::MatchToDelete as usize];
 
@@ -114,11 +161,11 @@ fn configure_glocal_entry_scores(hmm: &Hmm, profile: &mut Profile) {
 
     // B->M_{k+1} for k in 1..M-1: accumulated wing retraction score
     let mut wing_score = md0.ln();
-    for k in 1..m {
-        let t_k = hmm.transitions(k);
-        profile.transition_scores_for_node_mut(k + 1)[PTsc::BeginToMatch.idx()] =
-            wing_score + t_k[HTransition::DeleteToMatch.idx()].ln();
-        wing_score += t_k[HTransition::DeleteToDelete.idx()].ln();
+    for node_index in 1..model_length {
+        let node_transitions = hmm.transitions(node_index);
+        profile.transition_scores_for_node_mut(node_index + 1)[PTsc::BeginToMatch.idx()] =
+            wing_score + node_transitions[HTransition::DeleteToMatch.idx()].ln();
+        wing_score += node_transitions[HTransition::DeleteToDelete.idx()].ln();
     }
 }
 
@@ -137,17 +184,24 @@ fn configure_e_state(profile: &mut Profile, mode: SearchMode) {
 
 /// Set log-probability transition scores for nodes k = 1..M-1.
 fn configure_transition_scores(hmm: &Hmm, profile: &mut Profile) {
-    let m = hmm.num_nodes;
-    for k in 1..m {
-        let t = hmm.transitions(k);
-        let ts = profile.transition_scores_for_node_mut(k + 1);
-        ts[PTsc::MatchToMatch.idx()] = safe_ln(t[HTransition::MatchToMatch.idx()]);
-        ts[PTsc::MatchToInsert.idx()] = safe_ln(t[HTransition::MatchToInsert.idx()]);
-        ts[PTsc::MatchToDelete.idx()] = safe_ln(t[HTransition::MatchToDelete.idx()]);
-        ts[PTsc::InsertToMatch.idx()] = safe_ln(t[HTransition::InsertToMatch.idx()]);
-        ts[PTsc::InsertToInsert.idx()] = safe_ln(t[HTransition::InsertToInsert.idx()]);
-        ts[PTsc::DeleteToMatch.idx()] = safe_ln(t[HTransition::DeleteToMatch.idx()]);
-        ts[PTsc::DeleteToDelete.idx()] = safe_ln(t[HTransition::DeleteToDelete.idx()]);
+    let model_length = hmm.num_nodes;
+    for node_index in 1..model_length {
+        let node_transitions = hmm.transitions(node_index);
+        let transition_scores = profile.transition_scores_for_node_mut(node_index + 1);
+        transition_scores[PTsc::MatchToMatch.idx()] =
+            safe_ln(node_transitions[HTransition::MatchToMatch.idx()]);
+        transition_scores[PTsc::MatchToInsert.idx()] =
+            safe_ln(node_transitions[HTransition::MatchToInsert.idx()]);
+        transition_scores[PTsc::MatchToDelete.idx()] =
+            safe_ln(node_transitions[HTransition::MatchToDelete.idx()]);
+        transition_scores[PTsc::InsertToMatch.idx()] =
+            safe_ln(node_transitions[HTransition::InsertToMatch.idx()]);
+        transition_scores[PTsc::InsertToInsert.idx()] =
+            safe_ln(node_transitions[HTransition::InsertToInsert.idx()]);
+        transition_scores[PTsc::DeleteToMatch.idx()] =
+            safe_ln(node_transitions[HTransition::DeleteToMatch.idx()]);
+        transition_scores[PTsc::DeleteToDelete.idx()] =
+            safe_ln(node_transitions[HTransition::DeleteToDelete.idx()]);
     }
 }
 
@@ -158,17 +212,22 @@ fn configure_transition_scores(hmm: &Hmm, profile: &mut Profile) {
 /// contributing canonical residues.
 /// Gap, nonresidue, and missing characters are set to -∞.
 fn configure_match_emissions(hmm: &Hmm, background: &BackgroundModel, profile: &mut Profile) {
-    let m = hmm.num_nodes;
-    let abc = &hmm.alphabet;
-    let full_alphabet_size = abc.full_size;
+    let model_length = hmm.num_nodes;
+    let alphabet = &hmm.alphabet;
+    let full_alphabet_size = alphabet.full_size;
 
-    for k in 1..=m {
-        let mat_k = hmm.match_emissions(k);
-        let scores = match_emission_scores(abc, background, mat_k, full_alphabet_size);
+    for node_index in 1..=model_length {
+        let match_probabilities = hmm.match_emissions(node_index);
+        let scores = match_emission_scores(
+            alphabet,
+            background,
+            match_probabilities,
+            full_alphabet_size,
+        );
 
-        for (x, &s) in scores.iter().enumerate() {
-            profile.residue_scores_for_mut(x)[k * PROFILE_NUM_EMISSIONS + PRsc::MatchScore.idx()] =
-                s;
+        for (residue_index, &score) in scores.iter().enumerate() {
+            profile.residue_scores_for_mut(residue_index)
+                [node_index * PROFILE_NUM_EMISSIONS + PRsc::MatchScore.idx()] = score;
         }
     }
 }
@@ -177,19 +236,19 @@ fn configure_match_emissions(hmm: &Hmm, background: &BackgroundModel, profile: &
 ///
 /// Returns a Vec of length `full_alphabet_size` with log-odds scores.
 fn match_emission_scores(
-    abc: &Alphabet,
+    alphabet: &Alphabet,
     background: &BackgroundModel,
-    mat_k: &[f32],
+    match_probabilities: &[f32],
     full_alphabet_size: usize,
 ) -> Vec<f32> {
     let mut scores = vec![f32::NEG_INFINITY; full_alphabet_size];
 
     // Canonical residues: log-odds ratio.
-    for (x, s) in scores[..abc.canonical_size].iter_mut().enumerate() {
-        let emission = mat_k[x];
-        let bg_freq = background.residue_frequencies[x];
-        if emission > 0.0 && bg_freq > 0.0 {
-            *s = (emission / bg_freq).ln();
+    for (residue_index, score) in scores[..alphabet.canonical_size].iter_mut().enumerate() {
+        let emission_probability = match_probabilities[residue_index];
+        let background_frequency = background.residue_frequencies[residue_index];
+        if emission_probability > 0.0 && background_frequency > 0.0 {
+            *score = (emission_probability / background_frequency).ln();
         }
         // else stays NEG_INFINITY (covers both zero-emission and zero-background cases)
     }
@@ -197,9 +256,15 @@ fn match_emission_scores(
     // Gap character (index canonical_size) stays NEG_INFINITY.
 
     // Degenerate residues: expected score weighted by background frequencies.
-    let degen_range = (abc.canonical_size + 1)..full_alphabet_size.saturating_sub(2);
-    for x in degen_range {
-        scores[x] = degen_expected_score(abc, background, x, &scores[..abc.canonical_size]);
+    let degenerate_residue_range =
+        (alphabet.canonical_size + 1)..full_alphabet_size.saturating_sub(2);
+    for residue_index in degenerate_residue_range {
+        scores[residue_index] = degen_expected_score(
+            alphabet,
+            background,
+            residue_index,
+            &scores[..alphabet.canonical_size],
+        );
     }
 
     // Nonresidue (second-to-last) and missing data (last) stay NEG_INFINITY.
@@ -217,25 +282,28 @@ fn match_emission_scores(
 /// Normalises by the sum of background frequencies for the contributing
 /// canonical residues, so the result is a proper weighted average.
 fn degen_expected_score(
-    abc: &Alphabet,
+    alphabet: &Alphabet,
     background: &BackgroundModel,
-    x: usize,
+    residue_index: usize,
     canonical_scores: &[f32],
 ) -> f32 {
-    let degen = abc.degen_row(x);
-    let bg = &background.residue_frequencies;
+    let degenerate_row = alphabet.degen_row(residue_index);
+    let background_frequencies = &background.residue_frequencies;
 
-    let (weighted_sum, norm) = degen
+    let (weighted_sum, normalization) = degenerate_row
         .iter()
-        .zip(bg.iter())
+        .zip(background_frequencies.iter())
         .zip(canonical_scores.iter())
         .filter(|&((&d, _), _)| d)
-        .fold((0.0f32, 0.0f32), |(sum, n), ((_, &f), &s)| {
-            (sum + f * s, n + f)
-        });
+        .fold(
+            (0.0f32, 0.0f32),
+            |(sum, normalizer), ((_, &frequency), &score)| {
+                (sum + frequency * score, normalizer + frequency)
+            },
+        );
 
-    if norm > 0.0 {
-        weighted_sum / norm.max(1e-30)
+    if normalization > 0.0 {
+        weighted_sum / normalization.max(1e-30)
     } else {
         f32::NEG_INFINITY
     }
@@ -247,26 +315,29 @@ fn degen_expected_score(
 /// I_M (insert at last node) and special characters (gap, nonresidue, missing),
 /// which are -∞.
 fn configure_insert_emissions(profile: &mut Profile, full_alphabet_size: usize) {
-    let m = profile.num_nodes;
+    let model_length = profile.num_nodes;
     let canonical_size = profile.alphabet.canonical_size;
 
-    for x in 0..full_alphabet_size {
-        let rsc = profile.residue_scores_for_mut(x);
-        for k in 1..m {
-            rsc[k * PROFILE_NUM_EMISSIONS + PRsc::InsertScore.idx()] = 0.0;
+    for residue_index in 0..full_alphabet_size {
+        let residue_scores = profile.residue_scores_for_mut(residue_index);
+        for node_index in 1..model_length {
+            residue_scores[node_index * PROFILE_NUM_EMISSIONS + PRsc::InsertScore.idx()] = 0.0;
         }
         // I_M is impossible.
-        rsc[m * PROFILE_NUM_EMISSIONS + PRsc::InsertScore.idx()] = f32::NEG_INFINITY;
+        residue_scores[model_length * PROFILE_NUM_EMISSIONS + PRsc::InsertScore.idx()] =
+            f32::NEG_INFINITY;
     }
 
     // Gap, nonresidue, and missing characters cannot be inserted; force -∞.
-    for k in 1..=m {
-        let offset = k * PROFILE_NUM_EMISSIONS + PRsc::InsertScore.idx();
-        profile.residue_scores_for_mut(canonical_size)[offset] = f32::NEG_INFINITY;
+    for node_index in 1..=model_length {
+        let insert_score_offset = node_index * PROFILE_NUM_EMISSIONS + PRsc::InsertScore.idx();
+        profile.residue_scores_for_mut(canonical_size)[insert_score_offset] = f32::NEG_INFINITY;
         if full_alphabet_size >= 2 {
-            profile.residue_scores_for_mut(full_alphabet_size - 2)[offset] = f32::NEG_INFINITY;
+            profile.residue_scores_for_mut(full_alphabet_size - 2)[insert_score_offset] =
+                f32::NEG_INFINITY;
         }
-        profile.residue_scores_for_mut(full_alphabet_size - 1)[offset] = f32::NEG_INFINITY;
+        profile.residue_scores_for_mut(full_alphabet_size - 1)[insert_score_offset] =
+            f32::NEG_INFINITY;
     }
 }
 
@@ -307,8 +378,8 @@ mod tests {
 
     #[test]
     fn test_length_model() {
-        let abc = Alphabet::amino();
-        let mut profile = Profile::new(10, &abc);
+        let amino_alphabet = Alphabet::amino();
+        let mut profile = Profile::new(10, &amino_alphabet);
         profile.expected_j_uses = 1.0;
         config_length_model(&mut profile, 400);
         assert_eq!(profile.target_length, 400);

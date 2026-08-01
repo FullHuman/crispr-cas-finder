@@ -31,49 +31,49 @@ static SEQ_TO_ID: OnceLock<HashMap<String, String>> = OnceLock::new();
 /// (e.g. `"F [0.37,0   Confidence: MEDIUM]"`).
 static ID_TO_DIRECTION: OnceLock<HashMap<String, String>> = OnceLock::new();
 
-fn seq_to_id_map() -> &'static HashMap<String, String> {
+fn sequence_to_repeat_id_map() -> &'static HashMap<String, String> {
     SEQ_TO_ID.get_or_init(|| {
-        let mut map = HashMap::new();
+        let mut repeat_id_by_sequence = HashMap::new();
         for line in REPEAT_LIST_CSV.lines() {
             // Skip the header and blank lines
             if line.starts_with('#') || line.trim().is_empty() {
                 continue;
             }
-            let parts: Vec<&str> = line.split(';').collect();
-            if parts.len() < 2 {
+            let columns: Vec<&str> = line.split(';').collect();
+            if columns.len() < 2 {
                 continue;
             }
-            let seq = parts[0].trim().to_uppercase();
-            let id = parts[1].trim().to_string();
-            if !seq.is_empty() && !id.is_empty() {
-                map.insert(seq, id);
+            let repeat_sequence = columns[0].trim().to_uppercase();
+            let repeat_id = columns[1].trim().to_string();
+            if !repeat_sequence.is_empty() && !repeat_id.is_empty() {
+                repeat_id_by_sequence.insert(repeat_sequence, repeat_id);
             }
         }
-        map
+        repeat_id_by_sequence
     })
 }
 
-fn id_to_direction_map() -> &'static HashMap<String, String> {
+fn repeat_id_to_direction_map() -> &'static HashMap<String, String> {
     ID_TO_DIRECTION.get_or_init(|| {
-        let mut map = HashMap::new();
+        let mut direction_by_repeat_id = HashMap::new();
         for line in REPEAT_DIRECTION_TSV.lines() {
             if line.trim().is_empty() {
                 continue;
             }
-            let mut iter = line.splitn(2, '\t');
-            let id = match iter.next() {
+            let mut columns = line.splitn(2, '\t');
+            let repeat_id = match columns.next() {
                 Some(s) => s.trim().to_string(),
                 None => continue,
             };
-            let direction = match iter.next() {
+            let direction = match columns.next() {
                 Some(s) => s.trim().to_string(),
                 None => continue,
             };
-            if !id.is_empty() {
-                map.insert(id, direction);
+            if !repeat_id.is_empty() {
+                direction_by_repeat_id.insert(repeat_id, direction);
             }
         }
-        map
+        direction_by_repeat_id
     })
 }
 
@@ -91,7 +91,7 @@ pub struct RepeatLookup {
 }
 
 /// Reverse-complement a DNA string (uppercase ACGT; unknown bases pass through).
-fn revcomp_str(seq: &str) -> String {
+fn reverse_complement_dna_string(seq: &str) -> String {
     seq.chars()
         .rev()
         .map(|c| match c {
@@ -105,8 +105,8 @@ fn revcomp_str(seq: &str) -> String {
 }
 
 /// Flip a normalised direction symbol: `"+"` ↔ `"-"`, `"ND"` stays `"ND"`.
-fn flip_direction(dir: &str) -> String {
-    match dir {
+fn flipped_direction_symbol(direction: &str) -> String {
+    match direction {
         "+" => "-".to_string(),
         "-" => "+".to_string(),
         other => other.to_string(),
@@ -123,14 +123,17 @@ fn flip_direction(dir: &str) -> String {
 /// If neither is found the function returns `repeat_id = "Unknown"` and
 /// `crispr_direction = "ND"`.
 pub fn lookup_repeat(consensus_repeat: &str) -> RepeatLookup {
-    let key = consensus_repeat.trim().to_uppercase();
-    let seq_map = seq_to_id_map();
-    let dir_map = id_to_direction_map();
+    let normalized_repeat_sequence = consensus_repeat.trim().to_uppercase();
+    let repeat_id_by_sequence = sequence_to_repeat_id_map();
+    let direction_by_repeat_id = repeat_id_to_direction_map();
 
     // ── Forward match ──────────────────────────────────────────────────────
-    if let Some(repeat_id) = seq_map.get(&key).cloned() {
-        let crispr_direction = match dir_map.get(&repeat_id) {
-            Some(raw) => normalise_direction(raw),
+    if let Some(repeat_id) = repeat_id_by_sequence
+        .get(&normalized_repeat_sequence)
+        .cloned()
+    {
+        let crispr_direction = match direction_by_repeat_id.get(&repeat_id) {
+            Some(raw_direction) => normalized_direction_symbol(raw_direction),
             None => "ND".to_string(),
         };
         return RepeatLookup {
@@ -143,10 +146,15 @@ pub fn lookup_repeat(consensus_repeat: &str) -> RepeatLookup {
     // The detection algorithm may produce a consensus that is the RC of the
     // canonical sequence stored in Repeat_List.csv.  In that case the array
     // is on the opposite strand, so the direction must be flipped.
-    let rc_key = revcomp_str(&key);
-    if let Some(repeat_id) = seq_map.get(&rc_key).cloned() {
-        let crispr_direction = match dir_map.get(&repeat_id) {
-            Some(raw) => flip_direction(&normalise_direction(raw)),
+    let reverse_complement_sequence = reverse_complement_dna_string(&normalized_repeat_sequence);
+    if let Some(repeat_id) = repeat_id_by_sequence
+        .get(&reverse_complement_sequence)
+        .cloned()
+    {
+        let crispr_direction = match direction_by_repeat_id.get(&repeat_id) {
+            Some(raw_direction) => {
+                flipped_direction_symbol(&normalized_direction_symbol(raw_direction))
+            }
             None => "ND".to_string(),
         };
         return RepeatLookup {
@@ -166,11 +174,11 @@ pub fn lookup_repeat(consensus_repeat: &str) -> RepeatLookup {
 /// * starts with `"F"` → `"+"`
 /// * starts with `"R"` → `"-"`
 /// * anything else (including `"NA"`) → `"ND"`
-fn normalise_direction(raw: &str) -> String {
-    let raw = raw.trim();
-    if raw.starts_with('F') {
+fn normalized_direction_symbol(raw_direction: &str) -> String {
+    let raw_direction = raw_direction.trim();
+    if raw_direction.starts_with('F') {
         "+".to_string()
-    } else if raw.starts_with('R') {
+    } else if raw_direction.starts_with('R') {
         "-".to_string()
     } else {
         "ND".to_string()

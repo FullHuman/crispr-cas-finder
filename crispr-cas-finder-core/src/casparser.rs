@@ -44,8 +44,8 @@ pub fn from_search_results(
     results: &crate::cas_types::SearchResults,
     faa_content: Option<&str>,
 ) -> Vec<CasCluster> {
-    let gene_map = faa_content.map(parse_gene_map_from_faa);
-    clusters_from_search_results(results, gene_map.as_ref())
+    let gene_coordinates_by_id = faa_content.map(parse_gene_coordinates_from_faa);
+    clusters_from_search_results(results, gene_coordinates_by_id.as_ref())
 }
 
 fn clusters_from_search_results(
@@ -53,14 +53,15 @@ fn clusters_from_search_results(
     gene_map: Option<&std::collections::HashMap<String, GeneCoordinates>>,
 ) -> Vec<CasCluster> {
     let mut clusters = Vec::new();
-    for sys in &results.systems {
-        let mut genes = Vec::new();
+    for detected_system in &results.systems {
+        let mut cluster_genes = Vec::new();
         let mut min_start = usize::MAX;
         let mut max_end = 0usize;
 
-        for hit in &sys.hits {
-            let (start, end, strand) = if let Some(gmap) = gene_map {
-                gmap.get(hit.hit.id.as_str())
+        for hit in &detected_system.hits {
+            let (start, end, strand) = if let Some(coordinate_map) = gene_map {
+                coordinate_map
+                    .get(hit.hit.id.as_str())
                     .cloned()
                     .map(|coords| (coords.start, coords.end, coords.strand))
                     .unwrap_or((
@@ -83,7 +84,7 @@ fn clusters_from_search_results(
                 max_end = end;
             }
 
-            genes.push(CasGene {
+            cluster_genes.push(CasGene {
                 id: hit.hit.id.clone(),
                 name: hit.gene_ref.clone(),
                 start,
@@ -93,8 +94,8 @@ fn clusters_from_search_results(
         }
 
         clusters.push(CasCluster {
-            system: sys.model_fqn.clone(),
-            genes,
+            system: detected_system.model_fully_qualified_name.clone(),
+            genes: cluster_genes,
             start: if min_start == usize::MAX {
                 0
             } else {
@@ -108,56 +109,56 @@ fn clusters_from_search_results(
 
 /// Parse gene coordinates from FASTA headers in Orphos/Prodigal format:
 ///   >seqid_N # start # end # strand_int # ID=N
-fn parse_gene_map_from_faa(
+fn parse_gene_coordinates_from_faa(
     faa_content: &str,
 ) -> std::collections::HashMap<String, GeneCoordinates> {
-    let mut gene_map = std::collections::HashMap::new();
+    let mut gene_coordinates_by_id = std::collections::HashMap::new();
     for line in faa_content.lines() {
         if !line.starts_with('>') {
             continue;
         }
         // Format: >id # start # end # strand_int # attrs
         let header = &line[1..]; // strip '>'
-        let parts: Vec<&str> = header.split(" # ").collect();
-        if parts.len() < 4 {
+        let header_parts: Vec<&str> = header.split(" # ").collect();
+        if header_parts.len() < 4 {
             continue;
         }
-        let id = parts[0].trim().to_string();
-        let start = parts[1].trim().parse::<usize>().unwrap_or(0);
-        let end = parts[2].trim().parse::<usize>().unwrap_or(0);
-        let strand = match parts[3].trim() {
+        let id = header_parts[0].trim().to_string();
+        let start = header_parts[1].trim().parse::<usize>().unwrap_or(0);
+        let end = header_parts[2].trim().parse::<usize>().unwrap_or(0);
+        let strand = match header_parts[3].trim() {
             "-1" => "-".to_string(),
             "1" => "+".to_string(),
             s => s.to_string(),
         };
-        gene_map.insert(id, GeneCoordinates { start, end, strand });
+        gene_coordinates_by_id.insert(id, GeneCoordinates { start, end, strand });
     }
-    gene_map
+    gene_coordinates_by_id
 }
 
-fn parse_gene_map_from_gff(
+fn parse_gene_coordinates_from_gff(
     gff_content: &str,
 ) -> std::collections::HashMap<String, GeneCoordinates> {
-    let mut gene_map = std::collections::HashMap::new();
+    let mut gene_coordinates_by_id = std::collections::HashMap::new();
     for line in gff_content.lines() {
         if line.starts_with('#') || line.trim().is_empty() {
             continue;
         }
-        let cols: Vec<&str> = line.split('\t').collect();
-        if cols.len() < 9 {
+        let columns: Vec<&str> = line.split('\t').collect();
+        if columns.len() < 9 {
             continue;
         }
-        let feature_type = cols[2];
+        let feature_type = columns[2];
         if feature_type != "CDS" && feature_type != "gene" {
             continue;
         }
-        let start = cols[3].parse::<usize>().unwrap_or(0);
-        let end = cols[4].parse::<usize>().unwrap_or(0);
-        let strand = cols[6].to_string();
-        let attrs = cols[8];
-        for attr in attrs.split(';') {
-            if let Some(value) = attr.strip_prefix("ID=") {
-                gene_map.insert(
+        let start = columns[3].parse::<usize>().unwrap_or(0);
+        let end = columns[4].parse::<usize>().unwrap_or(0);
+        let strand = columns[6].to_string();
+        let attributes = columns[8];
+        for attribute in attributes.split(';') {
+            if let Some(value) = attribute.strip_prefix("ID=") {
+                gene_coordinates_by_id.insert(
                     value.to_string(),
                     GeneCoordinates {
                         start,
@@ -169,12 +170,12 @@ fn parse_gene_map_from_gff(
             }
         }
     }
-    gene_map
+    gene_coordinates_by_id
 }
 
 pub fn parse_cas_from_strings(best_solution_tsv: &str, ann_gff: &str) -> Result<Vec<CasCluster>> {
-    let gene_map = parse_gene_map_from_gff(ann_gff);
-    let mut clusters: std::collections::HashMap<String, Vec<CasGene>> =
+    let gene_coordinates_by_id = parse_gene_coordinates_from_gff(ann_gff);
+    let mut genes_by_system_label: std::collections::HashMap<String, Vec<CasGene>> =
         std::collections::HashMap::new();
 
     for line in best_solution_tsv.lines() {
@@ -182,14 +183,14 @@ pub fn parse_cas_from_strings(best_solution_tsv: &str, ann_gff: &str) -> Result<
         if line.starts_with('#') || line.starts_with("replicon\t") || line.is_empty() {
             continue;
         }
-        let cols: Vec<&str> = line.split('\t').collect();
-        if cols.len() < 6 {
+        let columns: Vec<&str> = line.split('\t').collect();
+        if columns.len() < 6 {
             continue;
         }
-        let gene_id = cols[1];
-        let gene_name = cols[2].to_string();
-        let system_label = cols[5].to_string();
-        if let Some(coords) = gene_map.get(gene_id) {
+        let gene_id = columns[1];
+        let gene_name = columns[2].to_string();
+        let system_label = columns[5].to_string();
+        if let Some(coords) = gene_coordinates_by_id.get(gene_id) {
             let gene = CasGene {
                 id: gene_id.to_string(),
                 name: gene_name,
@@ -197,12 +198,15 @@ pub fn parse_cas_from_strings(best_solution_tsv: &str, ann_gff: &str) -> Result<
                 end: coords.end,
                 strand: coords.strand.clone(),
             };
-            clusters.entry(system_label).or_default().push(gene);
+            genes_by_system_label
+                .entry(system_label)
+                .or_default()
+                .push(gene);
         }
     }
 
     let mut result = Vec::new();
-    for (system, genes) in clusters {
+    for (system, genes) in genes_by_system_label {
         if genes.is_empty() {
             continue;
         }

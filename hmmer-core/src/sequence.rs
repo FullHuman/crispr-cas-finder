@@ -31,19 +31,27 @@ impl DigitalSequence {
     /// Create a digital sequence from raw ASCII bytes.
     ///
     /// Each byte is digitized through the alphabet's lookup table.
-    pub fn from_bytes(name: &str, desc: &str, seq_bytes: &[u8], abc: &Alphabet) -> Self {
-        let dsq: Vec<Dsq> = seq_bytes.iter().map(|&b| abc.digitize(b)).collect();
-        let n = dsq.len();
+    pub fn from_bytes(
+        name: &str,
+        description: &str,
+        sequence_bytes: &[u8],
+        alphabet: &Alphabet,
+    ) -> Self {
+        let digitized_residues: Vec<Dsq> = sequence_bytes
+            .iter()
+            .map(|&byte| alphabet.digitize(byte))
+            .collect();
+        let sequence_length = digitized_residues.len();
         DigitalSequence {
             name: name.to_string(),
             accession: None,
-            description: if desc.is_empty() {
+            description: if description.is_empty() {
                 None
             } else {
-                Some(desc.to_string())
+                Some(description.to_string())
             },
-            residues: dsq,
-            source_length: n as i64,
+            residues: digitized_residues,
+            source_length: sequence_length as i64,
             database_index: -1,
         }
     }
@@ -78,36 +86,37 @@ mod tests {
 
     #[test]
     fn test_from_bytes_amino() {
-        let abc = Alphabet::amino();
-        let seq = DigitalSequence::from_bytes("test", "a protein", b"ACDEF", &abc);
-        assert_eq!(seq.name, "test");
-        assert_eq!(seq.description.as_deref(), Some("a protein"));
-        assert_eq!(seq.accession, None);
-        assert_eq!(seq.len(), 5);
-        assert!(!seq.is_empty());
-        assert_eq!(seq.residue(0), abc.digitize(b'A'));
-        assert_eq!(seq.residue(4), abc.digitize(b'F'));
-        assert_eq!(seq.source_length, 5);
-        assert_eq!(seq.database_index, -1);
+        let amino_alphabet = Alphabet::amino();
+        let digital_sequence =
+            DigitalSequence::from_bytes("test", "a protein", b"ACDEF", &amino_alphabet);
+        assert_eq!(digital_sequence.name, "test");
+        assert_eq!(digital_sequence.description.as_deref(), Some("a protein"));
+        assert_eq!(digital_sequence.accession, None);
+        assert_eq!(digital_sequence.len(), 5);
+        assert!(!digital_sequence.is_empty());
+        assert_eq!(digital_sequence.residue(0), amino_alphabet.digitize(b'A'));
+        assert_eq!(digital_sequence.residue(4), amino_alphabet.digitize(b'F'));
+        assert_eq!(digital_sequence.source_length, 5);
+        assert_eq!(digital_sequence.database_index, -1);
     }
 
     #[test]
     fn test_from_bytes_dna() {
-        let abc = Alphabet::dna();
-        let seq = DigitalSequence::from_bytes("dna1", "", b"ACGT", &abc);
-        assert_eq!(seq.len(), 4);
-        assert_eq!(seq.description, None);
-        assert_eq!(seq.residue(0), 0); // A
-        assert_eq!(seq.residue(1), 1); // C
-        assert_eq!(seq.residue(2), 2); // G
-        assert_eq!(seq.residue(3), 3); // T
+        let dna_alphabet = Alphabet::dna();
+        let digital_sequence = DigitalSequence::from_bytes("dna1", "", b"ACGT", &dna_alphabet);
+        assert_eq!(digital_sequence.len(), 4);
+        assert_eq!(digital_sequence.description, None);
+        assert_eq!(digital_sequence.residue(0), 0); // A
+        assert_eq!(digital_sequence.residue(1), 1); // C
+        assert_eq!(digital_sequence.residue(2), 2); // G
+        assert_eq!(digital_sequence.residue(3), 3); // T
     }
 
     #[test]
     fn test_empty_sequence() {
-        let abc = Alphabet::amino();
-        let seq = DigitalSequence::from_bytes("empty", "", b"", &abc);
-        assert!(seq.is_empty());
-        assert_eq!(seq.len(), 0);
+        let amino_alphabet = Alphabet::amino();
+        let digital_sequence = DigitalSequence::from_bytes("empty", "", b"", &amino_alphabet);
+        assert!(digital_sequence.is_empty());
+        assert_eq!(digital_sequence.len(), 0);
     }
 }

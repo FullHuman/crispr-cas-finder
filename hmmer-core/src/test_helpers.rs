@@ -16,19 +16,19 @@ use crate::rng::XorShift64;
 /// Corresponds to p7_hmm_Sample() in C.
 /// Generates random transition and emission probabilities using
 /// Dirichlet sampling, then normalizes.
-pub fn hmm_sample(rng: &mut XorShift64, m: usize, abc: &Alphabet) -> Hmm {
-    let k = abc.canonical_size;
-    let mut hmm = Hmm::new(m, abc);
+pub fn hmm_sample(rng: &mut XorShift64, model_length: usize, alphabet: &Alphabet) -> Hmm {
+    let canonical_size = alphabet.canonical_size;
+    let mut hmm = Hmm::new(model_length, alphabet);
 
     // Sample emission probabilities for each node
-    for node in 0..=m {
+    for node in 0..=model_length {
         // Match emissions: sample from Dirichlet(1,1,...,1) = uniform on simplex
-        let mat_row = sample_dirichlet(rng, k);
-        hmm.match_emissions_mut(node)[..k].copy_from_slice(&mat_row[..k]);
+        let match_row = sample_dirichlet(rng, canonical_size);
+        hmm.match_emissions_mut(node)[..canonical_size].copy_from_slice(&match_row);
 
         // Insert emissions: sample from Dirichlet
-        let ins_row = sample_dirichlet(rng, k);
-        hmm.insert_emissions_mut(node)[..k].copy_from_slice(&ins_row[..k]);
+        let insert_row = sample_dirichlet(rng, canonical_size);
+        hmm.insert_emissions_mut(node)[..canonical_size].copy_from_slice(&insert_row);
 
         // Transition probabilities
         // Match transitions (MM, MI, MD) - 3 values that sum to 1
@@ -54,14 +54,14 @@ pub fn hmm_sample(rng: &mut XorShift64, m: usize, abc: &Alphabet) -> Hmm {
     hmm.match_emissions_mut(0)[0] = 1.0;
 
     // Node M: no transitions from M_M to I_M or D_M+1
-    hmm.transitions_mut(m)[HTransition::MatchToInsert as usize] = 0.0;
-    hmm.transitions_mut(m)[HTransition::MatchToDelete as usize] = 0.0;
-    hmm.transitions_mut(m)[HTransition::MatchToMatch as usize] = 1.0;
-    hmm.transitions_mut(m)[HTransition::DeleteToMatch as usize] = 1.0;
-    hmm.transitions_mut(m)[HTransition::DeleteToDelete as usize] = 0.0;
+    hmm.transitions_mut(model_length)[HTransition::MatchToInsert as usize] = 0.0;
+    hmm.transitions_mut(model_length)[HTransition::MatchToDelete as usize] = 0.0;
+    hmm.transitions_mut(model_length)[HTransition::MatchToMatch as usize] = 1.0;
+    hmm.transitions_mut(model_length)[HTransition::DeleteToMatch as usize] = 1.0;
+    hmm.transitions_mut(model_length)[HTransition::DeleteToDelete as usize] = 0.0;
 
     // Set name
-    hmm.name = format!("sampled-hmm-{}", m);
+    hmm.name = format!("sampled-hmm-{}", model_length);
     hmm.num_sequences = Some(0);
     hmm.effective_num_seq_float = Some(0.0);
     hmm.effective_num_seq = 0.0;
@@ -74,19 +74,23 @@ pub fn hmm_sample(rng: &mut XorShift64, m: usize, abc: &Alphabet) -> Hmm {
 /// Corresponds to p7_hmm_SampleEnumerable() in C.
 /// All insert transitions are 0, so the model can only generate
 /// sequences of length 0..M.
-pub fn hmm_sample_enumerable(rng: &mut XorShift64, m: usize, abc: &Alphabet) -> Hmm {
-    let k = abc.canonical_size;
-    let mut hmm = Hmm::new(m, abc);
+pub fn hmm_sample_enumerable(
+    rng: &mut XorShift64,
+    model_length: usize,
+    alphabet: &Alphabet,
+) -> Hmm {
+    let canonical_size = alphabet.canonical_size;
+    let mut hmm = Hmm::new(model_length, alphabet);
 
-    for node in 0..=m {
+    for node in 0..=model_length {
         // Match emissions: random
-        let mat_row = sample_dirichlet(rng, k);
-        hmm.match_emissions_mut(node)[..k].copy_from_slice(&mat_row[..k]);
+        let match_row = sample_dirichlet(rng, canonical_size);
+        hmm.match_emissions_mut(node)[..canonical_size].copy_from_slice(&match_row);
 
         // Insert emissions: doesn't matter, but set uniform
-        let uniform = 1.0 / k as f32;
-        for a in 0..k {
-            hmm.insert_emissions_mut(node)[a] = uniform;
+        let uniform_probability = 1.0 / canonical_size as f32;
+        for residue_index in 0..canonical_size {
+            hmm.insert_emissions_mut(node)[residue_index] = uniform_probability;
         }
 
         // Transitions: no inserts
@@ -111,13 +115,13 @@ pub fn hmm_sample_enumerable(rng: &mut XorShift64, m: usize, abc: &Alphabet) -> 
     hmm.match_emissions_mut(0)[0] = 1.0;
 
     // Node M: end
-    hmm.transitions_mut(m)[HTransition::MatchToMatch as usize] = 1.0;
-    hmm.transitions_mut(m)[HTransition::MatchToInsert as usize] = 0.0;
-    hmm.transitions_mut(m)[HTransition::MatchToDelete as usize] = 0.0;
-    hmm.transitions_mut(m)[HTransition::DeleteToMatch as usize] = 1.0;
-    hmm.transitions_mut(m)[HTransition::DeleteToDelete as usize] = 0.0;
+    hmm.transitions_mut(model_length)[HTransition::MatchToMatch as usize] = 1.0;
+    hmm.transitions_mut(model_length)[HTransition::MatchToInsert as usize] = 0.0;
+    hmm.transitions_mut(model_length)[HTransition::MatchToDelete as usize] = 0.0;
+    hmm.transitions_mut(model_length)[HTransition::DeleteToMatch as usize] = 1.0;
+    hmm.transitions_mut(model_length)[HTransition::DeleteToDelete as usize] = 0.0;
 
-    hmm.name = format!("enumerable-hmm-{}", m);
+    hmm.name = format!("enumerable-hmm-{}", model_length);
     hmm
 }
 
@@ -126,51 +130,63 @@ pub fn hmm_sample_enumerable(rng: &mut XorShift64, m: usize, abc: &Alphabet) -> 
 ///
 /// Corresponds to esl_rsq_xfIID() in C.
 /// Returns dsq[0..L] with 0-based residue codes (no sentinels).
-pub fn random_digital_seq(rng: &mut XorShift64, f: &[f32], k: usize, l: usize) -> Vec<Dsq> {
-    let mut dsq = vec![0u8; l];
+pub fn random_digital_seq(
+    rng: &mut XorShift64,
+    frequencies: &[f32],
+    alphabet_size: usize,
+    sequence_length: usize,
+) -> Vec<Dsq> {
+    let mut digitized_sequence = vec![0u8; sequence_length];
 
     // Build cumulative distribution
-    let mut cdf = vec![0.0f64; k];
-    cdf[0] = f[0] as f64;
-    for i in 1..k {
-        cdf[i] = cdf[i - 1] + f[i] as f64;
+    let mut cumulative_distribution = vec![0.0f64; alphabet_size];
+    cumulative_distribution[0] = frequencies[0] as f64;
+    for index in 1..alphabet_size {
+        cumulative_distribution[index] =
+            cumulative_distribution[index - 1] + frequencies[index] as f64;
     }
     // Normalize
-    let total = cdf[k - 1];
-    for c in cdf.iter_mut() {
-        *c /= total;
+    let total_probability = cumulative_distribution[alphabet_size - 1];
+    for cumulative_probability in &mut cumulative_distribution {
+        *cumulative_probability /= total_probability;
     }
 
-    for dsq_val in dsq.iter_mut() {
-        let r = rng.random();
-        let mut a = 0;
-        while a < k - 1 && r > cdf[a] {
-            a += 1;
+    for residue_code in &mut digitized_sequence {
+        let random_value = rng.random();
+        let mut residue_index = 0;
+        while residue_index < alphabet_size - 1
+            && random_value > cumulative_distribution[residue_index]
+        {
+            residue_index += 1;
         }
-        *dsq_val = a as Dsq;
+        *residue_code = residue_index as Dsq;
     }
-    dsq
+    digitized_sequence
 }
 
 /// Sample from a Dirichlet(1,1,...,1) distribution, i.e. uniform on the simplex.
 ///
 /// Uses the standard algorithm: sample K exponential(1) variables,
 /// then normalize.
-fn sample_dirichlet(rng: &mut XorShift64, k: usize) -> Vec<f32> {
-    let mut v = Vec::with_capacity(k);
-    for _ in 0..k {
+fn sample_dirichlet(rng: &mut XorShift64, category_count: usize) -> Vec<f32> {
+    let mut sampled_values = Vec::with_capacity(category_count);
+    for _ in 0..category_count {
         // Sample from exponential(1): -log(U)
-        let u = rng.random();
-        let e = if u > 0.0 { -(u.ln()) } else { 20.0 };
-        v.push(e as f32);
+        let uniform_value = rng.random();
+        let exponential_sample = if uniform_value > 0.0 {
+            -(uniform_value.ln())
+        } else {
+            20.0
+        };
+        sampled_values.push(exponential_sample as f32);
     }
-    let sum: f32 = v.iter().sum();
-    if sum > 0.0 {
-        for x in v.iter_mut() {
-            *x /= sum;
+    let total: f32 = sampled_values.iter().sum();
+    if total > 0.0 {
+        for value in &mut sampled_values {
+            *value /= total;
         }
     }
-    v
+    sampled_values
 }
 
 /// Validate that a probability vector sums to approximately 1.0.
@@ -189,17 +205,17 @@ pub fn vec_f_compare(v1: &[f32], v2: &[f32], tol: f32) -> bool {
 
 /// Validate that an HMM's probability distributions are properly normalized.
 pub fn hmm_validate(hmm: &Hmm, tol: f32) -> bool {
-    let k = hmm.alphabet.canonical_size;
+    let canonical_size = hmm.alphabet.canonical_size;
 
     for node in 1..=hmm.num_nodes {
         // Match emissions should sum to ~1
-        let mat_sum: f32 = hmm.match_emissions(node)[..k].iter().sum();
-        if (mat_sum - 1.0).abs() > tol {
+        let match_sum: f32 = hmm.match_emissions(node)[..canonical_size].iter().sum();
+        if (match_sum - 1.0).abs() > tol {
             return false;
         }
         // Insert emissions should sum to ~1
-        let ins_sum: f32 = hmm.insert_emissions(node)[..k].iter().sum();
-        if (ins_sum - 1.0).abs() > tol {
+        let insert_sum: f32 = hmm.insert_emissions(node)[..canonical_size].iter().sum();
+        if (insert_sum - 1.0).abs() > tol {
             return false;
         }
         // Match transitions (MM+MI+MD) should sum to ~1
@@ -259,17 +275,17 @@ pub fn hmm_set_composition(hmm: &mut Hmm) {
 /// Utility for tests that need a configured (hmm, bg, profile) triple.
 pub fn setup_profile(
     rng: &mut XorShift64,
-    m: usize,
-    l: usize,
-    abc: &Alphabet,
+    model_length: usize,
+    target_length: usize,
+    alphabet: &Alphabet,
     mode: crate::config::SearchMode,
 ) -> (Hmm, BackgroundModel, Profile) {
-    let hmm = hmm_sample(rng, m, abc);
-    let mut bg = BackgroundModel::new(abc);
-    bg.set_length(l);
-    let mut gm = Profile::new(hmm.num_nodes, abc);
-    crate::modelconfig::profile_config(&hmm, &bg, &mut gm, l, mode);
-    (hmm, bg, gm)
+    let hmm = hmm_sample(rng, model_length, alphabet);
+    let mut background = BackgroundModel::new(alphabet);
+    background.set_length(target_length);
+    let mut profile = Profile::new(hmm.num_nodes, alphabet);
+    crate::modelconfig::profile_config(&hmm, &background, &mut profile, target_length, mode);
+    (hmm, background, profile)
 }
 
 #[cfg(test)]
@@ -279,9 +295,9 @@ mod tests {
 
     #[test]
     fn test_hmm_sample() {
-        let abc = Alphabet::amino();
+        let amino_alphabet = Alphabet::amino();
         let mut rng = XorShift64::new(42);
-        let hmm = hmm_sample(&mut rng, 100, &abc);
+        let hmm = hmm_sample(&mut rng, 100, &amino_alphabet);
 
         assert_eq!(hmm.num_nodes, 100);
         assert!(hmm_validate(&hmm, 0.001));
@@ -289,9 +305,9 @@ mod tests {
 
     #[test]
     fn test_hmm_sample_enumerable() {
-        let abc = Alphabet::amino();
+        let amino_alphabet = Alphabet::amino();
         let mut rng = XorShift64::new(42);
-        let hmm = hmm_sample_enumerable(&mut rng, 10, &abc);
+        let hmm = hmm_sample_enumerable(&mut rng, 10, &amino_alphabet);
 
         assert_eq!(hmm.num_nodes, 10);
         // All insert transitions should be 0
@@ -310,16 +326,21 @@ mod tests {
 
     #[test]
     fn test_random_digital_seq() {
-        let abc = Alphabet::amino();
-        let bg = BackgroundModel::new(&abc);
+        let amino_alphabet = Alphabet::amino();
+        let background = BackgroundModel::new(&amino_alphabet);
         let mut rng = XorShift64::new(42);
 
-        let dsq = random_digital_seq(&mut rng, &bg.residue_frequencies, abc.canonical_size, 200);
-        assert_eq!(dsq.len(), 200);
+        let digitized_sequence = random_digital_seq(
+            &mut rng,
+            &background.residue_frequencies,
+            amino_alphabet.canonical_size,
+            200,
+        );
+        assert_eq!(digitized_sequence.len(), 200);
 
         // All residues should be in range [0, K)
-        for &d in &dsq {
-            assert!((d as usize) < abc.canonical_size);
+        for &residue_code in &digitized_sequence {
+            assert!((residue_code as usize) < amino_alphabet.canonical_size);
         }
     }
 
