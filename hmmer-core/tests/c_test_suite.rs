@@ -509,6 +509,28 @@ fn test_modelconfig_all_modes() {
     }
 }
 
+#[test]
+fn test_reconfig_hit_modes_match_hmmer_length_model() {
+    let abc = Alphabet::amino();
+    let mut rng = XorShift64::new(17);
+    let hmm = hmm_sample(&mut rng, 20, &abc);
+    let bg = BackgroundModel::new(&abc);
+    let mut profile = Profile::new(hmm.num_nodes, &abc);
+    hmmer_core::modelconfig::profile_config(&hmm, &bg, &mut profile, 224, SearchMode::Local);
+
+    profile.reconfig_unihit(224);
+    assert!((profile.special_scores.n_move.exp() - 2.0 / 226.0).abs() < 1e-7);
+    assert!((profile.special_scores.n_loop.exp() - 224.0 / 226.0).abs() < 1e-7);
+    assert_eq!(profile.special_scores.e_move, 0.0);
+    assert_eq!(profile.special_scores.e_loop, f32::NEG_INFINITY);
+
+    profile.reconfig_multihit(224);
+    assert!((profile.special_scores.n_move.exp() - 3.0 / 227.0).abs() < 1e-7);
+    assert!((profile.special_scores.n_loop.exp() - 224.0 / 227.0).abs() < 1e-7);
+    assert!((profile.special_scores.e_move.exp() - 0.5).abs() < 1e-7);
+    assert!((profile.special_scores.e_loop.exp() - 0.5).abs() < 1e-7);
+}
+
 // ===================================================================
 // p7_hmm.c :: HMM clone and compare
 // ===================================================================
@@ -791,6 +813,67 @@ fn test_forward_checkpointed_agrees_with_forward() {
                 }
             }
         }
+    }
+}
+
+#[test]
+fn test_backward_posterior_null2_and_oa_invariants() {
+    let abc = Alphabet::amino();
+    let mut rng = XorShift64::new(73);
+    let bg = BackgroundModel::new(&abc);
+
+    for l in [5, 20, 50] {
+        let hmm = hmm_sample(&mut rng, 20, &abc);
+        let mut gm = Profile::new(hmm.num_nodes, &abc);
+        hmmer_core::modelconfig::profile_config(&hmm, &bg, &mut gm, l, SearchMode::Local);
+        let om = OptimizedProfile::from_profile(&gm);
+        let dsq = random_digital_seq(&mut rng, &bg.residue_frequencies, abc.canonical_size, l);
+        let (checkpoints, simd_data) = fwd_bck::forward_checkpointed_simd(&dsq, l, &om);
+        let mut posterior = ScoreMatrix::new(gm.num_nodes, l).unwrap();
+        let mut domains = hmmer_core::domaindef::DomainWorkspace::new();
+        let mut segment = fwd_bck::OddsSegmentBuf::default();
+
+        let backward_score = hmmer_core::forward_backward::backward_decode_prob_space(
+            &dsq,
+            &gm,
+            &om,
+            &checkpoints,
+            &simd_data,
+            &mut posterior,
+            Some(&mut domains),
+            &mut segment,
+        )
+        .unwrap();
+        assert!((backward_score - checkpoints.overall_score).abs() < 0.1);
+        assert!(domains.begin_totals[l].is_finite());
+        assert!(domains.exit_totals[l].is_finite());
+        assert!((domains.begin_totals[l] - domains.exit_totals[l]).abs() < 0.02);
+
+        for i in 1..=l {
+            let mut total = posterior.special_score(i, N_STATE)
+                + posterior.special_score(i, J_STATE)
+                + posterior.special_score(i, C_STATE);
+            for k in 1..=gm.num_nodes {
+                total += posterior.match_score(i, k) + posterior.insert_score(i, k);
+            }
+            assert!(
+                (total - 1.0).abs() < 0.02,
+                "posterior row {i} sums to {total}"
+            );
+        }
+
+        let null2 = hmmer_core::null2::null2_by_expectation(&gm, &posterior);
+        assert_eq!(null2.len(), abc.full_size);
+        assert!(null2.iter().all(|odds| odds.is_finite() && *odds >= 0.0));
+
+        let mut decoder = hmmer_core::optimal_accuracy::OaDecoder::new(gm.num_nodes);
+        let oa = decoder.decode(&gm, &posterior).unwrap();
+        assert!(oa.score.is_finite() && oa.score >= 0.0 && oa.score <= l as f32 + 0.1);
+        assert_eq!(oa.trace.steps.first().unwrap().state, TraceStateType::Start);
+        assert_eq!(
+            oa.trace.steps.last().unwrap().state,
+            TraceStateType::Terminate
+        );
     }
 }
 

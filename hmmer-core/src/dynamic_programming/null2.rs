@@ -13,6 +13,9 @@ use crate::score_matrix::{C_STATE, INSERT_CELL, J_STATE, MATCH_CELL, N_STATE, Sc
 pub fn null2_by_expectation(profile: &Profile, posterior_matrix: &ScoreMatrix) -> Vec<f32> {
     let m = profile.num_nodes;
     let ld = posterior_matrix.sequence_length;
+    if ld == 0 {
+        return vec![1.0; profile.alphabet.full_size];
+    }
     let log_ld = (ld as f32).ln();
 
     // Sum state usage across rows 1..=ld into local accumulators.
@@ -76,5 +79,53 @@ pub fn null2_by_expectation(profile: &Profile, posterior_matrix: &ScoreMatrix) -
         *null2_x = sum;
     }
 
+    set_degenerate_odds(&profile.alphabet, &mut null2);
+
     null2
+}
+
+/// Equivalent to Easel's `esl_abc_FAvgScVec()`: ambiguous symbols get the
+/// arithmetic mean of the canonical odds they represent. Gap, nonresidue,
+/// and missing-data symbols are neutral under null2.
+fn set_degenerate_odds(alphabet: &crate::alphabet::Alphabet, odds: &mut [f32]) {
+    let k = alphabet.canonical_size;
+    let kp = alphabet.full_size;
+    for x in (k + 1)..kp.saturating_sub(2) {
+        let row = alphabet.degen_row(x);
+        let mut sum = 0.0f32;
+        let mut count = 0usize;
+        for (a, &included) in row.iter().enumerate() {
+            if included {
+                sum += odds[a];
+                count += 1;
+            }
+        }
+        odds[x] = if count > 0 { sum / count as f32 } else { 1.0 };
+    }
+    odds[k] = 1.0;
+    odds[kp - 2] = 1.0;
+    odds[kp - 1] = 1.0;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::alphabet::Alphabet;
+
+    #[test]
+    fn degenerate_odds_match_hmmer_averaging() {
+        let alphabet = Alphabet::amino();
+        let mut odds = vec![1.0; alphabet.full_size];
+        odds[2] = 2.0; // D
+        odds[11] = 4.0; // N
+        odds[7] = 6.0; // I
+        odds[9] = 10.0; // L
+        set_degenerate_odds(&alphabet, &mut odds);
+
+        assert_eq!(odds[21], 3.0); // B = mean(D, N)
+        assert_eq!(odds[22], 8.0); // J = mean(I, L)
+        assert_eq!(odds[alphabet.canonical_size], 1.0); // gap
+        assert_eq!(odds[alphabet.full_size - 2], 1.0); // nonresidue
+        assert_eq!(odds[alphabet.full_size - 1], 1.0); // missing
+    }
 }

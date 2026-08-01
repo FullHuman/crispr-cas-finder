@@ -122,10 +122,10 @@ impl OptimizedProfile {
 
     /// Reconfigure specials for unihit (single domain) mode at length Ld.
     /// Used during domain envelope rescoring.
-    pub fn reconfig_unihit(&mut self, ld: usize) {
-        let ld_f = ld as f32;
-        let pmove = 1.0 / (ld_f + 1.0);
-        let ploop = ld_f / (ld_f + 1.0);
+    pub fn reconfig_unihit(&mut self, l: usize) {
+        let l = l as f32;
+        let pmove = 2.0 / (l + 2.0);
+        let ploop = 1.0 - pmove;
 
         self.xf[XST_N][XTR_LOOP] = ploop;
         self.xf[XST_N][XTR_MOVE] = pmove;
@@ -135,11 +135,12 @@ impl OptimizedProfile {
         self.xf[XST_E][XTR_LOOP] = 0.0; // exp(-inf) = 0
         self.xf[XST_J][XTR_LOOP] = 0.0; // exp(-inf) = 0
         self.xf[XST_J][XTR_MOVE] = 0.0; // exp(-inf) = 0
+        self.nj = 0.0;
     }
 
     /// Restore specials for multihit mode at length L.
     pub fn reconfig_multihit(&mut self, l: usize) {
-        let pmove = (2.0 + self.nj) / (l as f32 + 2.0 + self.nj);
+        let pmove = 3.0 / (l as f32 + 3.0);
         let ploop = 1.0 - pmove;
 
         self.xf[XST_N][XTR_LOOP] = ploop;
@@ -150,6 +151,7 @@ impl OptimizedProfile {
         self.xf[XST_J][XTR_MOVE] = pmove;
         self.xf[XST_E][XTR_MOVE] = 0.5_f32; // exp(ln(0.5))
         self.xf[XST_E][XTR_LOOP] = 0.5_f32;
+        self.nj = 1.0;
     }
 }
 

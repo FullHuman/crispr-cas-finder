@@ -14,6 +14,7 @@ pub mod repeat_db;
 pub mod types;
 
 pub use cas_pipeline::{GeneRecord, ModelDefinition};
+pub use cas_types::RepliconTopology;
 pub use casparser::{CasCluster, CasGene, GeneCoordinates};
 pub use repeat_db::{RepeatLookup, lookup_repeat};
 pub use types::{

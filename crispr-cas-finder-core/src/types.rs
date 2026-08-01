@@ -1,4 +1,4 @@
-use crate::casparser::CasCluster;
+use crate::{cas_types::RepliconTopology, casparser::CasCluster};
 use serde::{Deserialize, Serialize};
 
 /// A single direct repeat within a CRISPR array.
@@ -134,12 +134,15 @@ impl Default for DetectionParams {
 pub struct CasFinderConfig {
     pub genetic_code: usize,
     pub metagenome: bool,
+    /// Number of HMM-search threads; `0` uses Rayon's default worker count.
     pub workers: usize,
     pub definition: String,
-    pub vicinity: usize,
-    pub clustering_threshold: usize,
     pub quiet: bool,
-    /// Directory containing CAS model definitions (XML or TOML).
+    /// Whether the input replicon wraps across its sequence boundary.
+    pub replicon_topology: RepliconTopology,
+    /// Minimum bit score required from the strongest hit in a reported system.
+    pub min_best_hit_score: f64,
+    /// Directory containing CAS model definitions (XML).
     pub cas_models_dir: Option<std::path::PathBuf>,
     /// Directory containing CAS HMM profile files.
     pub cas_profiles_dir: Option<std::path::PathBuf>,
@@ -152,9 +155,9 @@ impl Default for CasFinderConfig {
             metagenome: false,
             workers: 0,
             definition: "SubTyping".to_string(),
-            vicinity: 600,
-            clustering_threshold: 0,
             quiet: false,
+            replicon_topology: RepliconTopology::Circular,
+            min_best_hit_score: 25.0,
             cas_models_dir: None,
             cas_profiles_dir: None,
         }

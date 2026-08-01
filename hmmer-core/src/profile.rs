@@ -253,10 +253,12 @@ impl Profile {
     /// Port of `p7_ReconfigUnihit()`.
     pub fn reconfig_unihit(&mut self, target_length: usize) {
         let l = target_length as f32;
-        self.special_scores.n_loop = (l / (l + 1.0)).ln();
-        self.special_scores.n_move = (1.0 / (l + 1.0)).ln();
-        self.special_scores.c_loop = (l / (l + 1.0)).ln();
-        self.special_scores.c_move = (1.0 / (l + 1.0)).ln();
+        let pmove = 2.0 / (l + 2.0);
+        let ploop = 1.0 - pmove;
+        self.special_scores.n_loop = ploop.ln();
+        self.special_scores.n_move = pmove.ln();
+        self.special_scores.c_loop = ploop.ln();
+        self.special_scores.c_move = pmove.ln();
         self.special_scores.e_move = 0.0;
         self.special_scores.e_loop = f32::NEG_INFINITY;
         self.special_scores.j_loop = f32::NEG_INFINITY;
@@ -270,7 +272,7 @@ impl Profile {
     /// Port of `p7_ReconfigMultihit()`.
     pub fn reconfig_multihit(&mut self, target_length: usize) {
         let l = target_length as f32;
-        let pmove = (2.0 + self.expected_j_uses) / (l + 2.0 + self.expected_j_uses);
+        let pmove = 3.0 / (l + 3.0);
         let ploop = 1.0 - pmove;
         self.special_scores.n_loop = ploop.ln();
         self.special_scores.n_move = pmove.ln();

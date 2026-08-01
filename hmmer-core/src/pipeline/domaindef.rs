@@ -153,9 +153,11 @@ impl DomainWorkspace {
                 // Save profile + OM state, reconfig for isolated domain
                 let save_l = profile.target_length;
                 let save_nj = profile.expected_j_uses;
-                let domain_length = region_j - region_i + 1;
-                profile.reconfig_unihit(domain_length);
-                om.reconfig_unihit(domain_length);
+                // Upstream keeps the length model configured for the complete
+                // target while forcing a single-hit parse of each envelope.
+                // The envelope length is only the DP row count.
+                profile.reconfig_unihit(save_l);
+                om.reconfig_unihit(save_l);
 
                 // Inner functions receive &Profile and &OptimizedProfile (immutable)
                 let domain = rescore_isolated_domain(
@@ -274,7 +276,6 @@ fn rescore_isolated_domain(
         profile,
         i,
         j,
-        domain_length,
         forward_score,
         &buf.posterior_matrix,
         &mut buf.oa_decoder,
@@ -289,7 +290,6 @@ fn finish_domain_scoring(
     profile: &Profile,
     i: usize,
     j: usize,
-    domain_length: usize,
     forward_score: f32,
     posterior_matrix: &ScoreMatrix,
     oa_decoder: &mut OaDecoder,
@@ -306,7 +306,7 @@ fn finish_domain_scoring(
         envelope_end: j,
         envelope_score: forward_score,
         domain_correction: 0.0,
-        optimal_accuracy_score: oa.as_ref().map_or(0.0, |r| r.score) / domain_length as f32,
+        optimal_accuracy_score: oa.as_ref().map_or(0.0, |r| r.score),
         ..Domain::default()
     };
 

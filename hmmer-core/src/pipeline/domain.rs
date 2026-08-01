@@ -20,7 +20,7 @@ pub struct Domain {
     pub envelope_score: f32,         // Forward score in envelope (nats)
     pub domain_correction: f32,      // null2 correction for domain
     pub domain_bias: f32,            // null2 bias contribution (nats)
-    pub optimal_accuracy_score: f32, // optimal accuracy score
+    pub optimal_accuracy_score: f32, // expected number of correctly decoded positions
     pub bitscore: f32,               // total score in bits, null corrected
     pub log_pvalue: f64,             // log(P-value) of the bitscore
     pub is_reported: bool,

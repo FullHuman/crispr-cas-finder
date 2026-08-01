@@ -60,8 +60,8 @@ impl Alphabet {
         let k = 20;
         let kp = 29;
         // Canonical: A C D E F G H I K L M N P Q R S T V W Y
-        // Then: gap(-) B J Z O U X nonresidue(~) missing(*)
-        let sym = padded_sym(b"ACDEFGHIKLMNPQRSTVWY-BJZOUX~*", kp);
+        // Then: gap(-) B J Z O U X nonresidue(*) missing(~)
+        let sym = padded_sym(b"ACDEFGHIKLMNPQRSTVWY-BJZOUX*~", kp);
 
         let mut degen = [false; MAX_FULL_SIZE * MAX_CANONICAL_SIZE];
         // Canonical residues: each is itself
@@ -102,8 +102,8 @@ impl Alphabet {
         let k = 4;
         let kp = 18;
         // Canonical: A C G T
-        // Then: gap(-) R Y M K S W H B V D N nonresidue(~) missing(*)
-        let sym = padded_sym(b"ACGT-RYMKSWHBVDN~*", kp);
+        // Then: gap(-) R Y M K S W H B V D N nonresidue(*) missing(~)
+        let sym = padded_sym(b"ACGT-RYMKSWHBVDN*~", kp);
 
         let mut degen = [false; MAX_FULL_SIZE * MAX_CANONICAL_SIZE];
         for i in 0..k {

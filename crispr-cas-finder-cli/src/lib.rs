@@ -3,9 +3,9 @@ use std::fs::{File, create_dir_all};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use crispr_cas_finder_core::{
-    CasFinderConfig, CrisprArray, DetectionParams, FullAnalysisResult,
+    CasFinderConfig, CrisprArray, DetectionParams, FullAnalysisResult, RepliconTopology,
     casfinder::run_casfinder,
     casparser::from_search_results,
     detect_crisprs_in_fasta_path,
@@ -14,6 +14,22 @@ use crispr_cas_finder_core::{
 use log::info;
 
 const MAX_OUTPUT_DIRECTORY_SUFFIX: usize = 999;
+
+#[derive(Clone, Copy, Debug, Default, ValueEnum)]
+enum TopologyArgument {
+    #[default]
+    Circular,
+    Linear,
+}
+
+impl From<TopologyArgument> for RepliconTopology {
+    fn from(value: TopologyArgument) -> Self {
+        match value {
+            TopologyArgument::Circular => Self::Circular,
+            TopologyArgument::Linear => Self::Linear,
+        }
+    }
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "crispr-cas-finder", author, version = env!("CARGO_PKG_VERSION"), about = "Find CRISPR arrays and Cas proteins in genomes")]
@@ -77,8 +93,6 @@ pub struct Cli {
     truncated_mismatch_percent: f64,
     #[arg(long = "cas", action = clap::ArgAction::SetTrue)]
     launch_cas_finder: bool,
-    #[arg(long, value_name = "INT", default_value_t = 600)]
-    vicinity: usize,
     #[arg(
         long,
         alias = "cpuMacSyFinder",
@@ -88,17 +102,14 @@ pub struct Cli {
     workers: usize,
     #[arg(long, value_name = "STR", default_value = "SubTyping")]
     definition: String,
-    #[arg(
-        long = "clustering-threshold",
-        alias = "cluster",
-        value_name = "INT",
-        default_value_t = 0
-    )]
-    clustering_threshold: usize,
     #[arg(long, alias = "geneticCode", value_name = "INT", default_value_t = 11)]
     genetic_code: usize,
     #[arg(long, action = clap::ArgAction::SetTrue)]
     metagenome: bool,
+    #[arg(long, value_enum, default_value_t = TopologyArgument::Circular)]
+    topology: TopologyArgument,
+    #[arg(long = "min-cas-score", value_name = "FLOAT", default_value_t = 25.0)]
+    min_cas_score: f64,
     #[arg(long = "cas-models-dir", value_name = "DIR")]
     cas_models_dir: Option<String>,
     #[arg(long = "cas-profiles-dir", value_name = "DIR")]
@@ -187,9 +198,9 @@ impl Cli {
             metagenome: self.metagenome,
             workers: self.workers,
             definition: self.definition.clone(),
-            vicinity: self.vicinity,
-            clustering_threshold: self.clustering_threshold,
             quiet: self.quiet,
+            replicon_topology: self.topology.into(),
+            min_best_hit_score: self.min_cas_score,
             cas_models_dir: Some(cas_models_dir),
             cas_profiles_dir: Some(cas_profiles_dir),
         })
@@ -341,10 +352,15 @@ mod tests {
             let result = Cli::try_parse_from(["crispr-cas-finder", "--in", "input.fa", flag]);
             assert!(result.is_err(), "{flag} should no longer be accepted");
         }
+        for flag in ["--vicinity", "--clustering-threshold", "--cluster"] {
+            let result =
+                Cli::try_parse_from(["crispr-cas-finder", "--in", "input.fa", flag, "100"]);
+            assert!(result.is_err(), "{flag} should no longer be accepted");
+        }
     }
 
     #[test]
-    fn workers_are_preserved_in_casfinder_config() {
+    fn casfinder_options_are_preserved_in_config() {
         let cli = Cli::try_parse_from([
             "crispr-cas-finder",
             "--in",
@@ -352,11 +368,17 @@ mod tests {
             "--cas",
             "--workers",
             "3",
+            "--topology",
+            "linear",
+            "--min-cas-score",
+            "30.5",
         ])
         .expect("parse CLI");
 
         let config = cli.casfinder_config().expect("resolve bundled Cas data");
         assert_eq!(config.workers, 3);
+        assert_eq!(config.replicon_topology, RepliconTopology::Linear);
+        assert_eq!(config.min_best_hit_score, 30.5);
     }
 
     #[test]
@@ -394,11 +416,11 @@ mod tests {
     }
 
     #[test]
-    fn casfinder_failure_is_propagated() {
+    fn empty_proteome_completes_with_an_empty_cas_report() {
         let temporary = tempfile::tempdir().expect("temporary directory");
         let input = temporary.path().join("short.fa");
         let output = temporary.path().join("output");
-        std::fs::write(&input, b">short\nACGTACGT\n").expect("write FASTA");
+        std::fs::write(&input, format!(">short\n{}\n", "A".repeat(120))).expect("write FASTA");
         let cli = Cli::try_parse_from([
             OsString::from("crispr-cas-finder"),
             OsString::from("--in"),
@@ -413,7 +435,10 @@ mod tests {
         ])
         .expect("parse CLI");
 
-        let error = run(cli).expect_err("CasFinder failure must reach the caller");
-        assert!(error.to_string().contains("CasFinder pipeline failed"));
+        run(cli).expect("an input with no predicted CDS is valid");
+
+        let report = std::fs::read_to_string(output.join("report.json")).expect("merged report");
+        let report: FullAnalysisResult = serde_json::from_str(&report).expect("parse report");
+        assert!(report.cas_clusters.is_empty());
     }
 }
