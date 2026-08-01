@@ -8,6 +8,7 @@ pub mod cas_types;
 pub mod casfinder;
 pub mod casparser;
 pub mod detect;
+mod dna;
 pub mod io;
 pub mod repeat_db;
 pub mod types;
@@ -71,7 +72,7 @@ fn detect_crisprs_for_sequence(
         return Vec::new();
     }
 
-    let hits = find_direct_repeats(seq, seq_id, params);
+    let hits = find_direct_repeats(seq, params);
     info!("  {} — {} DR candidates", seq_id, hits.len());
 
     let clusters = cluster_repeats(&hits, GAP_THRESHOLD);
@@ -116,7 +117,7 @@ fn process_cluster(
     let mut best_spacers: Vec<String> = Vec::new();
 
     for consensus in &repeat_candidates {
-        let refined = refine_cluster_with_consensus(consensus, cluster, seq_id, seq, params);
+        let refined = refine_cluster_with_consensus(consensus, cluster, seq, params);
         if refined.len() < min_repeat_count {
             continue;
         }
@@ -166,7 +167,7 @@ fn process_cluster(
     let mut cluster = cluster;
     if trimmed != best_consensus {
         best_consensus = trimmed;
-        best_refined = refine_cluster_with_consensus(&best_consensus, cluster, seq_id, seq, params);
+        best_refined = refine_cluster_with_consensus(&best_consensus, cluster, seq, params);
         if best_refined.len() < min_repeat_count {
             return None;
         }

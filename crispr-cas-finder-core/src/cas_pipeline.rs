@@ -257,16 +257,7 @@ pub fn evaluate_cluster(cluster: &Cluster, model: &SystemModel) -> Option<Detect
 }
 
 pub fn reverse_complement_dna(seq: &[u8]) -> Vec<u8> {
-    seq.iter()
-        .rev()
-        .map(|&b| match b {
-            b'A' | b'a' => b'T',
-            b'T' | b't' => b'A',
-            b'C' | b'c' => b'G',
-            b'G' | b'g' => b'C',
-            other => other,
-        })
-        .collect()
+    crate::dna::reverse_complement(seq)
 }
 
 pub fn translate_dna(seq: &[u8], table: &HashMap<[u8; 3], u8>) -> String {

@@ -90,20 +90,6 @@ pub struct RepeatLookup {
     pub crispr_direction: String,
 }
 
-/// Reverse-complement a DNA string (uppercase ACGT; unknown bases pass through).
-fn reverse_complement_dna_string(seq: &str) -> String {
-    seq.chars()
-        .rev()
-        .map(|c| match c {
-            'A' => 'T',
-            'T' => 'A',
-            'C' => 'G',
-            'G' => 'C',
-            other => other,
-        })
-        .collect()
-}
-
 /// Flip a normalised direction symbol: `"+"` ↔ `"-"`, `"ND"` stays `"ND"`.
 fn flipped_direction_symbol(direction: &str) -> String {
     match direction {
@@ -146,7 +132,10 @@ pub fn lookup_repeat(consensus_repeat: &str) -> RepeatLookup {
     // The detection algorithm may produce a consensus that is the RC of the
     // canonical sequence stored in Repeat_List.csv.  In that case the array
     // is on the opposite strand, so the direction must be flipped.
-    let reverse_complement_sequence = reverse_complement_dna_string(&normalized_repeat_sequence);
+    let reverse_complement_sequence = String::from_utf8(crate::dna::reverse_complement(
+        normalized_repeat_sequence.as_bytes(),
+    ))
+    .expect("normalized DNA repeat is ASCII");
     if let Some(repeat_id) = repeat_id_by_sequence
         .get(&reverse_complement_sequence)
         .cloned()

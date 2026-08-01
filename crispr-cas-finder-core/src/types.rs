@@ -139,7 +139,6 @@ pub struct CasFinderConfig {
     pub vicinity: usize,
     pub clustering_threshold: usize,
     pub quiet: bool,
-    pub fast: bool,
     /// Directory containing CAS model definitions (XML or TOML).
     pub cas_models_dir: Option<std::path::PathBuf>,
     /// Directory containing CAS HMM profile files.
@@ -156,7 +155,6 @@ impl Default for CasFinderConfig {
             vicinity: 600,
             clustering_threshold: 0,
             quiet: false,
-            fast: false,
             cas_models_dir: None,
             cas_profiles_dir: None,
         }

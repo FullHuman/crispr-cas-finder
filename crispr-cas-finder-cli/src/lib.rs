@@ -1,8 +1,8 @@
 use std::ffi::OsString;
 use std::fs::{File, create_dir_all};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::Parser;
 use crispr_cas_finder_core::{
     CasFinderConfig, CrisprArray, DetectionParams, FullAnalysisResult,
@@ -11,7 +11,9 @@ use crispr_cas_finder_core::{
     detect_crisprs_in_fasta_path,
     io::{write_gff, write_json},
 };
-use log::{error, info};
+use log::info;
+
+const MAX_OUTPUT_DIRECTORY_SUFFIX: usize = 999;
 
 #[derive(Parser, Debug)]
 #[command(name = "crispr-cas-finder", author, version = env!("CARGO_PKG_VERSION"), about = "Find CRISPR arrays and Cas proteins in genomes")]
@@ -23,8 +25,6 @@ pub struct Cli {
     outdir: Option<String>,
     #[arg(short = 'q', long, action = clap::ArgAction::SetTrue)]
     quiet: bool,
-    #[arg(long = "fast", alias = "faster", action = clap::ArgAction::SetTrue)]
-    fast: bool,
     #[arg(long, alias = "minSeqSize", value_name = "INT", default_value_t = 0)]
     min_sequence_length: usize,
     #[arg(long, alias = "mismDRs", value_name = "FLOAT", default_value_t = 20.0)]
@@ -99,8 +99,6 @@ pub struct Cli {
     genetic_code: usize,
     #[arg(long, action = clap::ArgAction::SetTrue)]
     metagenome: bool,
-    #[arg(long = "archa-cas", alias = "ArchaCas", action = clap::ArgAction::SetTrue)]
-    archa_cas: bool,
     #[arg(long = "cas-models-dir", value_name = "DIR")]
     cas_models_dir: Option<String>,
     #[arg(long = "cas-profiles-dir", value_name = "DIR")]
@@ -157,7 +155,7 @@ impl Cli {
         }
     }
 
-    fn casfinder_config(&self) -> CasFinderConfig {
+    fn casfinder_config(&self) -> Result<CasFinderConfig> {
         let data_root = Self::default_cas_finder_data_root();
 
         let cas_models_dir = self.cas_models_dir.as_ref().map(PathBuf::from).or_else(|| {
@@ -176,22 +174,25 @@ impl Cli {
                     .map(|root| root.join("CASprofiles-2.0.3"))
             });
 
-        CasFinderConfig {
+        let cas_models_dir = require_cas_data_directory(
+            cas_models_dir,
+            "Cas model definitions",
+            "--cas-models-dir",
+        )?;
+        let cas_profiles_dir =
+            require_cas_data_directory(cas_profiles_dir, "Cas HMM profiles", "--cas-profiles-dir")?;
+
+        Ok(CasFinderConfig {
             genetic_code: self.genetic_code,
             metagenome: self.metagenome,
-            workers: if self.fast { 0 } else { self.workers },
+            workers: self.workers,
             definition: self.definition.clone(),
             vicinity: self.vicinity,
             clustering_threshold: self.clustering_threshold,
             quiet: self.quiet,
-            fast: self.fast,
-            cas_models_dir,
-            cas_profiles_dir,
-        }
-    }
-
-    fn should_launch_cas(&self) -> bool {
-        self.launch_cas_finder || self.archa_cas
+            cas_models_dir: Some(cas_models_dir),
+            cas_profiles_dir: Some(cas_profiles_dir),
+        })
     }
 }
 
@@ -210,6 +211,10 @@ pub fn run(cli: Cli) -> Result<()> {
         env!("CARGO_PKG_VERSION")
     );
 
+    let casfinder_config = cli
+        .launch_cas_finder
+        .then(|| cli.casfinder_config())
+        .transpose()?;
     let params = cli.detection_params();
     let input_path = &cli.input;
     info!(
@@ -247,7 +252,7 @@ pub fn run(cli: Cli) -> Result<()> {
         .outdir
         .as_ref()
         .map(PathBuf::from)
-        .unwrap_or_else(|| default_output_directory(&basename));
+        .map_or_else(|| default_output_directory(&basename), Ok)?;
     create_dir_all(&outdir)?;
 
     let gff_path = outdir.join(format!("{}.gff", basename));
@@ -264,43 +269,151 @@ pub fn run(cli: Cli) -> Result<()> {
 
     info!("GFF and JSON outputs created in {:?}", outdir);
 
-    if cli.should_launch_cas() {
-        let casfinder_config = cli.casfinder_config();
-        match run_casfinder(input_path, &basename, &outdir, &casfinder_config) {
-            Ok(search_results) => {
-                info!("CasFinder found {} systems", search_results.systems.len());
-                let faa_path = outdir.join(format!("orphos_{}/{}.faa", basename, basename));
-                let faa_content = std::fs::read_to_string(&faa_path).ok();
-                let cas_clusters = from_search_results(&search_results, faa_content.as_deref());
-                let report = FullAnalysisResult {
-                    crisprs: arrays.clone(),
-                    cas_clusters,
-                };
-                let report_path = outdir.join("report.json");
-                let report_file =
-                    File::create(&report_path).context("Creating merged report JSON")?;
-                serde_json::to_writer_pretty(report_file, &report)
-                    .context("Writing merged report JSON")?;
-                info!("Merged report written to {:?}", report_path);
-            }
-            Err(err) => {
-                error!("CasFinder failed: {}", err);
-            }
-        }
+    if let Some(casfinder_config) = casfinder_config {
+        let search_results = run_casfinder(input_path, &basename, &outdir, &casfinder_config)
+            .context("CasFinder pipeline failed")?;
+        info!("CasFinder found {} systems", search_results.systems.len());
+        let faa_path = outdir
+            .join(format!("orphos_{basename}"))
+            .join(format!("{basename}.faa"));
+        let faa_content = std::fs::read_to_string(&faa_path).ok();
+        let cas_clusters = from_search_results(&search_results, faa_content.as_deref());
+        let report = FullAnalysisResult {
+            crisprs: arrays.clone(),
+            cas_clusters,
+        };
+        let report_path = outdir.join("report.json");
+        let report_file = File::create(&report_path).context("Creating merged report JSON")?;
+        serde_json::to_writer_pretty(report_file, &report).context("Writing merged report JSON")?;
+        info!("Merged report written to {:?}", report_path);
     }
 
     Ok(())
 }
 
-fn default_output_directory(basename: &str) -> PathBuf {
-    let base_name = format!("Result_{}", basename);
-    let mut candidate = PathBuf::from(&base_name);
-    let mut suffix = 2usize;
+fn require_cas_data_directory(
+    path: Option<PathBuf>,
+    description: &str,
+    argument: &str,
+) -> Result<PathBuf> {
+    let path = path.with_context(|| {
+        format!("{description} directory was not found; pass {argument} explicitly")
+    })?;
+    if !path.is_dir() {
+        bail!(
+            "{description} directory does not exist or is not a directory: {}; pass {argument} with a valid directory",
+            path.display()
+        );
+    }
+    Ok(path)
+}
 
-    while candidate.exists() {
-        candidate = PathBuf::from(format!("{}_{}", base_name, suffix));
-        suffix += 1;
+fn default_output_directory(basename: &str) -> Result<PathBuf> {
+    available_output_directory(Path::new(""), basename)
+}
+
+fn available_output_directory(parent: &Path, basename: &str) -> Result<PathBuf> {
+    let base_name = format!("Result_{}", basename);
+    let candidate = parent.join(&base_name);
+    if !candidate.exists() {
+        return Ok(candidate);
     }
 
-    candidate
+    for suffix in 2..=MAX_OUTPUT_DIRECTORY_SUFFIX {
+        let candidate = parent.join(format!("{base_name}_{suffix}"));
+        if !candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+
+    bail!(
+        "No available output directory for {base_name}; suffixes 2 through {MAX_OUTPUT_DIRECTORY_SUFFIX} are already in use"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn removed_flags_are_rejected() {
+        for flag in ["--fast", "--faster", "--archa-cas", "--ArchaCas"] {
+            let result = Cli::try_parse_from(["crispr-cas-finder", "--in", "input.fa", flag]);
+            assert!(result.is_err(), "{flag} should no longer be accepted");
+        }
+    }
+
+    #[test]
+    fn workers_are_preserved_in_casfinder_config() {
+        let cli = Cli::try_parse_from([
+            "crispr-cas-finder",
+            "--in",
+            "input.fa",
+            "--cas",
+            "--workers",
+            "3",
+        ])
+        .expect("parse CLI");
+
+        let config = cli.casfinder_config().expect("resolve bundled Cas data");
+        assert_eq!(config.workers, 3);
+    }
+
+    #[test]
+    fn missing_explicit_cas_data_directory_fails_early() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let missing = temporary.path().join("missing");
+        let cli = Cli::try_parse_from([
+            OsString::from("crispr-cas-finder"),
+            OsString::from("--in"),
+            OsString::from("input.fa"),
+            OsString::from("--cas"),
+            OsString::from("--cas-models-dir"),
+            missing.as_os_str().to_owned(),
+            OsString::from("--cas-profiles-dir"),
+            missing.as_os_str().to_owned(),
+        ])
+        .expect("parse CLI");
+
+        let error = cli
+            .casfinder_config()
+            .expect_err("missing data directory must fail");
+        assert!(error.to_string().contains("Cas model definitions"));
+        assert!(error.to_string().contains("--cas-models-dir"));
+    }
+
+    #[test]
+    fn output_directory_uses_first_available_suffix() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        std::fs::create_dir(temporary.path().join("Result_genome")).expect("base output");
+        std::fs::create_dir(temporary.path().join("Result_genome_2")).expect("second output");
+
+        let selected =
+            available_output_directory(temporary.path(), "genome").expect("select output");
+        assert_eq!(selected, temporary.path().join("Result_genome_3"));
+    }
+
+    #[test]
+    fn casfinder_failure_is_propagated() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let input = temporary.path().join("short.fa");
+        let output = temporary.path().join("output");
+        std::fs::write(&input, b">short\nACGTACGT\n").expect("write FASTA");
+        let cli = Cli::try_parse_from([
+            OsString::from("crispr-cas-finder"),
+            OsString::from("--in"),
+            input.as_os_str().to_owned(),
+            OsString::from("--outdir"),
+            output.as_os_str().to_owned(),
+            OsString::from("--cas"),
+            OsString::from("--cas-models-dir"),
+            temporary.path().as_os_str().to_owned(),
+            OsString::from("--cas-profiles-dir"),
+            temporary.path().as_os_str().to_owned(),
+        ])
+        .expect("parse CLI");
+
+        let error = run(cli).expect_err("CasFinder failure must reach the caller");
+        assert!(error.to_string().contains("CasFinder pipeline failed"));
+    }
 }
