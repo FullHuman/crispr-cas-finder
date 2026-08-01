@@ -123,85 +123,69 @@ impl DomainWorkspace {
             num_clustered: 0,
             num_overlaps: 0,
             num_envelopes: 0,
+            num_backward_failed: 0,
+            num_oa_failed: 0,
         };
 
-        let mut region_start: Option<usize> = None;
-        let mut triggered = false;
+        for (region_i, region_j) in find_regions(self, config, seq_n) {
+            result.num_regions += 1;
 
-        for j in 1..=seq_n {
-            if !triggered {
-                if self.model_occupancy[j] - (self.begin_totals[j] - self.begin_totals[j - 1])
-                    < config.cluster_threshold
-                    || region_start.is_none()
-                {
-                    region_start = Some(j);
-                }
-                if self.model_occupancy[j] >= config.region_threshold {
-                    triggered = true;
-                }
-            } else if self.model_occupancy[j] - (self.exit_totals[j] - self.exit_totals[j - 1])
-                < config.cluster_threshold
-            {
-                let region_i = region_start.expect("triggered implies region_start is set");
-                let region_j = j;
-                result.num_regions += 1;
+            if is_multidomain_region(self, config, region_i, region_j) {
+                result.num_clustered += 1;
+            }
 
-                if is_multidomain_region(self, config, region_i, region_j) {
-                    result.num_clustered += 1;
-                }
+            // Save profile + OM state, reconfig for isolated domain
+            let save_l = profile.target_length;
+            let save_nj = profile.expected_j_uses;
+            // Upstream keeps the length model configured for the complete
+            // target while forcing a single-hit parse of each envelope.
+            // The envelope length is only the DP row count.
+            profile.reconfig_unihit(save_l);
+            om.reconfig_unihit(save_l);
 
-                // Save profile + OM state, reconfig for isolated domain
-                let save_l = profile.target_length;
-                let save_nj = profile.expected_j_uses;
-                // Upstream keeps the length model configured for the complete
-                // target while forcing a single-hit parse of each envelope.
-                // The envelope length is only the DP row count.
-                profile.reconfig_unihit(save_l);
-                om.reconfig_unihit(save_l);
+            // Inner functions receive &Profile and &OptimizedProfile (immutable)
+            let domain = rescore_isolated_domain(
+                digital_sequence,
+                profile,
+                region_i,
+                region_j,
+                buf,
+                om,
+                seg_buf,
+            );
 
-                // Inner functions receive &Profile and &OptimizedProfile (immutable)
-                let domain = rescore_isolated_domain(
-                    digital_sequence,
-                    profile,
-                    region_i,
-                    region_j,
-                    buf,
-                    om,
-                    seg_buf,
-                );
+            // Restore profile + OM state
+            if save_nj > 0.0 {
+                profile.reconfig_multihit(save_l);
+                om.reconfig_multihit(save_l);
+            } else {
+                profile.reconfigure_length(save_l);
+                om.reconfigure_length(save_l);
+            }
 
-                // Restore profile + OM state
-                if save_nj > 0.0 {
-                    profile.reconfig_multihit(save_l);
-                    om.reconfig_multihit(save_l);
-                } else {
-                    profile.reconfigure_length(save_l);
-                    om.reconfigure_length(save_l);
-                }
-
-                if let Some((mut dom, null2)) = domain {
+            match domain {
+                Ok((mut dom, null2)) => {
                     // Accumulate null2 scores using the returned null2 vector
+                    debug_assert!(region_j <= seq_n);
+                    debug_assert!(region_j < self.null2_scores.len());
                     let mut domcorrection = 0.0f32;
                     for pos in region_i..=region_j {
-                        if pos <= seq_n {
-                            let x = digital_sequence[pos - 1] as usize;
-                            if x < null2.len() {
-                                let null2_log_correction = null2[x].ln();
-                                if pos < self.null2_scores.len() {
-                                    self.null2_scores[pos] += null2_log_correction;
-                                }
-                                domcorrection += null2_log_correction;
-                            }
+                        let x = digital_sequence[pos - 1] as usize;
+                        if x < null2.len() {
+                            let null2_log_correction = null2[x].ln();
+                            self.null2_scores[pos] += null2_log_correction;
+                            domcorrection += null2_log_correction;
                         }
                     }
                     dom.domain_correction = domcorrection;
                     result.domains.push(dom);
                 }
-
-                result.num_envelopes += 1;
-                region_start = None;
-                triggered = false;
+                Err(DomainRescoreFailure::Backward) => result.num_backward_failed += 1,
+                Err(DomainRescoreFailure::OptimalAccuracy) => result.num_oa_failed += 1,
             }
+
+            // HMMER counts candidate envelopes even when isolated rescoring fails.
+            result.num_envelopes += 1;
         }
 
         result
@@ -217,6 +201,52 @@ pub struct DomainResult {
     pub num_clustered: usize,
     pub num_overlaps: usize,
     pub num_envelopes: usize,
+    /// Candidate envelopes discarded because posterior decoding failed.
+    pub num_backward_failed: usize,
+    /// Candidate envelopes discarded because OA decoding or traceback failed.
+    pub num_oa_failed: usize,
+}
+
+/// Find candidate regions using HMMER's posterior occupancy heuristics.
+///
+/// There is intentionally no post-loop flush. This matches HMMER 3.4: a valid
+/// region reaching the C-terminus closes at `j = L` because the final exit
+/// posterior is subtracted from model occupancy at that position.
+fn find_regions(
+    workspace: &DomainWorkspace,
+    config: &DomainConfig,
+    seq_n: usize,
+) -> Vec<(usize, usize)> {
+    let mut regions = Vec::new();
+    let mut region_start: Option<usize> = None;
+    let mut triggered = false;
+
+    for j in 1..=seq_n {
+        if !triggered {
+            if workspace.model_occupancy[j]
+                - (workspace.begin_totals[j] - workspace.begin_totals[j - 1])
+                < config.cluster_threshold
+                || region_start.is_none()
+            {
+                region_start = Some(j);
+            }
+            if workspace.model_occupancy[j] >= config.region_threshold {
+                triggered = true;
+            }
+        } else if workspace.model_occupancy[j]
+            - (workspace.exit_totals[j] - workspace.exit_totals[j - 1])
+            < config.cluster_threshold
+        {
+            regions.push((
+                region_start.expect("triggered implies region_start is set"),
+                j,
+            ));
+            region_start = None;
+            triggered = false;
+        }
+    }
+
+    regions
 }
 
 fn is_multidomain_region(
@@ -239,7 +269,7 @@ fn is_multidomain_region(
 /// Rescore an isolated domain envelope [i..j].
 ///
 /// Profile and OptimizedProfile must already be reconfigured for the domain length.
-/// Returns the scored Domain and null2 vector, or None if backward decode fails.
+/// Returns the scored Domain and null2 vector after posterior and OA decoding succeed.
 fn rescore_isolated_domain(
     digital_sequence: &[u8],
     profile: &Profile,
@@ -248,7 +278,7 @@ fn rescore_isolated_domain(
     buf: &mut RescoringBuffers,
     om: &OptimizedProfile,
     seg_buf: &mut OddsSegmentBuf,
-) -> Option<(Domain, Vec<f32>)> {
+) -> Result<(Domain, Vec<f32>), DomainRescoreFailure> {
     use crate::dynamic_programming::simd::fwd_bck;
 
     let domain_length = j - i + 1;
@@ -257,7 +287,7 @@ fn rescore_isolated_domain(
     let (checkpoints, simd_data) = fwd_bck::forward_checkpointed_simd(dsq_sub, domain_length, om);
     let forward_score = checkpoints.overall_score;
 
-    if crate::forward_backward::backward_decode_prob_space(
+    crate::forward_backward::backward_decode_prob_space(
         dsq_sub,
         profile,
         om,
@@ -267,19 +297,22 @@ fn rescore_isolated_domain(
         None,
         seg_buf,
     )
-    .is_err()
-    {
-        return None;
-    }
+    .map_err(|_| DomainRescoreFailure::Backward)?;
 
-    Some(finish_domain_scoring(
+    finish_domain_scoring(
         profile,
         i,
         j,
         forward_score,
         &buf.posterior_matrix,
         &mut buf.oa_decoder,
-    ))
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DomainRescoreFailure {
+    Backward,
+    OptimalAccuracy,
 }
 
 /// Shared tail of domain scoring: null2, optimal accuracy, traceback, domain creation.
@@ -293,12 +326,20 @@ fn finish_domain_scoring(
     forward_score: f32,
     posterior_matrix: &ScoreMatrix,
     oa_decoder: &mut OaDecoder,
-) -> (Domain, Vec<f32>) {
+) -> Result<(Domain, Vec<f32>), DomainRescoreFailure> {
     // Null2 correction
     let null2 = crate::null2::null2_by_expectation(profile, posterior_matrix);
 
     // Optimal accuracy alignment + traceback
-    let oa = oa_decoder.decode(profile, posterior_matrix);
+    let oa = oa_decoder
+        .decode(profile, posterior_matrix)
+        .map_err(|_| DomainRescoreFailure::OptimalAccuracy)?;
+    let trace_domain = oa
+        .trace
+        .compute_domains()
+        .into_iter()
+        .next()
+        .ok_or(DomainRescoreFailure::OptimalAccuracy)?;
 
     // Create domain (domain_correction set by caller)
     let mut dom = Domain {
@@ -306,28 +347,17 @@ fn finish_domain_scoring(
         envelope_end: j,
         envelope_score: forward_score,
         domain_correction: 0.0,
-        optimal_accuracy_score: oa.as_ref().map_or(0.0, |r| r.score),
+        optimal_accuracy_score: oa.score,
         ..Domain::default()
     };
 
-    if let Ok(result) = oa {
-        let domains = result.trace.compute_domains();
-        if let Some(d) = domains.first() {
-            dom.alignment_start = i + d.sequence_start as usize - 1;
-            dom.alignment_end = i + d.sequence_end as usize - 1;
-            dom.hmm_from = d.hmm_start as usize;
-            dom.hmm_to = d.hmm_end as usize;
-        } else {
-            dom.alignment_start = i;
-            dom.alignment_end = j;
-        }
-        dom.trace = Some(result.trace);
-    } else {
-        dom.alignment_start = i;
-        dom.alignment_end = j;
-    }
+    dom.alignment_start = i + trace_domain.sequence_start as usize - 1;
+    dom.alignment_end = i + trace_domain.sequence_end as usize - 1;
+    dom.hmm_from = trace_domain.hmm_start as usize;
+    dom.hmm_to = trace_domain.hmm_end as usize;
+    dom.trace = Some(oa.trace);
 
-    (dom, null2)
+    Ok((dom, null2))
 }
 
 #[cfg(test)]
@@ -353,5 +383,49 @@ mod tests {
         let mut ws = DomainWorkspace::new();
         ws.grow_to(1000);
         assert!(ws.model_occupancy.len() > 1000);
+    }
+
+    #[test]
+    fn c_terminal_region_closes_from_final_exit_posterior() {
+        let config = DomainConfig::default();
+        let mut ws = DomainWorkspace::new();
+        ws.grow_to(4);
+        ws.model_occupancy[1..=4].copy_from_slice(&[0.30, 0.50, 0.50, 0.80]);
+        ws.exit_totals[1..=4].copy_from_slice(&[0.0, 0.0, 0.0, 1.0]);
+
+        assert_eq!(find_regions(&ws, &config, 4), [(1, 4)]);
+    }
+
+    #[test]
+    fn open_terminal_region_is_not_synthetically_flushed() {
+        let config = DomainConfig::default();
+        let mut ws = DomainWorkspace::new();
+        ws.grow_to(4);
+        ws.model_occupancy[1..=4].copy_from_slice(&[0.30, 0.50, 0.50, 0.80]);
+
+        // This deliberately inconsistent synthetic posterior has no final exit
+        // probability. HMMER leaves it open instead of inventing an envelope.
+        assert!(find_regions(&ws, &config, 4).is_empty());
+    }
+
+    #[test]
+    fn multidomain_region_uses_expected_exit_then_begin_count() {
+        let config = DomainConfig::default();
+        let mut ws = DomainWorkspace::new();
+        ws.grow_to(4);
+        ws.exit_totals[1..=4].copy_from_slice(&[0.0, 0.3, 0.3, 0.3]);
+        ws.begin_totals[1..=4].copy_from_slice(&[0.0, 0.0, 0.3, 0.3]);
+
+        assert!(is_multidomain_region(&ws, &config, 1, 4));
+
+        ws.begin_totals.fill(0.0);
+        assert!(!is_multidomain_region(&ws, &config, 1, 4));
+    }
+
+    #[test]
+    fn result_failure_counters_default_to_zero() {
+        let result = DomainResult::default();
+        assert_eq!(result.num_backward_failed, 0);
+        assert_eq!(result.num_oa_failed, 0);
     }
 }
