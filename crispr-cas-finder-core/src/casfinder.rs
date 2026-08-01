@@ -780,6 +780,27 @@ mod tests {
     }
 
     #[test]
+    fn all_bundled_cas_models_are_valid_definitions() {
+        let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("core crate is in the workspace root");
+        let data_root = workspace_root
+            .join("crispr-cas-finder-cli")
+            .join("data")
+            .join("CasFinder-2.0.3");
+        let definition_directories = ["DEF-Class-2.0.3", "DEF-Typing-2.0.3", "DEF-SubTyping-2.0.3"];
+
+        let mut model_count = 0;
+        for directory in definition_directories {
+            let (_, names) = build_model_registry_from_dir(&data_root.join(directory))
+                .unwrap_or_else(|error| panic!("failed to parse {directory}: {error:#}"));
+            model_count += names.len();
+        }
+
+        assert_eq!(model_count, 32);
+    }
+
+    #[test]
     fn hmm_search_loads_a_profile_once_for_an_empty_target_set() {
         let temporary = tempfile::tempdir().expect("temporary directory");
         let alphabet = Alphabet::amino();

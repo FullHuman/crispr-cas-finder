@@ -56,7 +56,7 @@
 <gene name="Cas10_0_IIIA" presence="accessory" system_ref="CAS-TypeIIIA"/>
 <gene name="Cas10_0_III" presence="accessory" system_ref="CAS-TypeIIIA"/>
 <gene name="Csm3_0_IIIA"  presence="accessory" system_ref="CAS-TypeIIIA"/>
-<gene name="Csm2_1_IIIA" presence="accessory" system_ref="CAS-TypeIIIA"/>/>
+<gene name="Csm2_1_IIIA" presence="accessory" system_ref="CAS-TypeIIIA"/>
 <gene name="Csm4_0_IIIA"  presence="accessory" system_ref="CAS-TypeIIIA"/>
 <gene name="Csm5_0_IIIA" presence="accessory" system_ref="CAS-TypeIIIA"/>
 <gene name="Csm6_0_IIIA"  presence="accessory" system_ref="CAS-TypeIIIA"/>
@@ -76,6 +76,5 @@
 
 
 </system>
-
 
 

@@ -198,7 +198,8 @@ pub fn cas_prepare(
     }
 
     let amino_alphabet = Alphabet::amino();
-    let faa_content = build_faa_content(&all_genes);
+    let faa_content = build_faa_content(&all_genes)
+        .map_err(|error| JsValue::from_str(&format!("failed to build protein FASTA: {error}")))?;
     log!(
         "[CAS] Gene prediction done: {} genes found",
         all_genes.len()
