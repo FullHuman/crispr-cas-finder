@@ -69,7 +69,7 @@ impl Default for Thresholds {
 }
 
 /// Pipeline accounting counters.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PipelineStats {
     pub num_models: u64,
     pub num_sequences: u64,
@@ -106,13 +106,9 @@ impl PipelineStats {
         self.residues_output += other.residues_output;
     }
 
-    /// Reset per-sequence counters.
+    /// Reset all accounting counters.
     pub fn reuse(&mut self) {
-        self.sequences_past_msv = 0;
-        self.sequences_past_bias = 0;
-        self.sequences_past_viterbi = 0;
-        self.sequences_past_forward = 0;
-        self.sequences_output = 0;
+        *self = Self::default();
     }
 }
 
@@ -150,6 +146,32 @@ impl Default for FilterPolicy {
     }
 }
 
+impl FilterPolicy {
+    /// Validate filter P-value thresholds before constructing a search plan.
+    pub fn validate(&self) -> Result<(), HmmerError> {
+        for (name, threshold) in [
+            ("MSV", self.msv_threshold),
+            ("Viterbi", self.viterbi_threshold),
+            ("Forward", self.forward_threshold),
+        ] {
+            if !threshold.is_finite() || !(0.0 < threshold && threshold <= 1.0) {
+                return Err(HmmerError::InvalidArgument(format!(
+                    "{name} filter threshold must be finite and in (0, 1], got {threshold}"
+                )));
+            }
+        }
+        if self.msv_threshold < self.viterbi_threshold
+            || self.viterbi_threshold < self.forward_threshold
+        {
+            return Err(HmmerError::InvalidArgument(format!(
+                "filter thresholds must satisfy MSV >= Viterbi >= Forward, got {} >= {} >= {}",
+                self.msv_threshold, self.viterbi_threshold, self.forward_threshold
+            )));
+        }
+        Ok(())
+    }
+}
+
 /// Immutable compiled query state shared by workers.
 #[derive(Debug, Clone)]
 pub struct SearchQuery {
@@ -158,12 +180,50 @@ pub struct SearchQuery {
     optimized_template: OptimizedProfile,
 }
 
+fn validate_profile_calibration(profile: &Profile) -> Result<(), HmmerError> {
+    let parameters = [
+        (EvParam::MsvMu, "MSV mu", false),
+        (EvParam::MsvLambda, "MSV lambda", true),
+        (EvParam::ViterbiMu, "Viterbi mu", false),
+        (EvParam::ViterbiLambda, "Viterbi lambda", true),
+        (EvParam::ForwardTau, "Forward tau", false),
+        (EvParam::ForwardLambda, "Forward lambda", true),
+    ];
+
+    for (parameter, name, must_be_positive) in parameters {
+        let value = profile.ev_params[parameter.idx()];
+        if value == EV_PARAM_UNSET {
+            return Err(HmmerError::InvalidArgument(format!(
+                "search profile is missing the {name} calibration parameter"
+            )));
+        }
+        if !value.is_finite() || (must_be_positive && value <= 0.0) {
+            let requirement = if must_be_positive {
+                "finite and greater than zero"
+            } else {
+                "finite"
+            };
+            return Err(HmmerError::InvalidArgument(format!(
+                "search profile {name} calibration parameter must be {requirement}, got {value}"
+            )));
+        }
+    }
+
+    Ok(())
+}
+
 impl SearchQuery {
     /// Build a reusable search query from a configured profile and background model.
     pub fn from_configured_profile(
         profile: Profile,
         mut background: BackgroundModel,
     ) -> Result<Self, HmmerError> {
+        if profile.num_nodes == 0 {
+            return Err(HmmerError::InvalidArgument(
+                "search profile must contain at least one model node".into(),
+            ));
+        }
+        validate_profile_calibration(&profile)?;
         let canonical_size = profile.alphabet.canonical_size;
         background.set_filter(
             profile.num_nodes,
@@ -232,14 +292,15 @@ impl SearchPlanBuilder {
         self
     }
 
-    pub fn build(self) -> SearchPlan {
-        SearchPlan {
+    pub fn build(self) -> Result<SearchPlan, HmmerError> {
+        self.filters.validate()?;
+        Ok(SearchPlan {
             inner: Arc::new(SearchPlanInner {
                 query: self.query,
                 filters: self.filters,
                 domain_config: self.domain_config,
             }),
-        }
+        })
     }
 }
 
@@ -256,6 +317,7 @@ impl Default for CapacityHints {
 }
 
 /// The reason a sequence stopped before becoming a hit candidate.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FilterReason {
     Msv,
@@ -267,6 +329,7 @@ pub enum FilterReason {
 }
 
 /// Lightweight per-sequence execution trace for debugging and tests.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Default)]
 pub struct SearchTrace {
     pub sequence_length: usize,
@@ -689,41 +752,29 @@ impl SearchEngine {
 
     #[inline]
     fn msv_pvalue(profile: &Profile, bitscore: f32) -> f64 {
-        if profile.ev_params[EvParam::MsvMu.idx()] != EV_PARAM_UNSET {
-            evalues::msv_score_to_pvalue(
-                bitscore,
-                profile.ev_params[EvParam::MsvMu.idx()],
-                profile.ev_params[EvParam::MsvLambda.idx()],
-            )
-        } else {
-            0.0
-        }
+        evalues::msv_score_to_pvalue(
+            bitscore,
+            profile.ev_params[EvParam::MsvMu.idx()],
+            profile.ev_params[EvParam::MsvLambda.idx()],
+        )
     }
 
     #[inline]
     fn viterbi_pvalue(profile: &Profile, bitscore: f32) -> f64 {
-        if profile.ev_params[EvParam::ViterbiMu.idx()] != EV_PARAM_UNSET {
-            evalues::viterbi_score_to_pvalue(
-                bitscore,
-                profile.ev_params[EvParam::ViterbiMu.idx()],
-                profile.ev_params[EvParam::ViterbiLambda.idx()],
-            )
-        } else {
-            0.0
-        }
+        evalues::viterbi_score_to_pvalue(
+            bitscore,
+            profile.ev_params[EvParam::ViterbiMu.idx()],
+            profile.ev_params[EvParam::ViterbiLambda.idx()],
+        )
     }
 
     #[inline]
     fn forward_pvalue(profile: &Profile, bitscore: f32) -> f64 {
-        if profile.ev_params[EvParam::ForwardTau.idx()] != EV_PARAM_UNSET {
-            evalues::forward_score_to_pvalue(
-                bitscore,
-                profile.ev_params[EvParam::ForwardTau.idx()],
-                profile.ev_params[EvParam::ForwardLambda.idx()],
-            )
-        } else {
-            0.0
-        }
+        evalues::forward_score_to_pvalue(
+            bitscore,
+            profile.ev_params[EvParam::ForwardTau.idx()],
+            profile.ev_params[EvParam::ForwardLambda.idx()],
+        )
     }
 
     fn score_and_add_hit(&mut self, top_hits: &mut TopHits, request: ScoreHitRequest<'_>) -> bool {
@@ -741,29 +792,25 @@ impl SearchEngine {
         // ---- Per-domain scoring (matches C p7_pipeline.c) ----
         for d in 0..num_domains {
             let dom = &mut domain_result.domains[d];
+            debug_assert!(dom.envelope_end >= dom.envelope_start);
             let domain_length = dom.envelope_end - dom.envelope_start + 1;
+            debug_assert!(domain_length <= sequence_length);
 
             // Per-domain null2 bias: log(1 + omega * exp(domcorrection))
             dom.domain_bias = logsum::flogsum(0.0, (background.omega).ln() + dom.domain_correction);
 
-            // Domain bitscore: envsc + flanking_null - null_score - dombias, all in nats, then / LOG2
-            let flanking_null = (sequence_length as f32 - domain_length as f32)
+            // HMMER's target-length prior charges the envelope for the null
+            // score of its flanking residues; the +3 is p7_pipeline's prior offset.
+            let flanking_length = sequence_length.saturating_sub(domain_length);
+            let flanking_null = flanking_length as f32
                 * (sequence_length as f32 / (sequence_length as f32 + SCORE_LENGTH_PRIOR_OFFSET))
                     .ln();
             dom.bitscore =
                 (dom.envelope_score + flanking_null - null_score - dom.domain_bias) / LOG2;
 
             // Domain E-value
-            dom.log_pvalue = if profile.ev_params[EvParam::ForwardTau.idx()] != EV_PARAM_UNSET {
-                let pv = evalues::forward_score_to_pvalue(
-                    dom.bitscore,
-                    profile.ev_params[EvParam::ForwardTau.idx()],
-                    profile.ev_params[EvParam::ForwardLambda.idx()],
-                );
-                pv.max(MIN_PVALUE_CLAMP).ln()
-            } else {
-                -(dom.bitscore as f64)
-            };
+            let pv = Self::forward_pvalue(profile, dom.bitscore);
+            dom.log_pvalue = pv.max(MIN_PVALUE_CLAMP).ln();
         }
 
         // ---- Sequence-level scoring ----
@@ -791,7 +838,8 @@ impl SearchEngine {
             }
         }
         let sum_seqbias = logsum::flogsum(0.0, (background.omega).ln() + sum_correction);
-        sum_raw += (sequence_length as f32 - sum_ld as f32)
+        debug_assert!(sum_ld <= sequence_length);
+        sum_raw += sequence_length.saturating_sub(sum_ld) as f32
             * (sequence_length as f32 / (sequence_length as f32 + SCORE_LENGTH_PRIOR_OFFSET)).ln();
         let pre2_score = (sum_raw - null_score) / LOG2;
         let sum_score = (sum_raw - null_score - sum_seqbias) / LOG2;
@@ -810,16 +858,9 @@ impl SearchEngine {
             self.stats.num_sequences.max(1) as f64
         };
 
-        let log_pvalue = if profile.ev_params[EvParam::ForwardTau.idx()] != EV_PARAM_UNSET {
-            let pv = evalues::forward_score_to_pvalue(
-                seq_score,
-                profile.ev_params[EvParam::ForwardTau.idx()],
-                profile.ev_params[EvParam::ForwardLambda.idx()],
-            );
-            pv.max(MIN_PVALUE_CLAMP).ln()
-        } else {
-            -(seq_score as f64)
-        };
+        let log_pvalue = Self::forward_pvalue(profile, seq_score)
+            .max(MIN_PVALUE_CLAMP)
+            .ln();
 
         // Reporting threshold check
         let evalue = (log_pvalue + z.ln()).exp();
@@ -988,6 +1029,10 @@ mod tests {
     use crate::rng::XorShift64;
     use crate::test_helpers::{random_digital_seq, setup_profile};
 
+    fn calibrate(profile: &mut Profile) {
+        profile.ev_params = [0.0, 0.7, 0.0, 0.7, 0.0, 0.7];
+    }
+
     #[test]
     fn test_filter_policy_defaults() {
         let filters = FilterPolicy::default();
@@ -999,13 +1044,74 @@ mod tests {
     }
 
     #[test]
+    fn test_filter_policy_rejects_invalid_thresholds() {
+        for filters in [
+            FilterPolicy {
+                msv_threshold: 0.0,
+                ..FilterPolicy::default()
+            },
+            FilterPolicy {
+                viterbi_threshold: f64::NAN,
+                ..FilterPolicy::default()
+            },
+            FilterPolicy {
+                forward_threshold: 1.1,
+                ..FilterPolicy::default()
+            },
+            FilterPolicy {
+                msv_threshold: 1e-4,
+                viterbi_threshold: 1e-3,
+                ..FilterPolicy::default()
+            },
+        ] {
+            assert!(filters.validate().is_err());
+        }
+    }
+
+    #[test]
+    fn test_pipeline_stats_reuse_resets_every_counter() {
+        let mut stats = PipelineStats {
+            num_models: 1,
+            num_sequences: 2,
+            num_residues: 3,
+            num_nodes: 4,
+            sequences_past_msv: 5,
+            sequences_past_bias: 6,
+            sequences_past_viterbi: 7,
+            sequences_past_forward: 8,
+            sequences_output: 9,
+            residues_past_msv: 10,
+            residues_past_bias: 11,
+            residues_past_viterbi: 12,
+            residues_past_forward: 13,
+            residues_output: 14,
+        };
+
+        stats.reuse();
+
+        assert_eq!(stats, PipelineStats::default());
+    }
+
+    #[test]
+    fn test_search_query_rejects_uncalibrated_profile() {
+        let abc = Alphabet::amino();
+        let mut rng = XorShift64::new(5);
+        let (_, bg, gm) = setup_profile(&mut rng, 8, 32, &abc, crate::config::SearchMode::Local);
+
+        let error = SearchQuery::from_configured_profile(gm, bg).unwrap_err();
+        assert!(error.to_string().contains("calibration parameter"));
+    }
+
+    #[test]
     fn test_search_plan_spawns_worker() {
         let abc = Alphabet::amino();
         let mut rng = XorShift64::new(7);
-        let (_, bg, gm) = setup_profile(&mut rng, 8, 32, &abc, crate::config::SearchMode::Local);
+        let (_, bg, mut gm) =
+            setup_profile(&mut rng, 8, 32, &abc, crate::config::SearchMode::Local);
+        calibrate(&mut gm);
 
         let query = SearchQuery::from_configured_profile(gm, bg).unwrap();
-        let plan = SearchPlan::builder(query).build();
+        let plan = SearchPlan::builder(query).build().unwrap();
         let worker = plan
             .spawn_worker(CapacityHints { target_length: 32 })
             .unwrap();
@@ -1015,10 +1121,28 @@ mod tests {
     }
 
     #[test]
+    fn test_search_plan_rejects_invalid_filter_policy() {
+        let abc = Alphabet::amino();
+        let mut rng = XorShift64::new(9);
+        let (_, bg, mut gm) =
+            setup_profile(&mut rng, 8, 32, &abc, crate::config::SearchMode::Local);
+        calibrate(&mut gm);
+        let query = SearchQuery::from_configured_profile(gm, bg).unwrap();
+        let filters = FilterPolicy {
+            forward_threshold: 2.0,
+            ..FilterPolicy::default()
+        };
+
+        assert!(SearchPlan::builder(query).filters(filters).build().is_err());
+    }
+
+    #[test]
     fn test_search_worker_returns_report() {
         let abc = Alphabet::amino();
         let mut rng = XorShift64::new(11);
-        let (_, bg, gm) = setup_profile(&mut rng, 8, 32, &abc, crate::config::SearchMode::Local);
+        let (_, bg, mut gm) =
+            setup_profile(&mut rng, 8, 32, &abc, crate::config::SearchMode::Local);
+        calibrate(&mut gm);
         let residues =
             random_digital_seq(&mut rng, &bg.residue_frequencies, abc.canonical_size, 32);
         let sequence = DigitalSequence {
@@ -1031,16 +1155,96 @@ mod tests {
         };
 
         let query = SearchQuery::from_configured_profile(gm, bg).unwrap();
-        let plan = SearchPlan::builder(query).build();
+        let plan = SearchPlan::builder(query).build().unwrap();
         let mut worker = plan
             .spawn_worker(CapacityHints { target_length: 32 })
             .unwrap();
 
         let report = worker.search(&sequence).unwrap();
         assert_eq!(report.trace.sequence_length, 32);
-        assert!(report.trace.bias_filter_score.is_some());
+        assert!(report.trace.null_score.is_some());
+        assert!(report.trace.msv_raw_score.is_some());
         match report.outcome {
             SearchOutcome::Filtered(_) | SearchOutcome::Hit(_) => {}
         }
+    }
+
+    #[test]
+    fn test_max_mode_bypasses_filter_cascade_and_bias_filter() {
+        let abc = Alphabet::amino();
+        let mut rng = XorShift64::new(13);
+        let (_, bg, mut gm) =
+            setup_profile(&mut rng, 8, 32, &abc, crate::config::SearchMode::Local);
+        calibrate(&mut gm);
+        let residues =
+            random_digital_seq(&mut rng, &bg.residue_frequencies, abc.canonical_size, 32);
+        let sequence = DigitalSequence {
+            name: "max-mode-seq".to_string(),
+            accession: None,
+            description: None,
+            residues,
+            source_length: 32,
+            database_index: -1,
+        };
+        let filters = FilterPolicy {
+            max_mode: true,
+            ..FilterPolicy::default()
+        };
+        let query = SearchQuery::from_configured_profile(gm, bg).unwrap();
+        let plan = SearchPlan::builder(query).filters(filters).build().unwrap();
+        let mut worker = plan
+            .spawn_worker(CapacityHints { target_length: 32 })
+            .unwrap();
+
+        let report = worker.search(&sequence).unwrap();
+
+        assert!(report.trace.msv_raw_score.is_some());
+        assert!(report.trace.bias_filter_score.is_none());
+        assert!(report.trace.viterbi_raw_score.is_some());
+        assert!(report.trace.forward_raw_score.is_some());
+        assert!(!matches!(
+            report.trace.filter_reason,
+            Some(
+                FilterReason::Msv
+                    | FilterReason::Bias
+                    | FilterReason::Viterbi
+                    | FilterReason::Forward
+            )
+        ));
+    }
+
+    #[test]
+    fn test_msv_threshold_filters_a_sequence_end_to_end() {
+        let abc = Alphabet::amino();
+        let mut rng = XorShift64::new(17);
+        let (_, bg, mut gm) =
+            setup_profile(&mut rng, 8, 32, &abc, crate::config::SearchMode::Local);
+        calibrate(&mut gm);
+        gm.ev_params[EvParam::MsvMu.idx()] = 1_000_000.0;
+        let residues =
+            random_digital_seq(&mut rng, &bg.residue_frequencies, abc.canonical_size, 32);
+        let sequence = DigitalSequence {
+            name: "filtered-seq".to_string(),
+            accession: None,
+            description: None,
+            residues,
+            source_length: 32,
+            database_index: -1,
+        };
+        let query = SearchQuery::from_configured_profile(gm, bg).unwrap();
+        let plan = SearchPlan::builder(query).build().unwrap();
+        let mut worker = plan
+            .spawn_worker(CapacityHints { target_length: 32 })
+            .unwrap();
+
+        let report = worker.search(&sequence).unwrap();
+
+        assert!(matches!(
+            report.outcome,
+            SearchOutcome::Filtered(FilterReason::Msv)
+        ));
+        assert_eq!(report.trace.filter_reason, Some(FilterReason::Msv));
+        assert!(report.trace.viterbi_raw_score.is_none());
+        assert!(report.trace.forward_raw_score.is_none());
     }
 }

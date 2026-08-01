@@ -79,7 +79,8 @@ fn main() {
     // First run with default filters to check what happens
     let plan = SearchPlan::builder(query)
         .filters(FilterPolicy::default())
-        .build();
+        .build()
+        .expect("search plan config");
     let mut worker = plan
         .spawn_worker(CapacityHints {
             target_length: avg_len,

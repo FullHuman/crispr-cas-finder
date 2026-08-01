@@ -30,7 +30,7 @@ fn cas5_domain_null2_and_oa_match_hmmer_3_4() {
         SearchMode::Local,
     );
     let query = SearchQuery::from_configured_profile(profile, background).unwrap();
-    let plan = SearchPlan::builder(query).build();
+    let plan = SearchPlan::builder(query).build().unwrap();
     let mut worker = plan
         .spawn_worker(CapacityHints {
             target_length: target.len(),

@@ -417,7 +417,8 @@ fn search_profile_hits(
         .map_err(|e| anyhow::anyhow!("Query config failed for {}: {}", profile_name, e))?;
     let plan = SearchPlan::builder(query)
         .filters(FilterPolicy::default())
-        .build();
+        .build()
+        .map_err(|e| anyhow::anyhow!("Search plan config failed for {}: {}", profile_name, e))?;
     let mut worker = plan
         .spawn_worker(CapacityHints {
             target_length: average_sequence_length,
@@ -680,7 +681,7 @@ fn write_faa_from_genes(
 mod tests {
     use super::*;
     use crate::cas_types::{GeneDefinition, GeneStatus, SystemModel};
-    use hmmer_core::{rng::XorShift64, test_helpers::hmm_sample};
+    use hmmer_core::{hmm::EvParams, rng::XorShift64, test_helpers::hmm_sample};
     use std::fs::File;
 
     fn test_hit(id: &str, gene_name: &str, score: f64) -> HmmerHit {
@@ -714,6 +715,14 @@ mod tests {
         let mut random = XorShift64::new(42);
         let mut hmm = hmm_sample(&mut random, 8, alphabet);
         hmm.name = profile_name.to_string();
+        hmm.ev_params = Some(EvParams {
+            msv_mu: 0.0,
+            msv_lambda: 0.7,
+            viterbi_mu: 0.0,
+            viterbi_lambda: 0.7,
+            forward_tau: 0.0,
+            forward_lambda: 0.7,
+        });
         let path = directory.join(format!("{profile_name}.hmm"));
         let mut file = File::create(path).expect("create test HMM");
         HmmFile::write_ascii(&mut file, &hmm, alphabet).expect("write test HMM");

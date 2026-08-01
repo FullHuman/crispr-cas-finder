@@ -319,7 +319,12 @@ pub fn cas_search_profile(profile_name: &str, profile_data: &str) -> Result<u32,
         .map_err(|e| JsValue::from_str(&format!("Query config failed for {profile_name}: {e}")))?;
     let plan = SearchPlan::builder(query)
         .filters(FilterPolicy::default())
-        .build();
+        .build()
+        .map_err(|e| {
+            JsValue::from_str(&format!(
+                "Search plan config failed for {profile_name}: {e}"
+            ))
+        })?;
     let mut worker = plan
         .spawn_worker(CapacityHints {
             target_length: avg_len,
@@ -440,7 +445,8 @@ pub fn cas_search_all_profiles(profiles_js: JsValue) -> Result<u32, JsValue> {
             let query = SearchQuery::from_configured_profile(gm, bg).ok()?;
             let plan = SearchPlan::builder(query)
                 .filters(FilterPolicy::default())
-                .build();
+                .build()
+                .ok()?;
             let mut worker = plan
                 .spawn_worker(CapacityHints {
                     target_length: avg_len,
