@@ -233,11 +233,10 @@ impl Trace {
         if !self.has_posterior_probs {
             return 0.0;
         }
-        self.steps
-            .iter()
-            .filter(|s| s.state == TraceStateType::Match || s.state == TraceStateType::Insert)
-            .map(|s| s.posterior_prob)
-            .sum()
+        // OA traces annotate every residue-emitting state: M/I and N/J/C
+        // self-loops. HMMER's p7_trace_GetExpectedAccuracy() sums all of these
+        // annotations, while non-emitting steps carry 0.0.
+        self.steps.iter().map(|s| s.posterior_prob).sum()
     }
 }
 
@@ -310,5 +309,18 @@ mod tests {
         tr2.append(TraceStateType::Match, 1, 1);
 
         assert!(tr1.compare(&tr2, 0.001));
+    }
+
+    #[test]
+    fn expected_accuracy_includes_special_state_residue_posteriors() {
+        let mut trace = Trace::with_pp();
+        trace.append_with_pp(TraceStateType::Match, 1, 1, 0.6);
+        trace.append_with_pp(TraceStateType::Insert, 1, 2, 0.2);
+        trace.append_with_pp(TraceStateType::NTerminal, 0, 3, 0.1);
+        trace.append_with_pp(TraceStateType::Jump, 0, 4, 0.05);
+        trace.append_with_pp(TraceStateType::CTerminal, 0, 5, 0.04);
+        trace.append_with_pp(TraceStateType::End, 0, 5, 0.0);
+
+        assert!((trace.get_expected_accuracy() - 0.99).abs() < 1e-6);
     }
 }

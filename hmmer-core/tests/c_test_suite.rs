@@ -275,16 +275,16 @@ fn test_gmx_resize() {
     gx.resize(40, 20).unwrap();
     assert_eq!(gx.num_nodes, 40);
     assert_eq!(gx.sequence_length, 20);
-    assert!(gx.main.dim().1 >= 41);
+    assert!(gx.model_capacity() >= 40);
 
     gx.resize(40, 40).unwrap();
     assert_eq!(gx.sequence_length, 40);
-    assert!(gx.special.dim().0 >= 41);
+    assert!(gx.sequence_capacity() >= 40);
 
     gx.resize(80, 80).unwrap();
     assert_eq!(gx.num_nodes, 80);
-    assert!(gx.main.dim().1 >= 81);
-    assert!(gx.special.dim().0 >= 81);
+    assert!(gx.model_capacity() >= 80);
+    assert!(gx.sequence_capacity() >= 80);
 
     gx.resize(100, 100).unwrap();
     let m = 100;
@@ -865,6 +865,12 @@ fn test_backward_posterior_null2_and_oa_invariants() {
         let mut decoder = hmmer_core::optimal_accuracy::OaDecoder::new(gm.num_nodes);
         let oa = decoder.decode(&gm, &posterior).unwrap();
         assert!(oa.score.is_finite() && oa.score >= 0.0 && oa.score <= l as f32 + 0.1);
+        assert!(
+            (oa.trace.get_expected_accuracy() - oa.score).abs() < 1e-4,
+            "trace accuracy={} differs from OA score={} for L={l}",
+            oa.trace.get_expected_accuracy(),
+            oa.score
+        );
         assert_eq!(oa.trace.steps.first().unwrap().state, TraceStateType::Start);
         assert_eq!(
             oa.trace.steps.last().unwrap().state,
