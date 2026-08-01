@@ -45,6 +45,14 @@ macro_rules! log {
 
 pub use wasm_bindgen_rayon::init_thread_pool;
 
+/// Match HMMER's default per-domain inclusion threshold used by the CLI.
+const MAX_DOMAIN_INCLUSION_EVALUE: f64 = 0.01;
+
+fn included_domain_evalue(log_pvalue: f64, target_count: usize) -> Option<f64> {
+    let inclusion_evalue = log_pvalue.exp() * target_count.max(1) as f64;
+    (inclusion_evalue <= MAX_DOMAIN_INCLUSION_EVALUE).then_some(inclusion_evalue)
+}
+
 #[wasm_bindgen]
 pub fn init_panic_hook() {
     console_error_panic_hook::set_once();
@@ -332,6 +340,7 @@ pub fn cas_search_profile(profile_name: &str, profile_data: &str) -> Result<u32,
         .map_err(|e| JsValue::from_str(&format!("Spawn worker failed for {profile_name}: {e}")))?;
 
     let coverage_threshold = ctx.hmmer_options.coverage_profile;
+    let target_count = ctx.targets.len();
     let mut profile_hits = Vec::new();
 
     for seq in &ctx.targets {
@@ -342,9 +351,11 @@ pub fn cas_search_profile(profile_name: &str, profile_data: &str) -> Result<u32,
         match &report.outcome {
             SearchOutcome::Hit(hit) => {
                 for domain in &hit.domains {
-                    if !domain.is_included {
+                    let Some(inclusion_evalue) =
+                        included_domain_evalue(domain.log_pvalue, target_count)
+                    else {
                         continue;
-                    }
+                    };
                     let prof_cov = (domain.hmm_to - domain.hmm_from + 1) as f64 / num_nodes as f64;
                     if prof_cov < coverage_threshold {
                         continue;
@@ -355,7 +366,7 @@ pub fn cas_search_profile(profile_name: &str, profile_data: &str) -> Result<u32,
                         id: hit.name.clone(),
                         gene_name: profile_name.to_string(),
                         seq_len: seq.len() as u32,
-                        i_evalue: domain.log_pvalue.exp(),
+                        i_evalue: inclusion_evalue,
                         score: domain.bitscore as f64,
                         profile_coverage: prof_cov,
                         seq_coverage: seq_cov,
@@ -429,6 +440,7 @@ pub fn cas_search_all_profiles(profiles_js: JsValue) -> Result<u32, JsValue> {
         targets.iter().map(|s| s.len()).sum::<usize>() / targets.len()
     };
     let coverage_threshold = hmmer_options.coverage_profile;
+    let target_count = targets.len();
 
     let results: Vec<(String, Vec<HmmerHit>)> = profiles
         .par_iter()
@@ -459,9 +471,11 @@ pub fn cas_search_all_profiles(profiles_js: JsValue) -> Result<u32, JsValue> {
                     match &report.outcome {
                         SearchOutcome::Hit(hit) => {
                             for domain in &hit.domains {
-                                if !domain.is_included {
+                                let Some(inclusion_evalue) =
+                                    included_domain_evalue(domain.log_pvalue, target_count)
+                                else {
                                     continue;
-                                }
+                                };
                                 let prof_cov =
                                     (domain.hmm_to - domain.hmm_from + 1) as f64 / num_nodes as f64;
                                 if prof_cov < coverage_threshold {
@@ -474,7 +488,7 @@ pub fn cas_search_all_profiles(profiles_js: JsValue) -> Result<u32, JsValue> {
                                     id: hit.name.clone(),
                                     gene_name: p.name.clone(),
                                     seq_len: seq.len() as u32,
-                                    i_evalue: domain.log_pvalue.exp(),
+                                    i_evalue: inclusion_evalue,
                                     score: domain.bitscore as f64,
                                     profile_coverage: prof_cov,
                                     seq_coverage: seq_cov,
@@ -760,6 +774,18 @@ mod tests {
             inter_gene_max_space: None,
             multi_model: false,
         }
+    }
+
+    #[test]
+    fn domain_inclusion_uses_database_sized_evalue() {
+        let target_count = 4_318;
+        let accepted_log_pvalue = (0.005 / target_count as f64).ln();
+        let rejected_log_pvalue = (0.02 / target_count as f64).ln();
+
+        let accepted = included_domain_evalue(accepted_log_pvalue, target_count).unwrap();
+        assert!((accepted - 0.005).abs() < 1e-12);
+        assert!(included_domain_evalue(rejected_log_pvalue, target_count).is_none());
+        assert!(included_domain_evalue(f64::NAN, target_count).is_none());
     }
 
     #[test]
