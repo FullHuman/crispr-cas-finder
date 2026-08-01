@@ -53,14 +53,15 @@ impl ForwardCheckpoints {
         self.all_specials[[i, s]]
     }
 
-    /// Find the largest checkpoint index <= `row`.
-    /// Returns the position in `checkpoint_main` and the row index.
-    pub fn checkpoint_at_or_before(&self, row: usize) -> (usize, usize) {
+    /// Find the largest checkpoint index at or before `row`.
+    ///
+    /// Returns the position in `checkpoint_main` and its row index, or `None`
+    /// when the checkpoint list is empty or every checkpoint follows `row`.
+    pub fn checkpoint_at_or_before(&self, row: usize) -> Option<(usize, usize)> {
         // Binary search: find rightmost index where checkpoint_indices[idx] <= row
         let pos = self.checkpoint_indices.partition_point(|&r| r <= row);
-        // pos is the count of elements <= row, so idx is pos-1
-        let idx = pos - 1;
-        (idx, self.checkpoint_indices[idx])
+        let idx = pos.checked_sub(1)?;
+        Some((idx, self.checkpoint_indices[idx]))
     }
 }
 
@@ -71,13 +72,13 @@ use crate::domaindef::DomainDef;
 fn generic_forward_backward_decode(
     digital_sequence: &[u8],
     profile: &Profile,
-    checkpoints: &ForwardCheckpoints,
+    expected_forward_score: f32,
     posterior: &mut ScoreMatrix,
     domain_def: Option<&mut DomainDef>,
 ) -> Result<f32, HmmerError> {
     let m = profile.num_nodes;
-    let l = checkpoints.sequence_length;
-    if m == 0 || l == 0 || digital_sequence.len() < l {
+    let l = digital_sequence.len();
+    if m == 0 || l == 0 {
         return Err(HmmerError::Internal(
             "Forward/Backward requires a non-empty model and target".into(),
         ));
@@ -181,12 +182,12 @@ fn generic_forward_backward_decode(
 
     let forward_score = posterior.special[[l, C_STATE]] + special.c_move;
     if !forward_score.is_finite()
-        || !checkpoints.overall_score.is_finite()
-        || (forward_score - checkpoints.overall_score).abs() > 0.1
+        || !expected_forward_score.is_finite()
+        || (forward_score - expected_forward_score).abs() > 0.1
     {
         return Err(HmmerError::Internal(format!(
             "Forward implementations disagree: generic={forward_score}, SIMD={}",
-            checkpoints.overall_score
+            expected_forward_score
         )));
     }
 
@@ -382,12 +383,30 @@ fn decode_posterior_row(
     posterior.set_special_row(i, [0.0, n, j, 0.0, c]);
 }
 
-/// Backward algorithm and posterior decoding.
+/// Log-space Backward algorithm and posterior decoding.
 ///
-/// Uses the generic HMMER 3.4 recurrences in log space. The checkpointed SIMD
-/// Forward score remains the search score; a generic full Forward matrix is
-/// reconstructed here so posterior decoding has a numerically independent
-/// Forward/Backward consistency check.
+/// A generic full Forward matrix is reconstructed here and checked against an
+/// independently computed SIMD Forward score before posterior decoding.
+pub fn backward_decode_log_space(
+    digital_sequence: &[u8],
+    profile: &Profile,
+    expected_forward_score: f32,
+    posterior_matrix: &mut ScoreMatrix,
+    domain_def: Option<&mut DomainDef>,
+) -> Result<f32, HmmerError> {
+    generic_forward_backward_decode(
+        digital_sequence,
+        profile,
+        expected_forward_score,
+        posterior_matrix,
+        domain_def,
+    )
+}
+
+/// Compatibility wrapper for the former checkpoint-replay Backward API.
+///
+/// The current decoder is log-space and only needs the checkpointed Forward
+/// score. New callers should use [`backward_decode_log_space`].
 #[allow(clippy::too_many_arguments)]
 pub fn backward_decode_prob_space(
     digital_sequence: &[u8],
@@ -399,11 +418,53 @@ pub fn backward_decode_prob_space(
     domain_def: Option<&mut DomainDef>,
     _seg_buf: &mut fwd_bck::OddsSegmentBuf,
 ) -> Result<f32, HmmerError> {
-    generic_forward_backward_decode(
-        digital_sequence,
+    if digital_sequence.len() < checkpoints.sequence_length {
+        return Err(HmmerError::Internal(format!(
+            "checkpoint sequence length {} exceeds target length {}",
+            checkpoints.sequence_length,
+            digital_sequence.len()
+        )));
+    }
+    backward_decode_log_space(
+        &digital_sequence[..checkpoints.sequence_length],
         profile,
-        checkpoints,
+        checkpoints.overall_score,
         posterior_matrix,
         domain_def,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn checkpoints(indices: Vec<usize>) -> ForwardCheckpoints {
+        ForwardCheckpoints {
+            checkpoint_main: indices
+                .iter()
+                .map(|_| Array2::zeros((1, NUM_MAIN_STATES)))
+                .collect(),
+            checkpoint_indices: indices,
+            all_specials: Array2::zeros((1, NUM_SPECIAL_STATES)),
+            overall_score: 0.0,
+            sequence_length: 0,
+            num_nodes: 0,
+        }
+    }
+
+    #[test]
+    fn checkpoint_lookup_handles_boundaries() {
+        let checkpoints = checkpoints(vec![0, 4, 8]);
+
+        assert_eq!(checkpoints.checkpoint_at_or_before(0), Some((0, 0)));
+        assert_eq!(checkpoints.checkpoint_at_or_before(3), Some((0, 0)));
+        assert_eq!(checkpoints.checkpoint_at_or_before(4), Some((1, 4)));
+        assert_eq!(checkpoints.checkpoint_at_or_before(100), Some((2, 8)));
+    }
+
+    #[test]
+    fn checkpoint_lookup_returns_none_without_a_preceding_checkpoint() {
+        assert_eq!(checkpoints(Vec::new()).checkpoint_at_or_before(0), None);
+        assert_eq!(checkpoints(vec![2, 4]).checkpoint_at_or_before(1), None);
+    }
 }

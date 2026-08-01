@@ -74,11 +74,6 @@ pub mod background {
 }
 
 pub mod dynamic_programming {
-    pub mod forward_backward {
-        // Underflow guard used by probability-space backward scaling.
-        pub const SCALE_THRESH: f32 = 1e-30;
-    }
-
     pub mod logsum {
         pub const LOGSUM_SCALE: f32 = 1000.0;
     }
@@ -94,8 +89,6 @@ pub mod pipeline {
         pub const DEFAULT_MSV_BIAS_WINDOW: usize = 100;
         pub const DEFAULT_VITERBI_BIAS_WINDOW: usize = 240;
         pub const DEFAULT_FORWARD_BIAS_WINDOW: usize = 1000;
-
-        pub const DEFAULT_SEG_BUF_STRIPES: usize = 32;
 
         pub const SCORE_LENGTH_PRIOR_OFFSET: f32 = 3.0;
         pub const MIN_PVALUE_CLAMP: f64 = 1e-300;

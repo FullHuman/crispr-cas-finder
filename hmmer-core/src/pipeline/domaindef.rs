@@ -4,7 +4,6 @@
 
 use crate::domain::Domain;
 use crate::dynamic_programming::optimal_accuracy::OaDecoder;
-use crate::dynamic_programming::simd::fwd_bck::OddsSegmentBuf;
 use crate::dynamic_programming::simd::oprofile::OptimizedProfile;
 use crate::profile::Profile;
 use crate::score_matrix::ScoreMatrix;
@@ -112,7 +111,6 @@ impl DomainWorkspace {
         profile: &mut Profile,
         buf: &mut RescoringBuffers,
         om: &mut OptimizedProfile,
-        seg_buf: &mut OddsSegmentBuf,
     ) -> DomainResult {
         self.null2_scores.fill(0.0);
 
@@ -144,15 +142,8 @@ impl DomainWorkspace {
             om.reconfig_unihit(save_l);
 
             // Inner functions receive &Profile and &OptimizedProfile (immutable)
-            let domain = rescore_isolated_domain(
-                digital_sequence,
-                profile,
-                region_i,
-                region_j,
-                buf,
-                om,
-                seg_buf,
-            );
+            let domain =
+                rescore_isolated_domain(digital_sequence, profile, region_i, region_j, buf, om);
 
             // Restore profile + OM state
             if save_nj > 0.0 {
@@ -277,25 +268,20 @@ fn rescore_isolated_domain(
     j: usize,
     buf: &mut RescoringBuffers,
     om: &OptimizedProfile,
-    seg_buf: &mut OddsSegmentBuf,
 ) -> Result<(Domain, Vec<f32>), DomainRescoreFailure> {
-    use crate::dynamic_programming::simd::fwd_bck;
+    use crate::dynamic_programming::simd::forward_filter;
 
     let domain_length = j - i + 1;
     let dsq_sub = &digital_sequence[i - 1..j];
 
-    let (checkpoints, simd_data) = fwd_bck::forward_checkpointed_simd(dsq_sub, domain_length, om);
-    let forward_score = checkpoints.overall_score;
+    let forward_score = forward_filter::forward_filter(dsq_sub, domain_length, om).score;
 
-    crate::forward_backward::backward_decode_prob_space(
+    crate::forward_backward::backward_decode_log_space(
         dsq_sub,
         profile,
-        om,
-        &checkpoints,
-        &simd_data,
+        forward_score,
         &mut buf.posterior_matrix,
         None,
-        seg_buf,
     )
     .map_err(|_| DomainRescoreFailure::Backward)?;
 

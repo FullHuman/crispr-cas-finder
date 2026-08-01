@@ -5,14 +5,13 @@
 use crate::background::BackgroundModel;
 use crate::config::*;
 use crate::constants::pipeline::search::{
-    DEFAULT_FORWARD_THRESHOLD, DEFAULT_MSV_THRESHOLD, DEFAULT_SEG_BUF_STRIPES,
-    DEFAULT_VITERBI_THRESHOLD, LOG2, MIN_PVALUE_CLAMP, SCORE_LENGTH_PRIOR_OFFSET,
+    DEFAULT_FORWARD_THRESHOLD, DEFAULT_MSV_THRESHOLD, DEFAULT_VITERBI_THRESHOLD, LOG2,
+    MIN_PVALUE_CLAMP, SCORE_LENGTH_PRIOR_OFFSET,
 };
 use crate::domaindef::{DomainConfig, DomainWorkspace, RescoringBuffers};
 use crate::dynamic_programming::simd::f32_msv;
 use crate::dynamic_programming::simd::f32_viterbi;
 use crate::dynamic_programming::simd::forward_filter as simd_fwd;
-use crate::dynamic_programming::simd::fwd_bck as simd_fwd_bck;
 use crate::dynamic_programming::simd::oprofile::OptimizedProfile;
 use crate::errors::HmmerError;
 use crate::evalues;
@@ -598,13 +597,12 @@ impl<'w, 's> TargetRun<'w, 's, Prepared> {
 
 impl<'w, 's> TargetRun<'w, 's, PassedFilters> {
     fn decode(self) -> Result<ControlFlow<SearchReport, TargetRun<'w, 's, Decoded>>, HmmerError> {
-        let Some((forward_raw_score, domain_result)) = self
-            .worker
-            .engine
-            .run_checkpointed_forward_backward_and_domains(
+        let Some((forward_raw_score, domain_result)) =
+            self.worker.engine.run_forward_backward_and_domains(
                 &mut self.worker.state.profile,
                 &self.sequence.residues,
                 self.sequence_length,
+                self.forward_raw_score,
             )?
         else {
             return Ok(ControlFlow::Break(
@@ -724,9 +722,6 @@ struct SearchEngine {
 
     // SIMD-optimized profile (built lazily from the generic profile)
     oprofile: Option<OptimizedProfile>,
-
-    // Reusable buffer for odds-space segment replay
-    seg_buf: simd_fwd_bck::OddsSegmentBuf,
 }
 
 impl SearchEngine {
@@ -746,7 +741,6 @@ impl SearchEngine {
             domain_config: DomainConfig::default(),
             domain_workspace: DomainWorkspace::new(),
             oprofile: None,
-            seg_buf: simd_fwd_bck::OddsSegmentBuf::new(DEFAULT_SEG_BUF_STRIPES, m.div_ceil(4)),
         }
     }
 
@@ -972,32 +966,24 @@ impl SearchEngine {
         Some(fwd_result.score)
     }
 
-    fn run_checkpointed_forward_backward_and_domains(
+    fn run_forward_backward_and_domains(
         &mut self,
         profile: &mut Profile,
         digital_sequence: &[u8],
         sequence_length: usize,
+        forward_raw_score: f32,
     ) -> Result<Option<(f32, crate::domaindef::DomainResult)>, HmmerError> {
         self.domain_workspace.reuse();
         self.domain_workspace.grow_to(sequence_length);
 
-        let om = self.oprofile.as_ref().unwrap();
-        let (checkpoints, simd_cp_data) =
-            simd_fwd_bck::forward_checkpointed_simd(digital_sequence, sequence_length, om);
-        let forward_raw_score = checkpoints.overall_score;
-
         self.posterior_matrix
             .resize(profile.num_nodes, sequence_length)?;
-        let om = self.oprofile.as_ref().unwrap();
-        if forward_backward::backward_decode_prob_space(
+        if forward_backward::backward_decode_log_space(
             digital_sequence,
             profile,
-            om,
-            &checkpoints,
-            &simd_cp_data,
+            forward_raw_score,
             &mut self.posterior_matrix,
             Some(&mut self.domain_workspace),
-            &mut self.seg_buf,
         )
         .is_err()
         {
@@ -1005,7 +991,6 @@ impl SearchEngine {
         }
 
         let mut om = self.oprofile.take().unwrap();
-        let mut seg_buf = std::mem::take(&mut self.seg_buf);
         let domain_result = self.domain_workspace.by_posterior_heuristics(
             &self.domain_config,
             digital_sequence,
@@ -1013,10 +998,8 @@ impl SearchEngine {
             profile,
             &mut self.rescore_buf,
             &mut om,
-            &mut seg_buf,
         );
         self.oprofile = Some(om);
-        self.seg_buf = seg_buf;
 
         Ok(Some((forward_raw_score, domain_result)))
     }

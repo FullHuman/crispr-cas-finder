@@ -828,20 +828,16 @@ fn test_backward_posterior_null2_and_oa_invariants() {
         hmmer_core::modelconfig::profile_config(&hmm, &bg, &mut gm, l, SearchMode::Local);
         let om = OptimizedProfile::from_profile(&gm);
         let dsq = random_digital_seq(&mut rng, &bg.residue_frequencies, abc.canonical_size, l);
-        let (checkpoints, simd_data) = fwd_bck::forward_checkpointed_simd(&dsq, l, &om);
+        let (checkpoints, _) = fwd_bck::forward_checkpointed_simd(&dsq, l, &om);
         let mut posterior = ScoreMatrix::new(gm.num_nodes, l).unwrap();
         let mut domains = hmmer_core::domaindef::DomainWorkspace::new();
-        let mut segment = fwd_bck::OddsSegmentBuf::default();
 
-        let backward_score = hmmer_core::forward_backward::backward_decode_prob_space(
+        let backward_score = hmmer_core::forward_backward::backward_decode_log_space(
             &dsq,
             &gm,
-            &om,
-            &checkpoints,
-            &simd_data,
+            checkpoints.overall_score,
             &mut posterior,
             Some(&mut domains),
-            &mut segment,
         )
         .unwrap();
         assert!((backward_score - checkpoints.overall_score).abs() < 0.1);

@@ -1,8 +1,9 @@
-// simd/fwd_bck.rs — SIMD checkpointed Forward + segment recomputation
+// simd/fwd_bck.rs — optional SIMD checkpointed Forward + segment replay
 //
-// Replaces the scalar forward_checkpointed() with an odds-space f32x4 Farrar-striped
-// implementation. Produces both a standard log-space ForwardCheckpoints (for the
-// backward pass) and an odds-space SIMDCheckpointData (for fast segment replay).
+// Provides an odds-space f32x4 Farrar-striped checkpoint/replay implementation.
+// The current production posterior decoder uses a generic log-space Forward/
+// Backward implementation; these utilities remain useful for verification,
+// benchmarking, and a future memory-bounded SIMD Backward decoder.
 
 use super::oprofile::*;
 use crate::dynamic_programming::forward_backward::ForwardCheckpoints;
@@ -10,14 +11,18 @@ use crate::dynamic_programming::score_matrix;
 use ndarray::Array2;
 use std::simd::prelude::*;
 
-/// Shift right by 1 lane (MSB lane gets fill).
+// One initial DD pass plus three wraparound passes propagate a delete chain
+// through all four SIMD lanes, matching HMMER 3.4's SSE Forward algorithm.
+const DD_PROPAGATION_PASSES: usize = 4;
+
+/// Shift right by one lane: `[fill[3], v[0], v[1], v[2]]`.
 #[inline(always)]
 fn shr_f32x4(fill: f32x4, v: f32x4) -> f32x4 {
     use std::simd::simd_swizzle;
     simd_swizzle!(fill, v, [3, 4, 5, 6])
 }
 
-/// Shift left by 1 lane: result = [v[1], v[2], v[3], fill[0]].
+/// Shift left by one lane: `[v[1], v[2], v[3], fill[0]]`.
 #[inline(always)]
 pub fn shl_f32x4(v: f32x4, fill: f32x4) -> f32x4 {
     use std::simd::simd_swizzle;
@@ -26,42 +31,57 @@ pub fn shl_f32x4(v: f32x4, fill: f32x4) -> f32x4 {
 
 /// Odds-space SIMD checkpoint data for fast segment replay.
 ///
-/// Stored alongside ForwardCheckpoints so that segment recomputation
-/// during backward can use SIMD forward replay in native odds-space.
+/// Stored alongside `ForwardCheckpoints` for SIMD replay in native odds space.
 pub struct SIMDCheckpointData {
     pub cp_mmx: Vec<Vec<f32x4>>,
     pub cp_imx: Vec<Vec<f32x4>>,
     pub cp_dmx: Vec<Vec<f32x4>>,
-    pub cp_specials: Vec<[f32; 5]>,   // [E, N, J, B, C] per checkpoint
-    pub cp_totscale: Vec<f64>,        // cumulative log-scale at each checkpoint
+    pub cp_totscale: Vec<f64>, // cumulative log-scale at each checkpoint
     pub odds_specials: Vec<[f32; 5]>, // [E, N, J, B, C] per row 0..=L
-    pub per_row_totscale: Vec<f64>,   // cumulative log-scale per row
+    /// Cumulative log scale for each row. Segment replay needs this to put
+    /// stored B-state odds and a replayed main-state row on the same scale.
+    pub per_row_totscale: Vec<f64>,
     pub q4: usize,
+}
+
+fn checkpoint_interval(sequence_length: usize) -> usize {
+    if sequence_length == 0 {
+        1
+    } else {
+        ((sequence_length as f64).sqrt().ceil() as usize).max(1)
+    }
+}
+
+fn checkpoint_indices(sequence_length: usize) -> Vec<usize> {
+    let interval = checkpoint_interval(sequence_length);
+    let mut indices: Vec<usize> = (0..=sequence_length).step_by(interval).collect();
+    if *indices.last().expect("row zero is always checkpointed") != sequence_length {
+        indices.push(sequence_length);
+    }
+    indices
 }
 
 /// Run SIMD forward in odds-space with checkpoint storage.
 ///
-/// Returns both a standard ForwardCheckpoints (log-space, for backward)
-/// and SIMDCheckpointData (odds-space, for fast segment replay).
+/// Returns log-space reconstructed checkpoints plus the odds-space state
+/// required to resume fast segment replay.
 pub fn forward_checkpointed_simd(
     dsq: &[u8],
     l: usize,
     om: &OptimizedProfile,
 ) -> (ForwardCheckpoints, SIMDCheckpointData) {
+    assert!(
+        l <= dsq.len(),
+        "requested Forward length {l} exceeds sequence length {}",
+        dsq.len()
+    );
     let q = om.q4;
     let m = om.m;
     let zero_v = f32x4::splat(0.0);
 
-    let interval = if l == 0 {
-        1
-    } else {
-        ((l as f64).sqrt().ceil() as usize).max(1)
-    };
-
-    let mut checkpoint_indices: Vec<usize> = (0..=l).step_by(interval).collect();
-    if *checkpoint_indices.last().unwrap() != l {
-        checkpoint_indices.push(l);
-    }
+    // With s = ceil(sqrt(L)), both the number of checkpoints and the maximum
+    // rows in a replayed segment are <= s + 1, for O(M*sqrt(L)) storage.
+    let checkpoint_indices = checkpoint_indices(l);
     let mut next_cp_pos: usize;
 
     let mut mmx = vec![f32x4::splat(0.0); q];
@@ -83,14 +103,12 @@ pub fn forward_checkpointed_simd(
     let mut cp_imx: Vec<Vec<f32x4>> = Vec::with_capacity(checkpoint_indices.len());
     let mut cp_dmx: Vec<Vec<f32x4>> = Vec::with_capacity(checkpoint_indices.len());
     let mut cp_totscale: Vec<f64> = Vec::with_capacity(checkpoint_indices.len());
-    let mut cp_specials: Vec<[f32; 5]> = Vec::with_capacity(checkpoint_indices.len());
 
     // Save row 0 checkpoint
     cp_mmx.push(mmx.clone());
     cp_imx.push(imx.clone());
     cp_dmx.push(dmx.clone());
     cp_totscale.push(0.0);
-    cp_specials.push([x_e, x_n, x_j, x_b, x_c]);
     next_cp_pos = 1;
 
     for i in 0..l {
@@ -164,7 +182,7 @@ pub fn forward_checkpointed_simd(
         }
 
         if om.m < 100 {
-            for _pass in 1..4 {
+            for _pass in 1..DD_PROPAGATION_PASSES {
                 dcv = shr_f32x4(zero_v, dcv);
                 for (dmx_qi, dd) in dmx.iter_mut().zip(dd_tfv.as_chunks::<4>().0.iter()) {
                     let dd_v = f32x4::from_slice(dd);
@@ -173,7 +191,7 @@ pub fn forward_checkpointed_simd(
                 }
             }
         } else {
-            for _pass in 1..4 {
+            for _pass in 1..DD_PROPAGATION_PASSES {
                 dcv = shr_f32x4(zero_v, dcv);
                 let mut any_change = false;
                 for (dmx_qi, dd) in dmx.iter_mut().zip(dd_tfv.as_chunks::<4>().0.iter()) {
@@ -228,7 +246,6 @@ pub fn forward_checkpointed_simd(
             cp_imx.push(imx.clone());
             cp_dmx.push(dmx.clone());
             cp_totscale.push(totscale);
-            cp_specials.push([x_e, x_n, x_j, x_b, x_c]);
             next_cp_pos += 1;
         }
     }
@@ -255,7 +272,6 @@ pub fn forward_checkpointed_simd(
         cp_mmx,
         cp_imx,
         cp_dmx,
-        cp_specials,
         cp_totscale,
         odds_specials,
         per_row_totscale,
@@ -348,6 +364,28 @@ pub fn recompute_forward_segment_simd(
     start_row: usize,
     end_row: usize,
 ) -> Vec<(usize, Array2<f32>)> {
+    assert!(start_row <= end_row, "segment start follows segment end");
+    assert!(
+        end_row <= dsq.len(),
+        "segment end {end_row} exceeds sequence length {}",
+        dsq.len()
+    );
+    assert_eq!(
+        simd_data.q4, om.q4,
+        "checkpoint stripe count does not match optimized profile"
+    );
+    assert_eq!(
+        checkpoints.checkpoint_indices.get(cp_index),
+        Some(&start_row),
+        "checkpoint index does not identify the requested segment start"
+    );
+    assert!(
+        cp_index < simd_data.cp_mmx.len()
+            && cp_index < simd_data.cp_imx.len()
+            && cp_index < simd_data.cp_dmx.len()
+            && cp_index < simd_data.cp_totscale.len(),
+        "checkpoint index {cp_index} is missing SIMD state"
+    );
     let q = om.q4;
     let m = om.m;
     let zero_v = f32x4::splat(0.0);
@@ -436,7 +474,7 @@ pub fn recompute_forward_segment_simd(
             *dmx_qi += dcv;
             dcv = *dmx_qi * dd_v;
         }
-        for _pass in 1..4 {
+        for _pass in 1..DD_PROPAGATION_PASSES {
             dcv = shr_f32x4(zero_v, dcv);
             for (qi, dmx_qi) in dmx.iter_mut().enumerate() {
                 let dd_v = f32x4::from_slice(&om.tfv[(dd_base + qi) * 4..(dd_base + qi) * 4 + 4]);
@@ -496,7 +534,7 @@ pub fn recompute_forward_segment_simd(
 }
 
 /// Pre-allocated buffer for odds-space segment replay.
-/// Avoids per-row Vec allocations during backward sweep.
+/// Avoids per-row allocations across repeated segment replays.
 #[derive(Debug, Default)]
 pub struct OddsSegmentBuf {
     /// Flat storage: [row_offset * q * 4 * 3 + state * q * 4 + qi * 4 + z]
@@ -510,6 +548,7 @@ pub struct OddsSegmentBuf {
 
 impl OddsSegmentBuf {
     pub fn new(max_segment: usize, q: usize) -> Self {
+        assert!(q > 0, "segment replay requires at least one SIMD stripe");
         let cap = (max_segment + 1) * q * 4 * 3;
         OddsSegmentBuf {
             data: vec![0.0f32; cap],
@@ -520,8 +559,11 @@ impl OddsSegmentBuf {
         }
     }
 
-    fn ensure_capacity(&mut self, num_rows: usize) {
-        let need = num_rows * self.q * 4 * 3;
+    fn ensure_capacity(&mut self, num_rows: usize, q: usize) {
+        assert!(q > 0, "segment replay requires at least one SIMD stripe");
+        self.q = q;
+        self.num_rows = num_rows;
+        let need = num_rows * q * 4 * 3;
         if self.data.len() < need {
             self.data.resize(need, 0.0);
         }
@@ -532,6 +574,17 @@ impl OddsSegmentBuf {
 
     #[inline(always)]
     fn row_offset(&self, local_row: usize, state: usize, qi: usize) -> usize {
+        assert!(
+            local_row < self.num_rows,
+            "local row {local_row} is outside replay buffer with {} rows",
+            self.num_rows
+        );
+        assert!(state < 3, "main-state index {state} is outside 0..3");
+        assert!(
+            qi < self.q,
+            "stripe index {qi} is outside replay buffer with {} stripes",
+            self.q
+        );
         (local_row * 3 + state) * self.q * 4 + qi * 4
     }
 
@@ -543,6 +596,14 @@ impl OddsSegmentBuf {
         dmx: &[f32x4],
         totscale: f64,
     ) {
+        assert_eq!(mmx.len(), self.q, "match row has the wrong stripe count");
+        assert_eq!(imx.len(), self.q, "insert row has the wrong stripe count");
+        assert_eq!(dmx.len(), self.q, "delete row has the wrong stripe count");
+        assert!(
+            local_row < self.num_rows,
+            "local row {local_row} is outside replay buffer with {} rows",
+            self.num_rows
+        );
         let state_width = self.q * 4;
         let row_start = local_row * 3 * state_width;
         let row_data = &mut self.data[row_start..row_start + 3 * state_width];
@@ -565,6 +626,11 @@ impl OddsSegmentBuf {
     /// Get odds-space M value for node k at local row offset.
     #[inline(always)]
     pub fn m_odds(&self, local_row: usize, k: usize) -> f32 {
+        assert!(
+            (1..=self.q * 4).contains(&k),
+            "model node {k} is outside replay buffer capacity 1..={}",
+            self.q * 4
+        );
         let qi = (k - 1) % self.q;
         let z = (k - 1) / self.q;
         let off = self.row_offset(local_row, 0, qi);
@@ -574,6 +640,11 @@ impl OddsSegmentBuf {
     /// Get odds-space I value for node k at local row offset.
     #[inline(always)]
     pub fn i_odds(&self, local_row: usize, k: usize) -> f32 {
+        assert!(
+            (1..=self.q * 4).contains(&k),
+            "model node {k} is outside replay buffer capacity 1..={}",
+            self.q * 4
+        );
         let qi = (k - 1) % self.q;
         let z = (k - 1) / self.q;
         let off = self.row_offset(local_row, 1, qi);
@@ -583,6 +654,11 @@ impl OddsSegmentBuf {
     /// Get totscale for a local row.
     #[inline(always)]
     pub fn totscale(&self, local_row: usize) -> f64 {
+        assert!(
+            local_row < self.num_rows,
+            "local row {local_row} is outside replay buffer with {} rows",
+            self.num_rows
+        );
         self.totscales[local_row]
     }
 
@@ -598,6 +674,12 @@ impl OddsSegmentBuf {
         fwd_m: &mut [f32],
         fwd_i: &mut [f32],
     ) {
+        assert!(
+            m <= self.q * 4,
+            "model length exceeds replay buffer stripes"
+        );
+        assert!(fwd_m.len() > m, "match output must contain m + 1 entries");
+        assert!(fwd_i.len() > m, "insert output must contain m + 1 entries");
         let q = self.q;
         for qi in 0..q {
             let m_off = self.row_offset(local_row, 0, qi);
@@ -637,12 +719,28 @@ pub fn replay_segment_odds_buf(
     end_row: usize,
     buf: &mut OddsSegmentBuf,
 ) {
+    assert!(start_row <= end_row, "segment start follows segment end");
+    assert!(
+        end_row <= dsq.len(),
+        "segment end {end_row} exceeds sequence length {}",
+        dsq.len()
+    );
+    assert_eq!(
+        simd_data.q4, om.q4,
+        "checkpoint stripe count does not match optimized profile"
+    );
+    assert!(
+        cp_index < simd_data.cp_mmx.len()
+            && cp_index < simd_data.cp_imx.len()
+            && cp_index < simd_data.cp_dmx.len()
+            && cp_index < simd_data.cp_totscale.len(),
+        "checkpoint index {cp_index} is missing SIMD state"
+    );
     let q = om.q4;
     let zero_v = f32x4::splat(0.0);
     let num_rows = end_row - start_row + 1;
 
-    buf.ensure_capacity(num_rows);
-    buf.num_rows = num_rows;
+    buf.ensure_capacity(num_rows, q);
     buf.start_row = start_row;
 
     let mut mmx = simd_data.cp_mmx[cp_index].clone();
@@ -721,7 +819,7 @@ pub fn replay_segment_odds_buf(
             *dmx_qi += dcv;
             dcv = *dmx_qi * dd_v;
         }
-        for _pass in 1..4 {
+        for _pass in 1..DD_PROPAGATION_PASSES {
             dcv = shr_f32x4(zero_v, dcv);
             for (qi, dmx_qi) in dmx.iter_mut().enumerate() {
                 let dd_v = f32x4::from_slice(&om.tfv[(dd_base + qi) * 4..(dd_base + qi) * 4 + 4]);
@@ -746,5 +844,158 @@ pub fn replay_segment_odds_buf(
         }
 
         buf.store_row(i - start_row, &mmx, &imx, &dmx, current_totscale);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::alphabet::Alphabet;
+    use crate::background::BackgroundModel;
+    use crate::config::SearchMode;
+    use crate::profile::Profile;
+    use crate::rng::XorShift64;
+    use crate::test_helpers::{hmm_sample, random_digital_seq};
+
+    #[test]
+    fn lane_shifts_have_explicit_direction_and_fill_lane() {
+        let values = f32x4::from_array([1.0, 2.0, 3.0, 4.0]);
+        let fill = f32x4::from_array([10.0, 20.0, 30.0, 40.0]);
+
+        assert_eq!(shr_f32x4(fill, values).to_array(), [40.0, 1.0, 2.0, 3.0]);
+        assert_eq!(shl_f32x4(values, fill).to_array(), [2.0, 3.0, 4.0, 10.0]);
+    }
+
+    #[test]
+    fn checkpoint_schedule_has_sqrt_space_bounds() {
+        for sequence_length in [0, 1, 2, 3, 15, 16, 17, 1_000, 1_000_000] {
+            let interval = checkpoint_interval(sequence_length);
+            let indices = checkpoint_indices(sequence_length);
+
+            assert_eq!(indices.first(), Some(&0));
+            assert_eq!(indices.last(), Some(&sequence_length));
+            assert!(indices.len() <= interval + 1);
+            assert!(indices.windows(2).all(|rows| rows[1] - rows[0] <= interval));
+        }
+    }
+
+    #[test]
+    fn odds_segment_buffer_reconfigures_and_destripes_rows() {
+        let mut buffer = OddsSegmentBuf::default();
+        buffer.ensure_capacity(2, 2);
+        let matches = [
+            f32x4::from_array([1.0, 3.0, 5.0, 7.0]),
+            f32x4::from_array([2.0, 4.0, 6.0, 8.0]),
+        ];
+        let inserts = [
+            f32x4::from_array([11.0, 13.0, 15.0, 17.0]),
+            f32x4::from_array([12.0, 14.0, 16.0, 18.0]),
+        ];
+        let deletes = [f32x4::splat(0.0); 2];
+        buffer.store_row(1, &matches, &inserts, &deletes, 2.5);
+
+        let mut flat_matches = vec![0.0; 9];
+        let mut flat_inserts = vec![0.0; 9];
+        buffer.destripe_row_into(1, 8, &mut flat_matches, &mut flat_inserts);
+
+        assert_eq!(
+            &flat_matches[1..],
+            &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+        );
+        assert_eq!(
+            &flat_inserts[1..],
+            &[11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0]
+        );
+        assert_eq!(buffer.m_odds(1, 8), 8.0);
+        assert_eq!(buffer.i_odds(1, 8), 18.0);
+        assert_eq!(buffer.m_odds_vec(1, 0).to_array(), [1.0, 3.0, 5.0, 7.0]);
+        assert_eq!(buffer.i_odds_vec(1, 1).to_array(), [12.0, 14.0, 16.0, 18.0]);
+        assert_eq!(buffer.totscale(1), 2.5);
+
+        buffer.ensure_capacity(1, 3);
+        assert_eq!(buffer.q, 3);
+        assert_eq!(buffer.num_rows, 1);
+        assert!(buffer.data.len() >= 3 * 4 * 3);
+    }
+
+    #[test]
+    #[should_panic(expected = "local row 1 is outside replay buffer with 1 rows")]
+    fn odds_segment_buffer_reports_invalid_row() {
+        let mut buffer = OddsSegmentBuf::default();
+        buffer.ensure_capacity(1, 1);
+        let _ = buffer.m_odds(1, 1);
+    }
+
+    #[test]
+    fn buffered_replay_matches_log_space_segment_recomputation() {
+        let alphabet = Alphabet::amino();
+        let mut rng = XorShift64::new(91);
+        let background = BackgroundModel::new(&alphabet);
+        let sequence_length = 17;
+        let hmm = hmm_sample(&mut rng, 9, &alphabet);
+        let mut profile = Profile::new(hmm.num_nodes, &alphabet);
+        crate::modelconfig::profile_config(
+            &hmm,
+            &background,
+            &mut profile,
+            sequence_length,
+            SearchMode::Local,
+        );
+        let optimized = OptimizedProfile::from_profile(&profile);
+        let sequence = random_digital_seq(
+            &mut rng,
+            &background.residue_frequencies,
+            alphabet.canonical_size,
+            sequence_length,
+        );
+        let (checkpoints, simd_data) =
+            forward_checkpointed_simd(&sequence, sequence_length, &optimized);
+        let cp_index = 0;
+        let start_row = checkpoints.checkpoint_indices[cp_index];
+        let end_row = checkpoints.checkpoint_indices[cp_index + 1];
+        let expected = recompute_forward_segment_simd(
+            &sequence,
+            &optimized,
+            &checkpoints,
+            &simd_data,
+            cp_index,
+            start_row,
+            end_row,
+        );
+        let mut buffer = OddsSegmentBuf::default();
+
+        replay_segment_odds_buf(
+            &sequence,
+            &optimized,
+            &simd_data,
+            cp_index,
+            start_row,
+            end_row,
+            &mut buffer,
+        );
+
+        assert_eq!(buffer.q, optimized.q4);
+        assert_eq!(buffer.num_rows, expected.len());
+        for (local_row, (_, expected_row)) in expected.iter().enumerate() {
+            let scale = buffer.totscale(local_row) as f32;
+            for node in 1..=profile.num_nodes {
+                for (odds, state) in [
+                    (buffer.m_odds(local_row, node), score_matrix::MATCH_CELL),
+                    (buffer.i_odds(local_row, node), score_matrix::INSERT_CELL),
+                ] {
+                    let actual = if odds > 0.0 {
+                        odds.ln() + scale
+                    } else {
+                        f32::NEG_INFINITY
+                    };
+                    let wanted = expected_row[[node, state]];
+                    assert!(
+                        (actual - wanted).abs() < 1e-4
+                            || (actual.is_infinite() && wanted.is_infinite()),
+                        "row={local_row}, node={node}, state={state}: {actual} != {wanted}"
+                    );
+                }
+            }
+        }
     }
 }
