@@ -12,7 +12,7 @@ bio = "4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 log = "0.4"
-quick-xml = "0.38"
+quick-xml = "0.41.0"
 orphos-core = "0.3.0"
 hmmer-core = { path = "../hmmer-core" }
 hmmer-io = { path = "../hmmer-io" }

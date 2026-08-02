@@ -89,7 +89,9 @@ fn bench_crispr_only(c: &mut Criterion) {
     let mut group = c.benchmark_group("crispr-cas-finder-cli/ecoli/crispr-only");
     group.sample_size(10);
     group.warm_up_time(Duration::from_secs(3));
-    group.measurement_time(Duration::from_secs(20));
+    // The CRISPR-only run needs roughly 23–38 seconds to collect 10 samples
+    // on supported machines; leave enough headroom for slower environments.
+    group.measurement_time(Duration::from_secs(45));
     group.bench_function("default", |b| {
         b.iter_batched(
             || TempDir::new().expect("failed to create temporary output directory"),
