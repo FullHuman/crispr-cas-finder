@@ -17,6 +17,12 @@ crispr-cas-finder is available in multiple forms:
 - **`crispr-cas-finder-python`**: Python bindings (via PyO3)
 - **`crispr-cas-finder-wasm`**: WebAssembly module for browser/Node.js usage
 
+HMMER code is bundled inside `crispr-cas-finder-core/src/hmmer_core/` and
+`src/hmmer_io/`. The workspace crates `hmmer-core` and `hmmer-io` are unpublished
+compatibility wrappers for internal tests and benchmarks (`publish = false`).
+The crates.io workflow publishes only the core and CLI packages. CI verifies
+both package archives with `cargo package` before release.
+
 ## 📦 Installation
 
 ### Using Cargo
@@ -26,6 +32,9 @@ cargo install crispr-cas-finder-cli
 ```
 
 ### From Source
+
+Install Rust with rustup. The repository pins a nightly compiler because HMM
+scoring uses `std::simd`; a stable compiler alone cannot build these crates.
 
 ```bash
 git clone https://github.com/FullHuman/crispr-cas-finder.git
@@ -75,10 +84,10 @@ import crispr_cas_finder
 with open("genome.fasta") as f:
     fasta_content = f.read()
 
-results_json = crispr_cas_finder.find_repeats(fasta_content)
+arrays = crispr_cas_finder.find_crispr_arrays(fasta_content)
 
 # Customize detection parameters
-results_json = crispr_cas_finder.find_repeats(
+arrays = crispr_cas_finder.find_crispr_arrays(
     fasta_content,
     min_repeat_length=23,
     max_repeat_length=55,
@@ -111,6 +120,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 ```
+
+## Browser application
+
+Build and run the threaded WebAssembly app using the instructions in
+[crispr-cas-finder-wasm/README.md](crispr-cas-finder-wasm/README.md). Both CRISPR
+and Cas detection run locally in the browser.
+
+## Performance development
+
+The repository includes a correctness-gated OpenEvolve lab for optimizing hot
+paths in the core crate's bundled HMMER modules. It provides isolated candidate builds,
+behavioral equivalence challenges, machine-readable benchmarks, and a verified
+promotion workflow. See [openevolve/README.md](openevolve/README.md).
 
 ## Contributing
 

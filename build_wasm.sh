@@ -52,7 +52,7 @@ echo "==> Building crispr-cas-finder-wasm (release, threaded)..."
 # Keep build-std scoped to this wasm build so host benches and tests do not
 # rebuild the standard library and trip duplicate lang item errors.
 # Do NOT set RUSTFLAGS here — it would override the config and drop linker flags.
-cargo build \
+cargo build --locked \
   -Zbuild-std=panic_abort,std \
   -p crispr-cas-finder-wasm \
   --target wasm32-unknown-unknown \

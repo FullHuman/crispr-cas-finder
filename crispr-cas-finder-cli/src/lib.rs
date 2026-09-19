@@ -75,10 +75,13 @@ pub struct Cli {
         value_name = "INT",
         default_value_t = 30
     )]
+    #[arg(help = "Unsupported compatibility setting; only the default is accepted")]
     foster_repeat_length: usize,
     #[arg(long, alias = "fosterDRBegin", value_name = "STR", default_value = "G")]
+    #[arg(help = "Unsupported compatibility setting; only the default is accepted")]
     foster_repeat_begin: String,
     #[arg(long, alias = "fosterDREnd", value_name = "STR", default_value = "AA.")]
+    #[arg(help = "Unsupported compatibility setting; only the default is accepted")]
     foster_repeat_end: String,
     #[arg(long, alias = "minNbSpacers", value_name = "INT", default_value_t = 1)]
     min_spacer_count: usize,
@@ -90,6 +93,7 @@ pub struct Cli {
         value_name = "FLOAT",
         default_value_t = 4.0
     )]
+    #[arg(help = "Unsupported compatibility setting; only the default is accepted")]
     truncated_mismatch_percent: f64,
     #[arg(long = "cas", action = clap::ArgAction::SetTrue)]
     launch_cas_finder: bool,
@@ -356,6 +360,25 @@ mod tests {
             let result =
                 Cli::try_parse_from(["crispr-cas-finder", "--in", "input.fa", flag, "100"]);
             assert!(result.is_err(), "{flag} should no longer be accepted");
+        }
+    }
+
+    #[test]
+    fn nondefault_unsupported_detection_options_are_rejected() {
+        for (flag, value) in [
+            ("--foster-repeat-length", "31"),
+            ("--foster-repeat-begin", "A"),
+            ("--foster-repeat-end", "TT"),
+            ("--truncated-mismatch-percent", "5"),
+        ] {
+            let cli = Cli::try_parse_from(["crispr-cas-finder", "--in", "input.fa", flag, value])
+                .unwrap();
+            assert!(
+                cli.detection_params()
+                    .validate()
+                    .unwrap_err()
+                    .contains("unsupported compatibility")
+            );
         }
     }
 

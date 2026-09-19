@@ -1,6 +1,6 @@
 use crispr_cas_finder_core::{
     CrisprArray as CoreCrisprArray, DetectionParams, Orientation, Repeat as CoreRepeat,
-    Spacer as CoreSpacer, detect_crisprs_in_fasta_str,
+    Spacer as CoreSpacer, detect_crisprs_in_fasta_str, detect_crisprs_in_fasta_path,
 };
 use pyo3::exceptions::{PyFileNotFoundError, PyIOError, PyValueError};
 use pyo3::prelude::*;
@@ -347,25 +347,24 @@ fn find_crispr_arrays_in_file(
     min_spacer_count: usize,
     min_evidence_level: usize,
 ) -> PyResult<Vec<CrisprArray>> {
-    let file_path = PathBuf::from(path);
-    if !file_path.exists() {
-        return Err(PyFileNotFoundError::new_err(format!(
-            "No such file or directory: {path:?}"
-        )));
-    }
-    let content = std::fs::read_to_string(&file_path)
-        .map_err(|e| PyIOError::new_err(format!("Failed to read {path:?}: {e}")))?;
-
-    find_crispr_arrays(
-        &content,
-        min_repeat_length,
-        max_repeat_length,
-        min_spacer_length,
-        max_spacer_length,
-        no_mismatch,
-        min_spacer_count,
-        min_evidence_level,
-    )
+    let params = DetectionParams {
+        min_repeat_length, max_repeat_length, min_spacer_length, max_spacer_length,
+        no_mismatch, min_spacer_count, min_evidence_level, ..DetectionParams::default()
+    };
+    let arrays = detect_crisprs_in_fasta_path(&PathBuf::from(path), &params).map_err(|error| {
+        if let Some(io) = error.downcast_ref::<std::io::Error>() {
+            if io.kind() == std::io::ErrorKind::NotFound {
+                return PyFileNotFoundError::new_err(format!("{path:?}: {error}"));
+            }
+            // rust-bio reports malformed records as synthetic io::Errors (even
+            // ErrorKind::Other). File-system failures retain an OS error code.
+            if io.raw_os_error().is_some() {
+                return PyIOError::new_err(format!("{path:?}: {error}"));
+            }
+        }
+        PyValueError::new_err(format!("CRISPR detection failed: {error}"))
+    })?;
+    Ok(arrays.iter().map(crispr_array_from_core).collect())
 }
 
 // ---------------------------------------------------------------------------

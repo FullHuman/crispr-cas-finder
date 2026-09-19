@@ -6,6 +6,7 @@ import init, {
   cas_search_profile,
   cas_search_all_profiles,
   cas_finalize,
+  cas_abort,
   init_panic_hook,
   initThreadPool,
 } from "./pkg/crispr_cas_finder_wasm.js";
@@ -15,6 +16,7 @@ let casModelsData = null; // cached { models: [...], profiles: [...] }
 let threadPoolAttempted = false;
 let threadPoolReady = false;
 let threadPoolError = null;
+let busy = false;
 
 const THREAD_POOL_TIMEOUT_MS = 8000;
 
@@ -39,6 +41,9 @@ function withTimeout(promise, timeoutMs, message) {
 
 async function ensureWasm() {
   if (wasmReady) return;
+  if (!self.crossOriginIsolated || typeof SharedArrayBuffer === "undefined") {
+    throw new Error("This WASM build requires cross-origin isolation. Serve it with the bundled serve.py or configure COOP/COEP headers.");
+  }
   await init();
   init_panic_hook();
   wasmReady = true;
@@ -84,14 +89,30 @@ function progress(id, message, current, total) {
 async function loadCasModels(id) {
   if (casModelsData) return casModelsData;
   progress(id, "Downloading CAS models...", 0, 1);
-  const resp = await fetch("cas-models.json");
-  if (!resp.ok) throw new Error(`Failed to fetch CAS models: HTTP ${resp.status}`);
-  casModelsData = await resp.json();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 120000);
+  try {
+    const resp = await fetch("cas-models.json", { signal: controller.signal });
+    if (!resp.ok) throw new Error(`Failed to fetch CAS models: HTTP ${resp.status}`);
+    const data = await resp.json();
+    if (!Array.isArray(data.models) || !data.models.length ||
+        !Array.isArray(data.profiles) || !data.profiles.length) {
+      throw new Error("CAS model bundle is empty or invalid. Run bundle_cas_models.py.");
+    }
+    casModelsData = data;
+  } finally {
+    clearTimeout(timeout);
+  }
   return casModelsData;
 }
 
 self.onmessage = async (e) => {
   const { type, id, payload } = e.data;
+  if (busy) {
+    self.postMessage({ id, error: "An analysis is already running in this worker." });
+    return;
+  }
+  busy = true;
 
   try {
     await ensureWasm();
@@ -126,8 +147,12 @@ self.onmessage = async (e) => {
         payload.casOpts
       );
       const neededProfileNames = new Set(prepInfo.needed_profiles || []);
+      const available = new Set(data.profiles.map((profile) => profile.name));
+      for (const name of neededProfileNames) {
+        if (!available.has(name)) throw new Error(`Required HMM profile is missing: ${name}`);
+      }
       const profilesToSearch = data.profiles.filter(
-        (profile) => neededProfileNames.size === 0 || neededProfileNames.has(profile.name)
+        (profile) => neededProfileNames.has(profile.name)
       );
       const totalProfiles = profilesToSearch.length;
       progress(id, `Predicted ${prepInfo.gene_count} genes. Searching ${totalProfiles} HMM profiles...`, 0, totalProfiles);
@@ -159,6 +184,11 @@ self.onmessage = async (e) => {
       throw new Error(`Unknown message type: ${type}`);
     }
   } catch (err) {
+    if (wasmReady) {
+      try { cas_abort(); } catch { /* A trapped instance is replaced by the page. */ }
+    }
     self.postMessage({ id, error: err.message || String(err) });
+  } finally {
+    busy = false;
   }
 };

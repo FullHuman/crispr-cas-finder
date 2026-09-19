@@ -147,13 +147,15 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bio",
- "hmmer-core",
- "hmmer-io",
+ "bitflags",
  "log",
+ "ndarray",
  "orphos-core",
+ "quick-xml",
  "rayon",
  "serde",
  "serde_json",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
@@ -345,25 +347,6 @@ name = "heck"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
-
-[[package]]
-name = "hmmer-core"
-version = "0.1.0"
-dependencies = [
- "bitflags",
- "ndarray",
- "rayon",
- "thiserror 2.0.19",
-]
-
-[[package]]
-name = "hmmer-io"
-version = "0.1.0"
-dependencies = [
- "bio",
- "hmmer-core",
- "thiserror 2.0.19",
-]
 
 [[package]]
 name = "indexmap"
@@ -680,6 +663,15 @@ dependencies = [
  "proc-macro2 1.0.107",
  "quote 1.0.47",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "quick-xml"
+version = "0.41.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e660451e55124f798a69a5af3f49ccfbefbd41910eefd25caf2393e1f3473ec1"
+dependencies = [
+ "memchr",
 ]
 
 [[package]]

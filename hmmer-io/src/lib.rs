@@ -1,9 +1,4 @@
-// hmmer-io: File I/O for HMM files, sequence databases, and alignments.
+//! Internal compatibility wrapper for the bundled HMMER implementation.
+//! This crate is not published; implementation lives in crispr-cas-finder-core.
 
-pub mod hmmfile;
-pub mod seq_reader;
-
-// Convenience re-exports
-pub use hmmfile::HmmFile;
-pub use hmmfile::read_hmm;
-pub use seq_reader::{FastaReader, read_fasta_digital_sequences};
+pub use crispr_cas_finder_core::hmmer_io::*;

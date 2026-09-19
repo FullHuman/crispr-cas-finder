@@ -1,5 +1,6 @@
 [package]
 name = "hmmer-core"
+publish = false
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,14 +9,10 @@ description = "HMMER profile HMM algorithms — core library"
 
 [features]
 default = []
-serde = ["dep:serde"]
+serde = ["crispr-cas-finder-core/hmmer-serde"]
 
 [dependencies]
-bitflags = "2"
-thiserror = "2"
-rayon = "1.11"
-ndarray = "0.17"
-serde = { version = "1", features = ["derive"], optional = true }
+crispr-cas-finder-core = { path = "../crispr-cas-finder-core" }
 
 [dev-dependencies]
 criterion = { version = "0.8.2", features = ["html_reports"] }

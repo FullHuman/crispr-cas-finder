@@ -1,9 +1,16 @@
 // --- Worker setup ---
-const worker = new Worker("worker.js", { type: "module" });
+let worker;
 let msgId = 0;
 const pending = new Map(); // id → { resolve, reject, onProgress? }
 
-worker.onmessage = (e) => {
+function createWorker() {
+  worker = new Worker("worker.js", { type: "module" });
+  worker.onerror = (event) => {
+    event.preventDefault();
+    failWorker(new Error(event.message || "Analysis worker failed to load or crashed."));
+  };
+  worker.onmessageerror = () => failWorker(new Error("Unable to read the analysis worker response."));
+  worker.onmessage = (e) => {
   const { id, result, error, progress } = e.data;
   const p = pending.get(id);
   if (!p) return;
@@ -14,13 +21,28 @@ worker.onmessage = (e) => {
   pending.delete(id);
   if (error) p.reject(new Error(error));
   else p.resolve(result);
-};
+  };
+}
+
+function failWorker(error) {
+  worker.terminate();
+  worker = null;
+  for (const request of pending.values()) request.reject(error);
+  pending.clear();
+  setStatus(`Analysis failed: ${error.message}`, "error");
+}
 
 function callWorker(type, payload, onProgress) {
   const id = ++msgId;
   return new Promise((resolve, reject) => {
-    pending.set(id, { resolve, reject, onProgress });
-    worker.postMessage({ type, id, payload });
+    try {
+      if (!worker) createWorker();
+      pending.set(id, { resolve, reject, onProgress });
+      worker.postMessage({ type, id, payload });
+    } catch (error) {
+      pending.delete(id);
+      reject(error);
+    }
   });
 }
 
@@ -278,6 +300,18 @@ analyzeBtn.addEventListener("click", async () => {
     no_mismatch: Boolean(noMism.checked),
   };
 
+  for (const [name, value] of Object.entries(options)) {
+    if (name === "no_mismatch") continue;
+    if (!Number.isSafeInteger(value) || value <= 0 || value > 0xffffffff) {
+      setStatus(`Invalid option ${name}: enter a positive 32-bit integer.`, "error");
+      return;
+    }
+  }
+  if (options.min_evidence_level > 4) {
+    setStatus("Evidence level must be between 1 and 4.", "error");
+    return;
+  }
+
   if (options.min_repeat_length > options.max_repeat_length) {
     setStatus("Invalid options: min DR must be <= max DR.", "error");
     return;
@@ -347,7 +381,7 @@ downloadBtn.addEventListener("click", () => {
   a.href = url;
   a.download = "crisprcas-results.json";
   a.click();
-  URL.revokeObjectURL(url);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 });
 
 // --- Init ---

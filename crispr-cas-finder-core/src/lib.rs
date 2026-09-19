@@ -1,3 +1,12 @@
+#![feature(portable_simd)]
+
+// Bundled implementation shared with the unpublished compatibility crates.
+// Public only for the workspace's bindings, benchmarks, and regression tests.
+#[doc(hidden)]
+pub mod hmmer_core;
+#[doc(hidden)]
+pub mod hmmer_io;
+
 use anyhow::Result;
 use log::info;
 use rayon::prelude::*;
@@ -179,10 +188,10 @@ fn process_cluster(
         best_spacers = extract_spacers(&best_refined, cluster, seq, params);
     }
 
+    let spacers_pass_similarity =
+        check_spacer_similarity(&best_spacers, params.spacer_similarity_threshold);
     // Multi-spacer: reject if ANY pairwise spacer identity >= spacer_similarity_threshold
-    if best_spacers.len() > 1
-        && !check_spacer_similarity(&best_spacers, params.spacer_similarity_threshold)
-    {
+    if best_spacers.len() > 1 && !spacers_pass_similarity {
         return None;
     }
     // Single-spacer: reject if DR aligns too well against the spacer
@@ -191,15 +200,10 @@ fn process_cluster(
     }
 
     let spacer_count = best_spacers.len();
-    let spacers_pass_similarity =
-        check_spacer_similarity(&best_spacers, params.spacer_similarity_threshold);
-    let evidence_level = if spacer_count <= 3 {
-        1
-    } else if spacers_pass_similarity {
-        4
-    } else {
-        2
-    };
+    // Similar multi-spacer candidates have already been rejected. This detector
+    // currently reports level 1 for short arrays and level 4 for longer arrays;
+    // it does not implement separate level-2/3 conservation classifications.
+    let evidence_level = if spacer_count <= 3 { 1 } else { 4 };
 
     if evidence_level < params.min_evidence_level {
         return None;
@@ -260,6 +264,7 @@ pub fn detect_crisprs_in_fasta_str(
     fasta_content: &str,
     params: &DetectionParams,
 ) -> Result<Vec<CrisprArray>> {
+    params.validate().map_err(anyhow::Error::msg)?;
     let reader = bio::io::fasta::Reader::new(std::io::Cursor::new(fasta_content.as_bytes()));
     let mut sequences: Vec<(String, Vec<u8>)> = Vec::new();
     for result in reader.records() {
@@ -287,7 +292,9 @@ pub fn detect_crisprs_in_fasta_path(
     fasta_path: &Path,
     params: &DetectionParams,
 ) -> Result<Vec<CrisprArray>> {
-    let reader = bio::io::fasta::Reader::from_file(fasta_path)?;
+    params.validate().map_err(anyhow::Error::msg)?;
+    // Open separately so callers can inspect the underlying I/O error kind.
+    let reader = bio::io::fasta::Reader::new(std::fs::File::open(fasta_path)?);
     let mut sequences: Vec<(String, Vec<u8>)> = Vec::new();
     for result in reader.records() {
         let record = result?;

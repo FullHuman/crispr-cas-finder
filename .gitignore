@@ -35,3 +35,9 @@ crispr-cas-finder-wasm/www/pkg/
 
 # OpenEvolve generated programs, checkpoints, and isolated build state
 openevolve/
+# Python extension/wheel builds and browser test dependencies
+*.egg-info/
+*.so
+*.pyd
+dist/
+node_modules/

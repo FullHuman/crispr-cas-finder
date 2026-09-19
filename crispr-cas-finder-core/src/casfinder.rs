@@ -6,12 +6,7 @@ use crate::cas_types::{
     DetectedSystem, HmmerHit, ModelRegistry, RepliconTopology, SearchResults, SequenceIndex,
     cluster_hits, select_best_solution,
 };
-use crate::types::CasFinderConfig;
-use anyhow::{Context, Result};
-use bio::bio_types::strand::Strand;
-use bio::io::fasta::Reader as FastaReader;
-use hmmer_core::rayon::{ThreadPoolBuilder, prelude::*};
-use hmmer_core::{
+use crate::hmmer_core::{
     alphabet::Alphabet,
     background::BackgroundModel,
     config::SearchMode,
@@ -20,13 +15,18 @@ use hmmer_core::{
     profile::Profile,
     sequence::DigitalSequence,
 };
-use hmmer_io::HmmFile;
+use crate::hmmer_io::HmmFile;
+use crate::types::CasFinderConfig;
+use anyhow::{Context, Result};
+use bio::bio_types::strand::Strand;
+use bio::io::fasta::Reader as FastaReader;
 use log::info;
 use orphos_core::{
     OrphosAnalyzer,
     config::{OrphosConfig, OutputFormat},
     output::write_results,
 };
+use rayon::{ThreadPoolBuilder, prelude::*};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Write;
@@ -42,9 +42,10 @@ struct PredictedProteome {
     replicons: Vec<RepliconProteins>,
 }
 
-struct RepliconProteins {
-    name: String,
-    protein_ids: Vec<String>,
+/// Protein IDs in genomic order for one input replicon.
+pub struct RepliconProteins {
+    pub name: String,
+    pub protein_ids: Vec<String>,
 }
 
 /// Run Orphos gene prediction and then detect Cas systems using
@@ -168,7 +169,7 @@ fn predict_and_write_proteome(
 
 fn load_protein_sequences(proteome: &Path, alphabet: &Alphabet) -> Result<Vec<DigitalSequence>> {
     let proteome_path = path_as_utf8(proteome, "Predicted proteome")?;
-    hmmer_io::read_fasta_digital_sequences(alphabet, proteome_path)
+    crate::hmmer_io::read_fasta_digital_sequences(alphabet, proteome_path)
         .map_err(|e| anyhow::anyhow!("Failed to load proteins from {}: {e}", proteome.display()))
 }
 
@@ -437,7 +438,7 @@ fn search_profile_hits(
             for domain in &hit.domains {
                 let inclusion_evalue =
                     domain.log_pvalue.exp() * protein_sequences.len().max(1) as f64;
-                if inclusion_evalue > MAX_DOMAIN_INCLUSION_EVALUE {
+                if !inclusion_evalue.is_finite() || inclusion_evalue > MAX_DOMAIN_INCLUSION_EVALUE {
                     continue;
                 }
                 let Some(profile_span) = inclusive_span(domain.hmm_from, domain.hmm_to) else {
@@ -485,7 +486,7 @@ fn inclusive_span(start: usize, end: usize) -> Option<usize> {
     end.checked_sub(start)?.checked_add(1)
 }
 
-fn build_hmm_search_pool(workers: usize) -> Result<hmmer_core::rayon::ThreadPool> {
+fn build_hmm_search_pool(workers: usize) -> Result<rayon::ThreadPool> {
     let builder = if workers > 0 {
         ThreadPoolBuilder::new().num_threads(workers)
     } else {
@@ -501,7 +502,8 @@ fn build_hmm_search_pool(workers: usize) -> Result<hmmer_core::rayon::ThreadPool
 // System evaluation (clustering + scoring)
 // ---------------------------------------------------------------------------
 
-fn evaluate_detected_systems(
+/// Cluster and evaluate each replicon independently (shared by native and WASM).
+pub fn evaluate_detected_systems(
     registry: &ModelRegistry,
     model_fully_qualified_names: &[String],
     all_hits: &HashMap<String, Vec<HmmerHit>>,
@@ -681,7 +683,7 @@ fn write_faa_from_genes(
 mod tests {
     use super::*;
     use crate::cas_types::{GeneDefinition, GeneStatus, SystemModel};
-    use hmmer_core::{hmm::EvParams, rng::XorShift64, test_helpers::hmm_sample};
+    use crate::hmmer_core::{hmm::EvParams, rng::XorShift64, test_helpers::hmm_sample};
     use std::fs::File;
 
     fn test_hit(id: &str, gene_name: &str, score: f64) -> HmmerHit {

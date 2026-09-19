@@ -10,10 +10,8 @@ license = "GPL-3.0-or-later"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-crispr-cas-finder-core = { path = "../crispr-cas-finder-core" }
+crispr-cas-finder-core = { path = "../crispr-cas-finder-core", version = "0.1.0" }
 orphos-core = "0.3.0"
-hmmer-core = { path = "../hmmer-core" }
-hmmer-io = { path = "../hmmer-io" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 wasm-bindgen = "0.2"

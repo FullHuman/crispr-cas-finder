@@ -1,10 +1,11 @@
 # crispr-cas-finder-wasm Web App
 
-This package exposes the CRISPR repeat detection engine to the browser and includes a website in `www/`.
+This package exposes the CRISPR array and Cas system detection engines to the browser and includes a website in `www/`.
 
 ## Build WASM
 
 ```bash
+python3 crispr-cas-finder-wasm/bundle_cas_models.py
 ./build_wasm.sh
 ```
 
@@ -28,3 +29,33 @@ Then open `http://localhost:8080`.
 - The site imports `./pkg/crispr_cas_finder_wasm.js`, so you must run
   `./build_wasm.sh` first.
 - All processing runs locally in the browser.
+
+The model bundler reads the CasFinder data included in this repository; no
+sibling checkout is required. It supports `--cas-dir` and `--output` overrides.
+The checked-in model bundle supports static deployment; regenerate it when
+changing the source model data.
+
+The root `vercel.json` serves `www/` as a prebuilt static site. Generate the
+model bundle and `www/pkg/` before deploying; the WASM package is git-ignored.
+
+The threaded build requires SharedArrayBuffer and cross-origin isolation even
+when HMM search falls back to one thread. Use `serve.py` locally, or preserve
+the COOP/COEP headers from `vercel.json` on your server. Opening `index.html`
+directly or using a plain HTTP server without those headers will not work.
+If the thread pool cannot start, the worker uses sequential profile searches.
+
+The stepwise Cas API permits one active analysis per worker. Call `cas_finalize`
+to finish it or `cas_abort` after an error before starting another analysis.
+Invalid options, malformed FASTA, and missing/invalid required profiles return
+errors instead of silent defaults or partial results.
+
+## Regression checks
+
+After building, run `node crispr-cas-finder-wasm/tests/browser-smoke.cjs` with
+Playwright and Chromium installed. `PLAYWRIGHT_MODULE` can select an existing
+Playwright installation; `BROWSER_EXECUTABLE` can select an installed Chrome
+binary. The test runs a loopback server, exercises input/error recovery, and
+compares full E. coli results from parallel and sequential HMM searches.
+
+Run bundler tests with
+`python3 -m unittest discover -s crispr-cas-finder-wasm/tests -p 'test_*.py'`.

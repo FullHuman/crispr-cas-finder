@@ -316,7 +316,6 @@ name = "crispr-cas-finder-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "bio",
  "clap",
  "crispr-cas-finder-core",
  "criterion",
@@ -332,15 +331,16 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bio",
- "hmmer-core",
- "hmmer-io",
+ "bitflags",
  "log",
+ "ndarray",
  "orphos-core",
  "quick-xml",
  "rayon",
  "serde",
  "serde_json",
  "tempfile",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
@@ -351,8 +351,6 @@ dependencies = [
  "console_error_panic_hook",
  "crispr-cas-finder-core",
  "getrandom 0.2.17",
- "hmmer-core",
- "hmmer-io",
  "orphos-core",
  "rayon",
  "serde",
@@ -692,21 +690,16 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 name = "hmmer-core"
 version = "0.1.0"
 dependencies = [
- "bitflags",
+ "crispr-cas-finder-core",
  "criterion",
- "ndarray",
- "rayon",
- "serde",
- "thiserror 2.0.19",
 ]
 
 [[package]]
 name = "hmmer-io"
 version = "0.1.0"
 dependencies = [
- "bio",
+ "crispr-cas-finder-core",
  "hmmer-core",
- "thiserror 2.0.19",
 ]
 
 [[package]]

@@ -1,5 +1,5 @@
 //! Quick test: search one HMM profile against predicted proteins to debug 0-hits issue.
-use hmmer_core::{
+use crispr_cas_finder_core::hmmer_core::{
     alphabet::Alphabet,
     background::BackgroundModel,
     config::SearchMode,
@@ -8,7 +8,7 @@ use hmmer_core::{
     profile::Profile,
     sequence::DigitalSequence,
 };
-use hmmer_io::HmmFile;
+use crispr_cas_finder_core::hmmer_io::HmmFile;
 use std::env;
 
 fn main() {

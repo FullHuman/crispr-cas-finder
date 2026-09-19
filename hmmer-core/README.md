@@ -1,22 +1,28 @@
 # hmmer-core
 
-Core HMMER algorithms implemented in pure Rust.
+Internal compatibility crate (`publish = false`) for workspace tests and
+benchmarks. The implementation is bundled in
+`crispr-cas-finder-core/src/hmmer_core/`; this crate re-exports the same types.
+Publishing the core/CLI packages does not publish a separate HMMER crate.
+
+Profile HMM algorithms implemented in pure Rust. Builds require the nightly
+compiler pinned in the repository's `rust-toolchain.toml` for `std::simd`.
 
 ## Modules
 
-- **`dynamic_programming`** — MSV filter, Viterbi, Forward/Backward, posterior
-  decoding, optimal accuracy alignment, stochastic traceback
-- **`pipeline`** — Full search pipeline with filter cascade and domain definition
-- **`stats`** — E-value calibration, model statistics, entropy weighting
-- **`results`** — Hit/domain data structures, alignment display, top hits list
-- **`align`** — Trace-based sequence alignment
-- **`easel`** — Alphabet, sequence, random number generator, and utility types
-  (port of Easel library)
+- `alphabet`, `sequence`, `rng`, `background`: sequence and background models.
+- `hmm`, `profile`, `modelconfig`, `trace`: model configuration and alignments.
+- `dynamic_programming`: SIMD filters, Forward/Backward, null2 correction,
+  posterior decoding, and optimal accuracy alignment.
+- `pipeline`: search plans/workers, filter cascade, and domain definition.
+- `stats`: score-to-P-value conversions.
+- `results`: hits, alignment displays, and thresholding.
 
-## SIMD Backends
+## SIMD
 
-The MSV filter supports multiple SIMD backends with runtime dispatch:
-- SSE2 (x86_64)
-- AVX2 (x86_64)
-- NEON (aarch64)
-- Scalar fallback (all platforms)
+The kernels use four-lane portable `Simd<f32, 4>`. Rust lowers these operations
+for the compilation target (including WASM SIMD); there is no runtime CPU
+dispatch or separate AVX2 backend. Native builds use portable target defaults.
+For local performance measurements, use `RUSTFLAGS="-C target-cpu=native" cargo bench`.
+
+This crate is licensed under GPL-3.0-or-later.

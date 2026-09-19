@@ -94,11 +94,65 @@ pub struct DetectionParams {
     pub min_sequence_length: usize,
     pub force_detection: bool,
     pub flank: usize,
+    /// Reserved for compatibility; validation rejects nondefault values.
     pub foster_repeat_length: usize,
+    /// Reserved for compatibility; validation rejects nondefault values.
     pub foster_repeat_begin: String,
+    /// Reserved for compatibility; validation rejects nondefault values.
     pub foster_repeat_end: String,
     pub better_detect_truncated: bool,
+    /// Reserved for compatibility; validation rejects nondefault values.
+    /// Use `truncated_repeat_mismatch_percent` for terminal repeats.
     pub truncated_mismatch_percent: f64,
+}
+
+impl DetectionParams {
+    /// Validate length ranges and thresholds before starting detection.
+    pub fn validate(&self) -> Result<(), String> {
+        let defaults = Self::default();
+        if self.foster_repeat_length != defaults.foster_repeat_length
+            || self.foster_repeat_begin != defaults.foster_repeat_begin
+            || self.foster_repeat_end != defaults.foster_repeat_end
+            || self.truncated_mismatch_percent != defaults.truncated_mismatch_percent
+        {
+            return Err("foster_repeat_* and truncated_mismatch_percent are unsupported compatibility settings; use truncated_repeat_mismatch_percent for terminal repeats".into());
+        }
+        if self.min_repeat_length == 0 || self.min_repeat_length > self.max_repeat_length {
+            return Err("repeat lengths must be positive with min <= max".into());
+        }
+        if self.min_spacer_length == 0 || self.min_spacer_length > self.max_spacer_length {
+            return Err("spacer lengths must be positive with min <= max".into());
+        }
+        if self.min_spacer_count == 0 || self.min_spacer_count == usize::MAX {
+            return Err("min_spacer_count must be positive and allow an additional repeat".into());
+        }
+        if !(1..=4).contains(&self.min_evidence_level) {
+            return Err("min_evidence_level must be between 1 and 4".into());
+        }
+        for (name, value) in [
+            ("repeat_mismatch_percent", self.repeat_mismatch_percent),
+            (
+                "truncated_repeat_mismatch_percent",
+                self.truncated_repeat_mismatch_percent,
+            ),
+            (
+                "spacer_similarity_threshold",
+                self.spacer_similarity_threshold,
+            ),
+        ] {
+            if !value.is_finite() || !(0.0..=100.0).contains(&value) {
+                return Err(format!("{name} must be between 0 and 100"));
+            }
+        }
+        if !self.min_spacer_to_repeat_ratio.is_finite()
+            || !self.max_spacer_to_repeat_ratio.is_finite()
+            || self.min_spacer_to_repeat_ratio < 0.0
+            || self.min_spacer_to_repeat_ratio > self.max_spacer_to_repeat_ratio
+        {
+            return Err("spacer/repeat ratios must be finite with 0 <= min <= max".into());
+        }
+        Ok(())
+    }
 }
 
 impl Default for DetectionParams {

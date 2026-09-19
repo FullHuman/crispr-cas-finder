@@ -56,6 +56,10 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: ./build_wasm.sh
 
+      - name: Verify public crate packages
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo package --locked -p crispr-cas-finder-core -p crispr-cas-finder-cli
+
   security:
     name: Security Audit
     runs-on: ubuntu-latest

@@ -1,8 +1,12 @@
 # crispr-cas-finder (Python)
 
-Python bindings for the CRISPR-Cas detection engine written in Rust.
+Python bindings for CRISPR array detection written in Rust. Cas protein/system
+detection is currently available through the CLI and browser app.
 
 ## Installation
+
+Source builds require rustup (the repository pins nightly), Python, maturin,
+and an activated virtual environment. Install maturin with `pip install "maturin>=1,<2"`.
 
 Build and install in-place (development):
 
@@ -60,7 +64,7 @@ All keyword arguments after `fasta_content` are keyword-only.
 
 ### `find_crispr_arrays_in_file(path, *, ...)` → `list[CrisprArray]`
 
-Convenience wrapper that reads a FASTA file and calls `find_crispr_arrays`.
+Read a FASTA file through the core path API, without an intermediate Python/Rust text copy.
 Raises `FileNotFoundError` if `path` does not exist.
 
 ### `CrisprArray`

@@ -16,55 +16,9 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Check version consistency
-        run: |
-          VERSION="${{ inputs.version }}"
-          echo "Checking for version $VERSION in all package files..."
-
-          ERRORS=0
-
-          # Check crispr-cas-finder-core
-          CORE_VERSION=$(grep '^version = ' crispr-cas-finder-core/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
-          if [ "$CORE_VERSION" != "$VERSION" ]; then
-            echo "❌ crispr-cas-finder-core/Cargo.toml has version $CORE_VERSION (expected $VERSION)"
-            ERRORS=$((ERRORS + 1))
-          else
-            echo "✅ crispr-cas-finder-core/Cargo.toml: $CORE_VERSION"
-          fi
-
-          # Check crispr-cas-finder-cli
-          CLI_VERSION=$(grep '^version = ' crispr-cas-finder-cli/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
-          if [ "$CLI_VERSION" != "$VERSION" ]; then
-            echo "❌ crispr-cas-finder-cli/Cargo.toml has version $CLI_VERSION (expected $VERSION)"
-            ERRORS=$((ERRORS + 1))
-          else
-            echo "✅ crispr-cas-finder-cli/Cargo.toml: $CLI_VERSION"
-          fi
-
-          # Check crispr-cas-finder-wasm
-          WASM_VERSION=$(grep '^version = ' crispr-cas-finder-wasm/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
-          if [ "$WASM_VERSION" != "$VERSION" ]; then
-            echo "❌ crispr-cas-finder-wasm/Cargo.toml has version $WASM_VERSION (expected $VERSION)"
-            ERRORS=$((ERRORS + 1))
-          else
-            echo "✅ crispr-cas-finder-wasm/Cargo.toml: $WASM_VERSION"
-          fi
-
-          # Check Python package
-          PYTHON_VERSION=$(grep '^version = ' crispr-cas-finder-python/pyproject.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
-          if [ "$PYTHON_VERSION" != "$VERSION" ]; then
-            echo "❌ crispr-cas-finder-python/pyproject.toml has version $PYTHON_VERSION (expected $VERSION)"
-            ERRORS=$((ERRORS + 1))
-          else
-            echo "✅ crispr-cas-finder-python/pyproject.toml: $PYTHON_VERSION"
-          fi
-
-          echo ""
-          if [ $ERRORS -eq 0 ]; then
-            echo "✅ All versions are consistent!"
-          else
-            echo "❌ Found $ERRORS version mismatches"
-            exit 1
-          fi
+        env:
+          EXPECTED_VERSION: ${{ inputs.version }}
+        run: python3 scripts/check_versions.py --expected "$EXPECTED_VERSION"
 
   test-builds:
     name: Test Builds

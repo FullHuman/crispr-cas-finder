@@ -1,31 +1,46 @@
 #!/usr/bin/env python3
-"""Bundle CAS HMM profiles and model XMLs into a single JSON for the web app."""
+"""Bundle the repository's CAS profiles and definitions for the browser app."""
+import argparse
+import gzip
 import json
-import os
-import glob
+from pathlib import Path
 
-cas_dir = os.path.join(os.path.dirname(__file__), "..", "..", "CRISPRCasFinder", "CasFinder-2.0.3")
-profiles_dir = os.path.join(cas_dir, "CASprofiles-2.0.3")
-models_dir = os.path.join(cas_dir, "DEF-SubTyping-2.0.3")
 
-models = []
-for xml_file in sorted(glob.glob(os.path.join(models_dir, "*.xml"))):
-    name = os.path.splitext(os.path.basename(xml_file))[0]
-    with open(xml_file) as f:
-        content = f.read()
-    models.append({"name": name, "family": "CasFinder", "content": content})
+SCRIPT_DIR = Path(__file__).resolve().parent
+DEFAULT_CAS_DIR = SCRIPT_DIR.parent / "crispr-cas-finder-cli/data/CasFinder-2.0.3"
 
-profiles = []
-for hmm_file in sorted(glob.glob(os.path.join(profiles_dir, "*.hmm"))):
-    name = os.path.splitext(os.path.basename(hmm_file))[0]
-    with open(hmm_file) as f:
-        data = f.read()
-    profiles.append({"name": name, "data": data})
 
-bundle = {"models": models, "profiles": profiles}
-out_path = os.path.join(os.path.dirname(__file__), "www", "cas-models.json")
-with open(out_path, "w") as f:
-    json.dump(bundle, f)
+def build_bundle(cas_dir: Path) -> dict:
+    models = [
+        {"name": path.stem, "family": "CASFinder", "content": path.read_text(encoding="utf-8")}
+        for path in sorted((cas_dir / "DEF-SubTyping-2.0.3").glob("*.xml"))
+    ]
+    profiles = [
+        {"name": path.stem, "data": path.read_text(encoding="utf-8")}
+        for path in sorted((cas_dir / "CASprofiles-2.0.3").glob("*.hmm"))
+    ]
+    if not models or not profiles:
+        raise ValueError(f"No CAS models or HMM profiles found under {cas_dir}")
+    return {"models": models, "profiles": profiles}
 
-size = os.path.getsize(out_path)
-print(f"Created {out_path}: {len(models)} models, {len(profiles)} profiles, {size / 1024 / 1024:.1f} MB")
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--cas-dir", type=Path, default=DEFAULT_CAS_DIR)
+    parser.add_argument("--output", type=Path, default=SCRIPT_DIR / "www/cas-models.json")
+    args = parser.parse_args()
+    try:
+        bundle = build_bundle(args.cas_dir)
+    except (OSError, ValueError) as error:
+        parser.exit(1, f"error: {error}\n")
+    # Validate all sources before touching an existing bundle.
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    encoded = json.dumps(bundle).encode("utf-8")
+    args.output.write_bytes(encoded)
+    args.output.with_suffix(args.output.suffix + ".gz").write_bytes(gzip.compress(encoded, mtime=0))
+    print(f"Created {args.output}: {len(bundle['models'])} models, "
+          f"{len(bundle['profiles'])} profiles, {args.output.stat().st_size / 1024 / 1024:.1f} MB")
+
+
+if __name__ == "__main__":
+    main()

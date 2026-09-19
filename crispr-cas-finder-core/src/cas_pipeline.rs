@@ -399,7 +399,7 @@ fn xml_attributes(
             .map_err(|error| format!("invalid XML attribute name: {error}"))?
             .to_string();
         let value = attribute
-            .decode_and_unescape_value(reader.decoder())
+            .decoded_and_normalized_value(quick_xml::XmlVersion::Implicit1_0, reader.decoder())
             .map_err(|error| format!("invalid value for XML attribute '{name}': {error}"))?
             .into_owned();
         attributes.insert(name, value);

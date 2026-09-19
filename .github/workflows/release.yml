@@ -80,14 +80,13 @@ jobs:
 
       - name: Install Rust
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup target add ${{ matrix.target }} --toolchain stable
+          rustup toolchain install nightly-2026-07-29 --profile minimal
+          rustup target add ${{ matrix.target }} --toolchain nightly-2026-07-29
 
       - name: Install cross (for cross-compilation)
         if: matrix.cross
         run: |
-          cargo install cross --git https://github.com/cross-rs/cross
-          rustup target add x86_64-apple-darwin
+          cargo install cross --version 0.2.5 --locked
 
       - name: Build release binary
         run: |
