@@ -5,8 +5,21 @@ detection is currently available through the CLI and browser app.
 
 ## Installation
 
-Source builds require rustup (the repository pins nightly), Python, maturin,
-and an activated virtual environment. Install maturin with `pip install "maturin>=1,<2"`.
+Source builds require rustup, the pinned nightly compiler, Python, maturin,
+and an activated virtual environment. Prebuilt wheels do not require Rust. The publishing workflow targets CPython
+3.11–3.14 on Linux x86_64/ARM64, macOS Intel/ARM64, and Windows x86_64, and tests
+each produced wheel before uploading it. Other Python versions require a source
+build and are not covered by the release test matrix.
+The source archive includes its toolchain pin; an explicit override also works:
+
+```shell
+rustup toolchain install nightly-2026-07-29 --profile minimal
+export RUSTUP_TOOLCHAIN=nightly-2026-07-29
+pip install "maturin>=1.9,<2"
+```
+
+On PowerShell, set `$env:RUSTUP_TOOLCHAIN = "nightly-2026-07-29"`.
+Stable Rust alone cannot build the core because it uses `portable_simd`.
 
 Build and install in-place (development):
 
@@ -77,7 +90,7 @@ Raises `FileNotFoundError` if `path` does not exist.
 | `consensus_repeat` | `str` | Consensus direct repeat sequence |
 | `repeats` | `list[Repeat]` | All direct repeats |
 | `spacers` | `list[Spacer]` | All spacers |
-| `evidence_level` | `int` | 1–4 confidence score |
+| `evidence_level` | `int` | Experimental score: 1 (at most 3 spacers) or 4 (longer arrays) |
 | `orientation` | `str` | `"+"`, `"-"`, or `"."` |
 | `repeat_id` | `str` | CRISPRdb canonical repeat ID |
 | `crispr_direction` | `str` | CRISPRDirection database direction |
@@ -90,3 +103,9 @@ Raises `FileNotFoundError` if `path` does not exist.
 
 Both share the same three fields: `start` (int), `end` (int), `sequence` (str).
 `len(repeat)` / `len(spacer)` returns the sequence length.
+
+## Experimental status
+
+The detector currently emits evidence levels 1 and 4; it does not implement the
+original level-2/3 conservation classifications. Broader biological validation is
+ongoing. See the [limitations and validation notes](https://github.com/FullHuman/crispr-cas-finder/blob/main/LIMITATIONS.md).

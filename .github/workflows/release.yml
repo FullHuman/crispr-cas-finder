@@ -56,16 +56,15 @@ jobs:
             target: x86_64-unknown-linux-gnu
             name: crispr-cas-finder-cli-x86_64-linux
             ext: ""
-          - os: ubuntu-latest
+          - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             name: crispr-cas-finder-cli-aarch64-linux
             ext: ""
-            cross: true
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             name: crispr-cas-finder-cli-x86_64-windows
             ext: ".exe"
-          - os: macos-latest
+          - os: macos-15-intel
             target: x86_64-apple-darwin
             name: crispr-cas-finder-cli-x86_64-darwin
             ext: ""
@@ -83,34 +82,34 @@ jobs:
           rustup toolchain install nightly-2026-07-29 --profile minimal
           rustup target add ${{ matrix.target }} --toolchain nightly-2026-07-29
 
-      - name: Install cross (for cross-compilation)
-        if: matrix.cross
-        run: |
-          cargo install cross --version 0.2.5 --locked
-
       - name: Build release binary
-        run: |
-          if [ "${{ matrix.cross }}" = "true" ]; then
-            cross build --release --target ${{ matrix.target }} -p crispr-cas-finder-cli
-          else
-            cargo build --release --target ${{ matrix.target }} -p crispr-cas-finder-cli
-          fi
-        shell: bash
+        run: cargo build --locked --release --target ${{ matrix.target }} -p crispr-cas-finder-cli
+
+      - name: Verify release notices
+        run: python scripts/sync_release_metadata.py --check
 
       - name: Prepare binary (Unix)
         if: matrix.os != 'windows-latest'
         run: |
-          cp target/${{ matrix.target }}/release/crispr-cas-finder ${{ matrix.name }}
-          strip ${{ matrix.name }} || true
+          mkdir -p ${{ matrix.name }}
+          cp target/${{ matrix.target }}/release/crispr-cas-finder ${{ matrix.name }}/crispr-cas-finder
+          strip ${{ matrix.name }}/crispr-cas-finder || true
+          cp LICENSE THIRD_PARTY_NOTICES.md README.md LIMITATIONS.md ${{ matrix.name }}/
           tar czf ${{ matrix.name }}.tar.gz ${{ matrix.name }}
+          python3 scripts/check_release_archives.py ${{ matrix.name }}.tar.gz
+          python3 scripts/test_cli_distribution.py ${{ matrix.name }}.tar.gz
           shasum -a 256 ${{ matrix.name }}.tar.gz > ${{ matrix.name }}.tar.gz.sha256
 
       - name: Prepare binary (Windows)
         if: matrix.os == 'windows-latest'
         shell: pwsh
         run: |
-          Copy-Item target/${{ matrix.target }}/release/crispr-cas-finder.exe ${{ matrix.name }}.exe
-          Compress-Archive -Path ${{ matrix.name }}.exe -DestinationPath ${{ matrix.name }}.zip
+          New-Item -ItemType Directory -Path ${{ matrix.name }}
+          Copy-Item target/${{ matrix.target }}/release/crispr-cas-finder.exe ${{ matrix.name }}/crispr-cas-finder.exe
+          Copy-Item LICENSE, THIRD_PARTY_NOTICES.md, README.md, LIMITATIONS.md -Destination ${{ matrix.name }}/
+          Compress-Archive -Path ${{ matrix.name }} -DestinationPath ${{ matrix.name }}.zip
+          python scripts/check_release_archives.py ${{ matrix.name }}.zip
+          python scripts/test_cli_distribution.py ${{ matrix.name }}.zip
           $hash = Get-FileHash -Algorithm SHA256 ${{ matrix.name }}.zip
           "$($hash.Hash.ToLower())  ${{ matrix.name }}.zip" | Out-File -Encoding ASCII ${{ matrix.name }}.zip.sha256
 

@@ -66,3 +66,9 @@ The test server uses the deployment headers from `www/vercel.json`.
 
 Run bundler tests with
 `python3 -m unittest discover -s crispr-cas-finder-wasm/tests -p 'test_*.py'`.
+
+Cas detection currently accepts genetic code 11 only. See
+[limitations and validation](../LIMITATIONS.md) for evidence-level behavior and
+unsupported upstream model semantics. The browser distribution includes
+`LICENSE` and `THIRD_PARTY_NOTICES.md`; synchronize these copies with
+`python3 scripts/sync_release_metadata.py` after changing their canonical files.

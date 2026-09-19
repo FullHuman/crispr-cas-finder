@@ -1,0 +1,31 @@
+name: Reproducible problem
+description: Report an installation problem, unexpected error, or detection discrepancy.
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Program version or commit
+      description: Include the CLI/library version or the date you used the browser application.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment and options
+      description: Include your OS, browser or Python version, installation method, and command/options.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Provide a minimal FASTA example or public accession, followed by the steps to reproduce.
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: Expected and observed results
+      description: For a detection discrepancy, include the reference tool/version and its options.
+    validations:
+      required: true

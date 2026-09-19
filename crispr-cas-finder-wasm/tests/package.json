@@ -1,0 +1,10 @@
+{
+  "name": "crispr-cas-finder-browser-tests",
+  "private": true,
+  "scripts": {
+    "test": "node browser-smoke.cjs"
+  },
+  "devDependencies": {
+    "playwright": "1.62.1"
+  }
+}

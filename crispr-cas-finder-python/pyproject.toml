@@ -1,5 +1,5 @@
 [build-system]
-requires = ["maturin>=1.0,<2.0"]
+requires = ["maturin>=1.9,<2.0"]
 build-backend = "maturin"
 
 [project]
@@ -8,8 +8,9 @@ version = "0.1.0"
 description = "Python bindings for crispr-cas-finder-core"
 readme = "README.md"
 requires-python = ">=3.8"
-license = { text = "GPL-3.0-or-later" }
-authors = [{ name = "CRISPRCasFinder Contributors" }]
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
+authors = [{ name = "crispr-cas-finder contributors" }]
 keywords = ["crispr", "cas", "bioinformatics", "genomics"]
 classifiers = [
     "Programming Language :: Python :: 3",
@@ -21,3 +22,5 @@ classifiers = [
 module-name = "crispr_cas_finder"
 python-source = "python"
 features = ["pyo3/extension-module"]
+
+include = [{ path = "rust-toolchain.toml", format = "sdist" }]

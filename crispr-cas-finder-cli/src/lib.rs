@@ -13,6 +13,21 @@ use crispr_cas_finder_core::{
 };
 use log::info;
 
+mod bundled_data;
+
+#[derive(Debug)]
+struct PreparedCasConfig {
+    config: CasFinderConfig,
+    // Owns the extracted model files until the analysis completes.
+    _bundled_data: Option<tempfile::TempDir>,
+}
+
+fn parse_genetic_code(value: &str) -> Result<usize> {
+    let code = value.parse()?;
+    crispr_cas_finder_core::cas_pipeline::validate_genetic_code(code)?;
+    Ok(code)
+}
+
 const MAX_OUTPUT_DIRECTORY_SUFFIX: usize = 999;
 
 #[derive(Clone, Copy, Debug, Default, ValueEnum)]
@@ -106,7 +121,8 @@ pub struct Cli {
     workers: usize,
     #[arg(long, value_name = "STR", default_value = "SubTyping")]
     definition: String,
-    #[arg(long, alias = "geneticCode", value_name = "INT", default_value_t = 11)]
+    #[arg(long, alias = "geneticCode", value_name = "INT", default_value_t = 11,
+        value_parser = parse_genetic_code, help = "Genetic code (only 11 is currently supported)")]
     genetic_code: usize,
     #[arg(long, action = clap::ArgAction::SetTrue)]
     metagenome: bool,
@@ -121,30 +137,6 @@ pub struct Cli {
 }
 
 impl Cli {
-    /// Resolve the default CasFinder data root.
-    ///
-    /// Search order:
-    ///   1. Directory that contains the running binary (installed layout).
-    ///   2. CARGO_MANIFEST_DIR at compile time (development layout).
-    fn default_cas_finder_data_root() -> Option<PathBuf> {
-        // 1. Next to the binary (production / installed)
-        if let Ok(exe) = std::env::current_exe()
-            && let Some(exe_dir) = exe.parent()
-        {
-            let candidate = exe_dir.join("data").join("CasFinder-2.0.3");
-            if candidate.is_dir() {
-                return Some(candidate);
-            }
-        }
-        // 2. Compile-time manifest directory (cargo run / dev builds)
-        let development_data_root =
-            PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/data/CasFinder-2.0.3"));
-        if development_data_root.is_dir() {
-            return Some(development_data_root);
-        }
-        None
-    }
-
     fn detection_params(&self) -> DetectionParams {
         DetectionParams {
             min_repeat_length: self.min_repeat_length,
@@ -170,8 +162,11 @@ impl Cli {
         }
     }
 
-    fn casfinder_config(&self) -> Result<CasFinderConfig> {
-        let data_root = Self::default_cas_finder_data_root();
+    fn casfinder_config(&self) -> Result<PreparedCasConfig> {
+        let bundled_data = (self.cas_models_dir.is_none() || self.cas_profiles_dir.is_none())
+            .then(bundled_data::extract)
+            .transpose()?;
+        let data_root = bundled_data.as_ref().map(|directory| directory.path());
 
         let cas_models_dir = self.cas_models_dir.as_ref().map(PathBuf::from).or_else(|| {
             data_root
@@ -197,16 +192,19 @@ impl Cli {
         let cas_profiles_dir =
             require_cas_data_directory(cas_profiles_dir, "Cas HMM profiles", "--cas-profiles-dir")?;
 
-        Ok(CasFinderConfig {
-            genetic_code: self.genetic_code,
-            metagenome: self.metagenome,
-            workers: self.workers,
-            definition: self.definition.clone(),
-            quiet: self.quiet,
-            replicon_topology: self.topology.into(),
-            min_best_hit_score: self.min_cas_score,
-            cas_models_dir: Some(cas_models_dir),
-            cas_profiles_dir: Some(cas_profiles_dir),
+        Ok(PreparedCasConfig {
+            config: CasFinderConfig {
+                genetic_code: self.genetic_code,
+                metagenome: self.metagenome,
+                workers: self.workers,
+                definition: self.definition.clone(),
+                quiet: self.quiet,
+                replicon_topology: self.topology.into(),
+                min_best_hit_score: self.min_cas_score,
+                cas_models_dir: Some(cas_models_dir),
+                cas_profiles_dir: Some(cas_profiles_dir),
+            },
+            _bundled_data: bundled_data,
         })
     }
 }
@@ -285,8 +283,9 @@ pub fn run(cli: Cli) -> Result<()> {
     info!("GFF and JSON outputs created in {:?}", outdir);
 
     if let Some(casfinder_config) = casfinder_config {
-        let search_results = run_casfinder(input_path, &basename, &outdir, &casfinder_config)
-            .context("CasFinder pipeline failed")?;
+        let search_results =
+            run_casfinder(input_path, &basename, &outdir, &casfinder_config.config)
+                .context("CasFinder pipeline failed")?;
         info!("CasFinder found {} systems", search_results.systems.len());
         let faa_path = outdir
             .join(format!("orphos_{basename}"))
@@ -398,10 +397,42 @@ mod tests {
         ])
         .expect("parse CLI");
 
-        let config = cli.casfinder_config().expect("resolve bundled Cas data");
+        let prepared = cli.casfinder_config().expect("resolve bundled Cas data");
+        let config = &prepared.config;
         assert_eq!(config.workers, 3);
         assert_eq!(config.replicon_topology, RepliconTopology::Linear);
         assert_eq!(config.min_best_hit_score, 30.5);
+        assert!(
+            config
+                .cas_models_dir
+                .as_ref()
+                .unwrap()
+                .join("CAS-TypeIE.xml")
+                .is_file()
+        );
+        assert!(
+            config
+                .cas_profiles_dir
+                .as_ref()
+                .unwrap()
+                .join("Cas5_0_IE.hmm")
+                .is_file()
+        );
+    }
+
+    #[test]
+    fn unsupported_genetic_codes_are_rejected_before_analysis() {
+        for code in ["1", "4", "25", "267"] {
+            let error = Cli::try_parse_from([
+                "crispr-cas-finder",
+                "--in",
+                "input.fa",
+                "--genetic-code",
+                code,
+            ])
+            .unwrap_err();
+            assert!(error.to_string().contains("only genetic code 11"));
+        }
     }
 
     #[test]

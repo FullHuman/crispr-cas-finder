@@ -5,6 +5,8 @@ edition.workspace = true
 rust-version.workspace = true
 description = "Core library for CRISPR-Cas detection"
 license = "GPL-3.0-or-later"
+repository = "https://github.com/FullHuman/crispr-cas-finder"
+readme = "../README.md"
 
 [features]
 hmmer-serde = []

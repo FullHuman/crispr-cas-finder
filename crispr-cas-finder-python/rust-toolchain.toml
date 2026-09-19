@@ -1,0 +1,6 @@
+# Nightly is required for std::simd (portable_simd) and the threaded WASM
+# build's -Zbuild-std. Let-chains themselves are stable.
+[toolchain]
+channel = "nightly-2026-07-29"
+components = ["rustfmt", "clippy", "rust-src"]
+targets = ["wasm32-unknown-unknown"]

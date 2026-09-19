@@ -13,6 +13,7 @@ use crispr_cas_finder_core::{
     cas_pipeline::{
         GeneRecord, ModelDefinition, build_model_registry, codon_table,
         gene_coordinates_from_records, reverse_complement_dna, translate_dna,
+        validate_genetic_code,
     },
     cas_types::{HmmerHit, HmmerOptions, ModelRegistry, RepliconTopology, select_best_solution},
     casfinder::{RepliconProteins, evaluate_detected_systems},
@@ -155,8 +156,8 @@ pub fn cas_prepare(
 
     let genetic_code = cas_opts.genetic_code.unwrap_or(11);
     let metagenome = cas_opts.metagenome.unwrap_or(false);
-    let translation_table = u8::try_from(genetic_code)
-        .map_err(|_| JsValue::from_str("genetic_code must fit in an unsigned byte"))?;
+    let translation_table =
+        validate_genetic_code(genetic_code).map_err(|e| JsValue::from_str(&e.to_string()))?;
 
     let config = OrphosConfig {
         metagenomic: metagenome,
@@ -170,7 +171,7 @@ pub fn cas_prepare(
 
     let mut all_genes: Vec<GeneRecord> = Vec::new();
     let mut replicons = Vec::new();
-    let table = codon_table(genetic_code);
+    let table = codon_table(genetic_code).map_err(|e| JsValue::from_str(&e.to_string()))?;
 
     for (seq_id, seq_bytes) in &sequences {
         let mut protein_ids = Vec::new();

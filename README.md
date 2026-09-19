@@ -2,11 +2,13 @@
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 
-A fast, parallel Rust implementation of CRISPRCasFinder, a tool for identifying CRISPR arrays and Cas proteins in genomic sequences.
+An experimental, parallel Rust implementation for exploring CRISPR arrays and candidate Cas systems in prokaryotic genomes.
 
 ## What is crispr-cas-finder?
 
-crispr-cas-finder is a high-performance reimplementation of [CRISPRCasFinder](https://github.com/dcouvin/CRISPRCasFinder), the widely-used tool for detecting CRISPR-Cas systems in prokaryotic genomes. Written in Rust, it delivers the same accurate detection algorithm with improved performance and modern language features.
+crispr-cas-finder is an independent implementation inspired by [CRISPRCasFinder](https://github.com/dcouvin/CRISPRCasFinder). This first public release is intended for experimental use and feedback. Detection behavior and APIs may change. See [limitations and validation](LIMITATIONS.md) for implemented behavior, initial comparisons, and known differences. Broad accuracy and performance comparisons are ongoing.
+
+**[Try the browser application](https://crisprcasfinder.full-human.com).** Your genome sequence is processed locally and is not uploaded.
 
 ## Components
 
@@ -15,21 +17,29 @@ crispr-cas-finder is available in multiple forms:
 - **`crispr-cas-finder-cli`**: Command-line interface for CRISPR-Cas detection
 - **`crispr-cas-finder-core`**: Rust library for integrating into your own projects
 - **`crispr-cas-finder-python`**: Python bindings (via PyO3)
-- **`crispr-cas-finder-wasm`**: WebAssembly module for browser/Node.js usage
+- **`crispr-cas-finder-wasm`**: WebAssembly module and browser application
 
 HMMER code is bundled inside `crispr-cas-finder-core/src/hmmer_core/` and
 `src/hmmer_io/`. The workspace crates `hmmer-core` and `hmmer-io` are unpublished
 compatibility wrappers for internal tests and benchmarks (`publish = false`).
 The crates.io workflow publishes only the core and CLI packages. CI verifies
-both package archives with `cargo package` before release.
+both package archives in a fresh Cargo staging registry before release
+(`python3 scripts/package_public_crates.py`).
 
 ## 📦 Installation
 
 ### Using Cargo
 
 ```bash
-cargo install crispr-cas-finder-cli
+rustup toolchain install nightly-2026-07-29 --profile minimal
+cargo +nightly-2026-07-29 install --locked crispr-cas-finder-cli
 ```
+
+The CLI embeds its CasFinder 2.0.3 models, including for `cargo install` and
+downloaded executables. No separate data download or source checkout is needed.
+For Cas analysis, the embedded files are extracted to a private temporary directory
+and removed when the run finishes. Custom data can be selected with
+`--cas-models-dir` and `--cas-profiles-dir`. Only genetic code 11 is supported.
 
 ### From Source
 
@@ -48,9 +58,22 @@ cargo install --path crispr-cas-finder-cli
 pip install crispr-cas-finder
 ```
 
+Prebuilt Python wheels do not require Rust. If pip builds from source, install
+`nightly-2026-07-29` and set `RUSTUP_TOOLCHAIN=nightly-2026-07-29`. See the
+[Python instructions](crispr-cas-finder-python/README.md).
+
 ### Rust Library
 
-Add to your `Cargo.toml`:
+The core currently requires nightly Rust for `portable_simd`. Add a
+`rust-toolchain.toml` containing the following to your consuming project:
+
+```toml
+[toolchain]
+channel = "nightly-2026-07-29"
+profile = "minimal"
+```
+
+Then add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
@@ -127,13 +150,6 @@ Build and run the threaded WebAssembly app using the instructions in
 [crispr-cas-finder-wasm/README.md](crispr-cas-finder-wasm/README.md). Both CRISPR
 and Cas detection run locally in the browser.
 
-## Performance development
-
-The repository includes a correctness-gated OpenEvolve lab for optimizing hot
-paths in the core crate's bundled HMMER modules. It provides isolated candidate builds,
-behavioral equivalence challenges, machine-readable benchmarks, and a verified
-promotion workflow. See [openevolve/README.md](openevolve/README.md).
-
 ## Contributing
 
 We welcome contributions! Please open an issue or submit a pull request.
@@ -154,4 +170,7 @@ Further information: [https://crisprcas.i2bc.paris-saclay.fr](https://crisprcas.
 
 ## 📄 License
 
-This project is licensed under the GPL-3.0 License — see the [LICENSE](LICENSE) file for details.
+This project is licensed under GPL-3.0-or-later; see [LICENSE](LICENSE).
+Bundled code and data retain their upstream notices in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). This is an independent project;
+the upstream authors have not endorsed it.

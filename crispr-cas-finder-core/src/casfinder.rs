@@ -1,6 +1,6 @@
 use crate::cas_pipeline::{
     ModelDefinition, assign_hits_to_model, build_model_registry, codon_table, evaluate_cluster,
-    reverse_complement_dna, translate_dna,
+    reverse_complement_dna, translate_dna, validate_genetic_code,
 };
 use crate::cas_types::{
     DetectedSystem, HmmerHit, ModelRegistry, RepliconTopology, SearchResults, SequenceIndex,
@@ -56,6 +56,7 @@ pub fn run_casfinder(
     outdir: &Path,
     config: &CasFinderConfig,
 ) -> Result<SearchResults> {
+    validate_genetic_code(config.genetic_code)?;
     if !config.min_best_hit_score.is_finite() {
         anyhow::bail!("Minimum CAS hit score must be finite");
     }
@@ -141,7 +142,7 @@ fn predict_and_write_proteome(
         metagenomic: config.metagenome,
         closed_ends: true,
         quiet: config.quiet,
-        translation_table: Some(config.genetic_code as u8),
+        translation_table: Some(validate_genetic_code(config.genetic_code)?),
         ..OrphosConfig::default()
     };
     let analyzer = OrphosAnalyzer::new(orphos_config);
@@ -612,7 +613,7 @@ fn write_faa_from_genes(
         );
     }
 
-    let translation_table = codon_table(genetic_code);
+    let translation_table = codon_table(genetic_code)?;
     let mut output_file = fs::File::create(faa_path).context("Creating .faa file")?;
     let mut gene_count = 0usize;
     let mut replicons = Vec::with_capacity(results.len());
@@ -685,6 +686,20 @@ mod tests {
     use crate::cas_types::{GeneDefinition, GeneStatus, SystemModel};
     use crate::hmmer_core::{hmm::EvParams, rng::XorShift64, test_helpers::hmm_sample};
     use std::fs::File;
+
+    #[test]
+    fn unsupported_genetic_code_fails_before_creating_output() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("output");
+        let config = CasFinderConfig {
+            genetic_code: 267,
+            ..CasFinderConfig::default()
+        };
+        let error =
+            run_casfinder(Path::new("missing.fa"), "missing", &output, &config).unwrap_err();
+        assert!(error.to_string().contains("only genetic code 11"));
+        assert!(!output.exists());
+    }
 
     fn test_hit(id: &str, gene_name: &str, score: f64) -> HmmerHit {
         HmmerHit {

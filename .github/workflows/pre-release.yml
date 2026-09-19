@@ -21,51 +21,9 @@ jobs:
         run: python3 scripts/check_versions.py --expected "$EXPECTED_VERSION"
 
   test-builds:
-    name: Test Builds
+    name: Native, browser, Python, packaging, and security validation
     needs: validate-versions
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v7
-
-      - name: Install pinned Rust toolchain
-        run: rustup toolchain install nightly-2026-07-29 --profile minimal
-
-      - name: Run tests
-        run: cargo test --all
-
-      - name: Build CLI release
-        run: cargo build --release -p crispr-cas-finder-cli
-
-      - name: Build WASM
-        if: matrix.os == 'ubuntu-latest'
-        run: ./build_wasm.sh
-
-  test-python-build:
-    name: Test Python Build
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v7
-
-      - name: Set up Python
-        uses: actions/setup-python@v7
-        with:
-          python-version: "3.11"
-
-      - name: Install maturin
-        run: pip install maturin
-
-      - name: Build Python package
-        working-directory: crispr-cas-finder-python
-        run: maturin build --release
-
-      - name: List built wheels
-        run: ls -lh crispr-cas-finder-python/target/wheels/
+    uses: ./.github/workflows/ci.yml
 
   check-changelog:
     name: Check CHANGELOG
@@ -86,14 +44,14 @@ jobs:
 
   summary:
     name: Validation Summary
-    needs: [validate-versions, test-builds, test-python-build, check-changelog]
+    needs: [validate-versions, test-builds, check-changelog]
     runs-on: ubuntu-latest
     steps:
       - name: Create summary
         run: |
           echo "# Pre-Release Validation Complete ✅" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Version ${{ inputs.version }} is ready for release!" >> $GITHUB_STEP_SUMMARY
+          echo "Automated checks for version ${{ inputs.version }} passed. Review the documented experimental scope before publishing." >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "## Next Steps" >> $GITHUB_STEP_SUMMARY
           echo "1. Create and push tag: \`git tag -a v${{ inputs.version }} -m 'Release v${{ inputs.version }}' && git push origin v${{ inputs.version }}\`" >> $GITHUB_STEP_SUMMARY

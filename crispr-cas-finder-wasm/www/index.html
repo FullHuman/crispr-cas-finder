@@ -31,28 +31,13 @@
         <div class="info-notice">
             <div class="info-notice-inner">
                 <p>
-                    This is a browser-based WebAssembly port of
-                    <a
-                        href="https://crisprcas.i2bc.paris-saclay.fr"
-                        target="_blank"
-                        rel="noopener"
-                        >CRISPRCasFinder</a
-                    >
-                    (<a
-                        href="https://github.com/dcouvin/CRISPRCasFinder/tree/master"
-                        target="_blank"
-                        rel="noopener"
-                        >source on GitHub</a
-                    >), running entirely client-side &mdash; no data ever leaves
-                    your machine. If analysis is too slow on your device, the
-                    <a
-                        href="https://crisprcas.i2bc.paris-saclay.fr"
-                        target="_blank"
-                        rel="noopener"
-                        >official CRISPRCasFinder web server</a
-                    >
-                    offers the same analysis server-side, independent of your
-                    local hardware.
+                    An experimental, independent Rust implementation inspired by
+                    <a href="https://github.com/dcouvin/CRISPRCasFinder" target="_blank" rel="noopener">CRISPRCasFinder</a>.
+                    Your genome sequence is processed locally and is not uploaded.
+                    Cas detection currently supports genetic code 11 only.
+                    Evidence levels and Cas-model evaluation differ from the original;
+                    broader biological validation is ongoing.
+                    <a href="https://github.com/FullHuman/crispr-cas-finder/blob/main/LIMITATIONS.md" target="_blank" rel="noopener">Limitations and validation</a>.
                 </p>
             </div>
         </div>
@@ -262,7 +247,8 @@
         <footer class="site-footer">
             <p>
                 CRISPR-Cas Finder &mdash; open source, client-side genomic
-                analysis
+                analysis &middot; <a href="LICENSE">License</a>
+                &middot; <a href="THIRD_PARTY_NOTICES.md">Upstream notices</a>
             </p>
         </footer>
 

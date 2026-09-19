@@ -352,7 +352,19 @@ pub fn translate_dna(seq: &[u8], table: &HashMap<[u8; 3], u8>) -> String {
     protein
 }
 
-pub fn codon_table(_genetic_code: usize) -> HashMap<[u8; 3], u8> {
+/// Validate the translation code shared by gene prediction and protein translation.
+/// Alternative codes are not supported by this experimental release.
+pub fn validate_genetic_code(genetic_code: usize) -> anyhow::Result<u8> {
+    if genetic_code != 11 {
+        anyhow::bail!(
+            "Unsupported genetic code {genetic_code}; only genetic code 11 is currently supported"
+        );
+    }
+    Ok(11)
+}
+
+pub fn codon_table(genetic_code: usize) -> anyhow::Result<HashMap<[u8; 3], u8>> {
+    validate_genetic_code(genetic_code)?;
     const BASES: [u8; 4] = *b"TCAG";
     // Standard code and bacterial code 11 have identical amino-acid mappings.
     // Their difference is alternative initiation codons, which Orphos handles
@@ -367,7 +379,7 @@ pub fn codon_table(_genetic_code: usize) -> HashMap<[u8; 3], u8> {
             amino_acid,
         );
     }
-    map
+    Ok(map)
 }
 
 fn strip_hash_comment_lines(content: &str) -> String {
@@ -743,14 +755,24 @@ mod tests {
     }
 
     #[test]
-    fn standard_and_bacterial_codon_maps_are_complete_and_identical() {
-        let standard = codon_table(1);
-        let bacterial = codon_table(11);
+    fn bacterial_codon_map_is_complete_and_stops_at_tga() {
+        let bacterial = codon_table(11).unwrap();
+        assert_eq!(bacterial.len(), 64);
+        assert_eq!(bacterial.get(b"TTT"), Some(&b'F'));
+        assert_eq!(bacterial.get(b"ATG"), Some(&b'M'));
+        assert_eq!(bacterial.get(b"TGA"), Some(&b'*'));
+        assert_eq!(translate_dna(b"ATGTGAGCT", &bacterial), "M");
+    }
 
-        assert_eq!(standard.len(), 64);
-        assert_eq!(standard, bacterial);
-        assert_eq!(standard.get(b"TTT"), Some(&b'F'));
-        assert_eq!(standard.get(b"ATG"), Some(&b'M'));
-        assert_eq!(standard.get(b"TGA"), Some(&b'*'));
+    #[test]
+    fn unsupported_genetic_codes_are_not_silently_translated_as_code_11() {
+        for code in [0, 1, 4, 25, 267, usize::MAX] {
+            assert!(
+                codon_table(code)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("only genetic code 11")
+            );
+        }
     }
 }

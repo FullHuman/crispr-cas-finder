@@ -1695,11 +1695,8 @@ mod tests {
     #[test]
     fn compare_ecoli_against_reference() {
         let manifest = env!("CARGO_MANIFEST_DIR");
-        let fasta = std::path::Path::new(manifest).join("tests/data/ecoli.fasta");
-        if !fasta.exists() {
-            eprintln!("Skipping: tests/data/ecoli.fasta not found");
-            return;
-        }
+        let fasta =
+            std::path::Path::new(manifest).join("../crispr-cas-finder-cli/data/ecoli.fasta");
 
         let params = default_params();
         let gap_threshold = 1500usize;

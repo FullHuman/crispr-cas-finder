@@ -13,10 +13,15 @@ pub const MAX_FULL_ALPHABET: usize = 29;
 // Version metadata
 // ---------------------------------------------------------------
 
-pub const HMMER_VERSION: &str = "4.0-rust";
-pub const HMMER_DATE: &str = "March 2026";
-pub const HMMER_COPYRIGHT: &str = "Copyright (C) 2024 Howard Hughes Medical Institute";
-pub const HMMER_LICENSE: &str = "Freely distributed under the BSD open source license.";
+pub const HMMER_VERSION: &str = concat!(
+    "crispr-cas-finder ",
+    env!("CARGO_PKG_VERSION"),
+    " Rust port"
+);
+pub const HMMER_DATE: &str = "Independent implementation; HMMER 3.4 reference";
+pub const HMMER_COPYRIGHT: &str = "Upstream HMMER/Easel copyrights: see THIRD_PARTY_NOTICES.md";
+pub const HMMER_LICENSE: &str =
+    "BSD-3-Clause upstream portions; GPL-3.0-or-later project. See distributed notices.";
 pub const HMMER_URL: &str = "http://hmmer.org";
 
 // ---------------------------------------------------------------

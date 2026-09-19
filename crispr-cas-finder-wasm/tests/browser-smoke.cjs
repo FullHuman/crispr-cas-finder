@@ -50,6 +50,8 @@ assert.ok(['chromium', 'webkit'].includes(browserName), 'SMOKE_BROWSER must be c
         missingHeader: fails(() => wasm.find_repeats('ACGT', {}), /FASTA/),
         emptySequence: fails(() => wasm.find_repeats('>a\n', {}), /empty FASTA/),
         defaults: Array.isArray(wasm.find_repeats('>a\nACGT', undefined)),
+        unsupportedCode: fails(() => wasm.cas_prepare('>a\nACGT', [], { genetic_code: 4 }), /only genetic code 11/),
+        overflowingCode: fails(() => wasm.cas_prepare('>a\nACGT', [], { genetic_code: 267 }), /only genetic code 11/),
       };
       // Empty model list isolates the state machine from gene-prediction fixtures.
       const fasta = '>tiny\n' + 'ACGT'.repeat(100);
@@ -98,6 +100,11 @@ assert.ok(['chromium', 'webkit'].includes(browserName), 'SMOKE_BROWSER must be c
       console.log(`PASS: ${workerPath}: ${result.result.crisprs.length} CRISPR arrays, ${result.result.cas_clusters.length} CAS systems`);
     }
     if (outputs.length === 2) assert.deepEqual(outputs[0], outputs[1], 'threaded and sequential results');
+    if (process.env.SMOKE_NATIVE_REPORT) {
+      const native = JSON.parse(await fs.readFile(process.env.SMOKE_NATIVE_REPORT, 'utf8'));
+      for (const output of outputs) assert.deepEqual(output, native, 'browser and native results');
+      console.log('PASS: browser/native equivalence');
+    }
     if (process.env.SMOKE_OUTPUT) await fs.writeFile(process.env.SMOKE_OUTPUT, JSON.stringify(outputs[0], null, 2));
     if (outputs.length === 2) console.log('PASS: threaded/sequential equivalence');
   } finally {

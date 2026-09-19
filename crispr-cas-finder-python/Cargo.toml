@@ -5,6 +5,7 @@ edition = "2024"
 rust-version = "1.97.1"
 description = "Python bindings for crispr-cas-finder-core"
 license = "GPL-3.0-or-later"
+repository = "https://github.com/FullHuman/crispr-cas-finder"
 
 [lib]
 name = "crispr_cas_finder"

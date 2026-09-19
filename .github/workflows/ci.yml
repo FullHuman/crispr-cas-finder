@@ -1,6 +1,7 @@
 name: CI
 
 on:
+  workflow_call:
   push:
     branches: [main, develop]
   pull_request:
@@ -29,6 +30,9 @@ jobs:
       - name: Show active Rust toolchain
         run: rustup show active-toolchain
 
+      - name: Verify release notices and toolchain copies
+        run: python scripts/sync_release_metadata.py --check
+
       - name: Cache cargo dependencies
         uses: actions/cache@v6
         with:
@@ -56,9 +60,57 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: ./build_wasm.sh
 
+      - name: Test model bundling
+        if: matrix.os == 'ubuntu-latest'
+        run: python3 -m unittest discover -s crispr-cas-finder-wasm/tests -p 'test_*.py'
+
+      - name: Test relocated CLI with embedded models
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          cargo build --locked --release -p crispr-cas-finder-cli
+          python3 scripts/test_cli_distribution.py target/release/crispr-cas-finder --report "$RUNNER_TEMP/native-report.json"
+
+      - name: Set up Node for browser regression checks
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+
+      - name: Install browser test dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          npm ci --prefix crispr-cas-finder-wasm/tests
+          npx --prefix crispr-cas-finder-wasm/tests playwright install --with-deps chromium webkit
+
+      - name: Test Chromium and WebKit against native results
+        if: matrix.os == 'ubuntu-latest'
+        env:
+          SMOKE_NATIVE_REPORT: ${{ runner.temp }}/native-report.json
+        run: |
+          node crispr-cas-finder-wasm/tests/browser-smoke.cjs
+          SMOKE_BROWSER=webkit node crispr-cas-finder-wasm/tests/browser-smoke.cjs
+
       - name: Verify public crate packages
         if: matrix.os == 'ubuntu-latest'
-        run: cargo package --locked -p crispr-cas-finder-core -p crispr-cas-finder-cli
+        run: |
+          python3 scripts/package_public_crates.py
+
+  python:
+    name: Python distribution
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - name: Install Python build backend
+        run: python -m pip install "maturin>=1.9,<2"
+      - name: Test source archive and installed wheel outside checkout
+        run: python scripts/test_python_distribution.py
 
   security:
     name: Security Audit
@@ -73,3 +125,8 @@ jobs:
         run: cargo audit
       - name: Audit Python binding dependencies
         run: cargo audit --file crispr-cas-finder-python/Cargo.lock
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+      - name: Audit browser test dependencies
+        run: npm audit --prefix crispr-cas-finder-wasm/tests --audit-level=high
