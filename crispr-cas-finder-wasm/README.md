@@ -42,6 +42,10 @@ The threaded build requires SharedArrayBuffer and cross-origin isolation even
 when HMM search falls back to one thread. Use `serve.py` locally, or preserve
 the COOP/COEP headers from `vercel.json` on your server. Opening `index.html`
 directly or using a plain HTTP server without those headers will not work.
+Use `Cross-Origin-Opener-Policy: same-origin` and
+`Cross-Origin-Embedder-Policy: require-corp`. Safari does not support the
+`credentialless` COEP value. After changing hosting headers, redeploy (or restart
+the local server) and reload the page so the document and workers receive them.
 If the thread pool cannot start, the worker uses sequential profile searches.
 
 The stepwise Cas API permits one active analysis per worker. Call `cas_finalize`
@@ -56,6 +60,9 @@ Playwright and Chromium installed. `PLAYWRIGHT_MODULE` can select an existing
 Playwright installation; `BROWSER_EXECUTABLE` can select an installed Chrome
 binary. The test runs a loopback server, exercises input/error recovery, and
 compares full E. coli results from parallel and sequential HMM searches.
+Run the same checks with Safari's engine using `SMOKE_BROWSER=webkit` after
+installing Playwright's WebKit browser (`npx playwright install webkit`).
+The test server uses the deployment headers from `www/vercel.json`.
 
 Run bundler tests with
 `python3 -m unittest discover -s crispr-cas-finder-wasm/tests -p 'test_*.py'`.

@@ -1,16 +1,23 @@
-// Run after ./build_wasm.sh. Requires Playwright and its Chromium browser.
+// Run after ./build_wasm.sh. Requires Playwright and Chromium or WebKit.
 // PLAYWRIGHT_MODULE may point to an existing Playwright installation.
-const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
+const playwright = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const http = require('node:http');
 const path = require('node:path');
 const root = path.resolve(__dirname, '..', 'www');
+const browserName = process.env.SMOKE_BROWSER || 'chromium';
+assert.ok(['chromium', 'webkit'].includes(browserName), 'SMOKE_BROWSER must be chromium or webkit');
 
 (async () => {
+  // Exercise the deployment headers instead of masking configuration bugs with
+  // a separate set of test-only values. Both Vercel entry points must agree.
+  const deployment = JSON.parse(await fs.readFile(path.join(root, 'vercel.json'), 'utf8'));
+  const rootDeployment = JSON.parse(await fs.readFile(path.resolve(root, '../../vercel.json'), 'utf8'));
+  const headers = Object.fromEntries(deployment.headers[0].headers.map(({key, value}) => [key, value]));
+  assert.deepEqual(Object.fromEntries(rootDeployment.headers[0].headers.map(({key, value}) => [key, value])), headers);
   const server = http.createServer(async (req, res) => {
-    res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
-    res.setHeader('Cross-Origin-Embedder-Policy', 'credentialless');
+    for (const [name, value] of Object.entries(headers)) res.setHeader(name, value);
     const pathname = new URL(req.url, 'http://localhost').pathname;
     if (pathname === '/sequential-worker.js') {
       res.setHeader('Content-Type', 'text/javascript');
@@ -27,7 +34,7 @@ const root = path.resolve(__dirname, '..', 'www');
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   let browser;
   try {
-    browser = await chromium.launch({ headless: true, executablePath: process.env.BROWSER_EXECUTABLE });
+    browser = await playwright[browserName].launch({ headless: true, executablePath: process.env.BROWSER_EXECUTABLE });
     const page = await browser.newPage();
     page.on('console', message => { if (message.text().startsWith('PROGRESS:')) console.log(message.text()); });
     await page.goto(`http://127.0.0.1:${server.address().port}/`);

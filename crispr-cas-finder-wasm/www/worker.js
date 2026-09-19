@@ -42,7 +42,7 @@ function withTimeout(promise, timeoutMs, message) {
 async function ensureWasm() {
   if (wasmReady) return;
   if (!self.crossOriginIsolated || typeof SharedArrayBuffer === "undefined") {
-    throw new Error("This WASM build requires cross-origin isolation. Serve it with the bundled serve.py or configure COOP/COEP headers.");
+    throw new Error("This WASM build requires cross-origin isolation. Serve it with the bundled serve.py, or use HTTPS with Cross-Origin-Opener-Policy: same-origin and Cross-Origin-Embedder-Policy: require-corp (Safari does not support credentialless). Reload the page after updating the server headers.");
   }
   await init();
   init_panic_hook();
