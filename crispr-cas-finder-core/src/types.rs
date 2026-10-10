@@ -92,30 +92,56 @@ pub struct DetectionParams {
     pub min_spacer_count: usize,
     pub min_evidence_level: usize,
     pub min_sequence_length: usize,
+    /// Favour consensus repeats matching the `foster_repeat_*` settings when
+    /// several candidates compete for one array. Also raises the minimum
+    /// repeat length to `foster_repeat_length`.
     pub force_detection: bool,
     pub flank: usize,
-    /// Reserved for compatibility; validation rejects nondefault values.
+    /// Repeat length favoured by `force_detection`.
     pub foster_repeat_length: usize,
-    /// Reserved for compatibility; validation rejects nondefault values.
+    /// IUPAC pattern (`.` = any base) a favoured repeat starts with.
     pub foster_repeat_begin: String,
-    /// Reserved for compatibility; validation rejects nondefault values.
+    /// IUPAC pattern (`.` = any base) a favoured repeat ends with.
     pub foster_repeat_end: String,
+    /// Look for one extra terminal repeat on each side of an array that only
+    /// matches the half of the consensus nearest the array.
     pub better_detect_truncated: bool,
-    /// Reserved for compatibility; validation rejects nondefault values.
-    /// Use `truncated_repeat_mismatch_percent` for terminal repeats.
+    /// Percentage of mismatches allowed in the matched half of a truncated
+    /// terminal repeat; at least one mismatch is always allowed.
     pub truncated_mismatch_percent: f64,
+}
+
+impl DetectionParams {
+    /// Parameters actually used by the detector once `force_detection` has
+    /// been applied to the minimum repeat length.
+    pub(crate) fn effective(&self) -> std::borrow::Cow<'_, Self> {
+        if self.force_detection && self.min_repeat_length != self.foster_repeat_length {
+            let mut params = self.clone();
+            params.min_repeat_length = self.foster_repeat_length;
+            return std::borrow::Cow::Owned(params);
+        }
+        std::borrow::Cow::Borrowed(self)
+    }
 }
 
 impl DetectionParams {
     /// Validate length ranges and thresholds before starting detection.
     pub fn validate(&self) -> Result<(), String> {
-        let defaults = Self::default();
-        if self.foster_repeat_length != defaults.foster_repeat_length
-            || self.foster_repeat_begin != defaults.foster_repeat_begin
-            || self.foster_repeat_end != defaults.foster_repeat_end
-            || self.truncated_mismatch_percent != defaults.truncated_mismatch_percent
-        {
-            return Err("foster_repeat_* and truncated_mismatch_percent are unsupported compatibility settings; use truncated_repeat_mismatch_percent for terminal repeats".into());
+        if self.foster_repeat_length == 0 {
+            return Err("foster_repeat_length must be positive".into());
+        }
+        for (name, pattern) in [
+            ("foster_repeat_begin", &self.foster_repeat_begin),
+            ("foster_repeat_end", &self.foster_repeat_end),
+        ] {
+            if !crate::dna::is_iupac_pattern(pattern) {
+                return Err(format!(
+                    "{name} must contain only IUPAC nucleotide codes or '.'"
+                ));
+            }
+        }
+        if self.force_detection && self.foster_repeat_length > self.max_repeat_length {
+            return Err("foster_repeat_length must not exceed max_repeat_length".into());
         }
         if self.min_repeat_length == 0 || self.min_repeat_length > self.max_repeat_length {
             return Err("repeat lengths must be positive with min <= max".into());
@@ -138,6 +164,10 @@ impl DetectionParams {
             (
                 "spacer_similarity_threshold",
                 self.spacer_similarity_threshold,
+            ),
+            (
+                "truncated_mismatch_percent",
+                self.truncated_mismatch_percent,
             ),
         ] {
             if !value.is_finite() || !(0.0..=100.0).contains(&value) {

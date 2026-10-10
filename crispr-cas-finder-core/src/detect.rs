@@ -958,6 +958,116 @@ pub fn refine_cluster_with_consensus(
     kept
 }
 
+/// Count how many fostered properties the repeat instances of a candidate
+/// satisfy: favoured start, favoured end, and at least the favoured length.
+///
+/// Upstream subtracts two score points per property and instance when
+/// `-force` is set, but hardcodes `G`, `AA.` and 30; here the configured
+/// `foster_repeat_*` values are honoured.
+pub fn foster_score(repeats: &[RepeatHit], params: &DetectionParams) -> usize {
+    let begin = params.foster_repeat_begin.as_bytes();
+    let end = params.foster_repeat_end.as_bytes();
+    repeats
+        .iter()
+        .map(|repeat| {
+            let sequence = repeat.repeat_sequence.as_bytes();
+            usize::from(crate::dna::starts_with_iupac(sequence, begin))
+                + usize::from(crate::dna::ends_with_iupac(sequence, end))
+                + usize::from(sequence.len() >= params.foster_repeat_length)
+        })
+        .sum()
+}
+
+/// Add at most one truncated terminal repeat on each side of an array.
+///
+/// The repeat farthest from the leader is often degenerate in its distal
+/// half. A candidate is accepted when the half of the window nearest the
+/// array matches the same half of the consensus within
+/// `truncated_mismatch_percent` (at least one mismatch) and the spacer it
+/// creates has a valid length. Returns the number of repeats added.
+pub fn extend_with_truncated_repeats(
+    consensus: &str,
+    repeats: &mut Vec<RepeatHit>,
+    seq: &[u8],
+    params: &DetectionParams,
+) -> usize {
+    let consensus = consensus.as_bytes();
+    let repeat_length = consensus.len();
+    let half_length = repeat_length / 2;
+    if half_length == 0 || repeats.len() < 2 {
+        return 0;
+    }
+    let allowed_mismatches =
+        ((half_length as f64 * params.truncated_mismatch_percent / 100.0).floor() as usize).max(1);
+    let min_spacer_length =
+        ((repeat_length as f64 * params.min_spacer_to_repeat_ratio).floor() as usize).max(1);
+    let max_spacer_length =
+        (repeat_length as f64 * params.max_spacer_to_repeat_ratio).ceil() as usize;
+    let spacer_lengths: Vec<usize> = repeats
+        .windows(2)
+        .map(|pair| pair[1].pos1.saturating_sub(pair[0].pos1 + pair[0].repeat_length))
+        .collect();
+    let typical_spacer_length = spacer_lengths.iter().sum::<usize>() / spacer_lengths.len();
+
+    // `half_offset` selects which half of the window must match.
+    let best_start = |starts: std::ops::RangeInclusive<usize>,
+                      half_offset: usize,
+                      spacer_length: &dyn Fn(usize) -> usize| {
+        starts
+            .filter(|&start| start >= 1 && start - 1 + repeat_length <= seq.len())
+            .filter_map(|start| {
+                let window = &seq[start - 1 + half_offset..start - 1 + half_offset + half_length];
+                let expected = &consensus[half_offset..half_offset + half_length];
+                let mismatches = window
+                    .iter()
+                    .zip(expected)
+                    .filter(|(base, expected)| !base.eq_ignore_ascii_case(expected))
+                    .count();
+                (mismatches <= allowed_mismatches).then(|| {
+                    (
+                        mismatches,
+                        spacer_length(start).abs_diff(typical_spacer_length),
+                        start,
+                    )
+                })
+            })
+            .min()
+            .map(|(_, _, start)| start)
+    };
+    let hit_at = |start: usize| RepeatHit {
+        repeat_length,
+        pos1: start,
+        repeat_sequence: String::from_utf8_lossy(&seq[start - 1..start - 1 + repeat_length])
+            .to_string(),
+    };
+
+    let mut added = 0;
+    let last_end = repeats.last().map_or(0, |hit| hit.pos1 + hit.repeat_length);
+    if let Some(start) = best_start(
+        last_end + min_spacer_length..=last_end + max_spacer_length,
+        0,
+        &|start| start - last_end,
+    ) {
+        repeats.push(hit_at(start));
+        added += 1;
+    }
+
+    let first_start = repeats[0].pos1;
+    if first_start > min_spacer_length + repeat_length {
+        let highest = first_start - min_spacer_length - repeat_length;
+        let lowest = first_start
+            .saturating_sub(max_spacer_length + repeat_length)
+            .max(1);
+        if let Some(start) = best_start(lowest..=highest, repeat_length - half_length, &|start| {
+            first_start - (start + repeat_length)
+        }) {
+            repeats.insert(0, hit_at(start));
+            added += 1;
+        }
+    }
+    added
+}
+
 /// Re-scan the cluster region using the consensus DR (fuzznuc-style).
 ///
 /// Mirrors the Perl pipeline's second pass: after choosing the consensus DR
@@ -1664,6 +1774,82 @@ mod tests {
             hits.len(),
             hits
         );
+    }
+
+    fn hits_at(seq: &[u8], starts: &[usize]) -> Vec<RepeatHit> {
+        starts
+            .iter()
+            .map(|&start| RepeatHit {
+                repeat_length: DR.len(),
+                pos1: start,
+                repeat_sequence: String::from_utf8_lossy(&seq[start - 1..start - 1 + DR.len()])
+                    .to_string(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn truncated_terminal_repeat_is_added_after_the_array() {
+        let sp1 = b"CAGTTTCAGCGATACGATCGATCGATCGTTTT";
+        let sp2 = b"AAAACCCCGGGGTTTTACGATCGATCGATCGA";
+        let sp3 = b"GCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTA";
+        let mut truncated = DR[..14].to_vec();
+        truncated.extend_from_slice(b"CCCCCCCCCCCCCC");
+        let seq = build_crispr_seq(&[DR, DR, DR, &truncated], &[sp1, sp2, sp3], 100);
+        let consensus = std::str::from_utf8(DR).unwrap();
+        let mut repeats = hits_at(&seq, &[101, 161, 221]);
+
+        let added =
+            extend_with_truncated_repeats(consensus, &mut repeats, &seq, &default_params());
+
+        assert_eq!(added, 1);
+        assert_eq!(repeats.last().unwrap().pos1, 281);
+    }
+
+    #[test]
+    fn truncated_leading_repeat_must_match_the_half_nearest_the_array() {
+        let sp1 = b"CAGTTTCAGCGATACGATCGATCGATCGTTTT";
+        let sp2 = b"AAAACCCCGGGGTTTTACGATCGATCGATCGA";
+        let sp3 = b"GCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTA";
+        let mut truncated = b"CCCCCCCCCCCCCC".to_vec();
+        truncated.extend_from_slice(&DR[14..]);
+        let seq = build_crispr_seq(&[&truncated, DR, DR, DR], &[sp1, sp2, sp3], 100);
+        let consensus = std::str::from_utf8(DR).unwrap();
+        let mut repeats = hits_at(&seq, &[161, 221, 281]);
+
+        let added =
+            extend_with_truncated_repeats(consensus, &mut repeats, &seq, &default_params());
+
+        assert_eq!(added, 1);
+        assert_eq!(repeats[0].pos1, 101);
+    }
+
+    #[test]
+    fn complete_array_gains_no_truncated_repeat() {
+        let sp1 = b"CAGTTTCAGCGATACGATCGATCGATCGTTTT";
+        let sp2 = b"AAAACCCCGGGGTTTTACGATCGATCGATCGA";
+        let seq = build_crispr_seq(&[DR, DR, DR], &[sp1, sp2], 100);
+        let consensus = std::str::from_utf8(DR).unwrap();
+        let mut repeats = hits_at(&seq, &[101, 161, 221]);
+
+        let added =
+            extend_with_truncated_repeats(consensus, &mut repeats, &seq, &default_params());
+
+        assert_eq!(added, 0);
+        assert_eq!(repeats.len(), 3);
+    }
+
+    #[test]
+    fn foster_score_counts_configured_properties_per_repeat() {
+        let seq = build_crispr_seq(&[DR, DR], &[b"CAGTTTCAGCGATACGATCGATCGATCGTTTT"], 100);
+        let repeats = hits_at(&seq, &[101, 161]);
+        let mut params = default_params();
+        // DR starts with G, ends with AAA and is 28 bp long.
+        assert_eq!(foster_score(&repeats, &params), 4);
+        params.foster_repeat_length = 28;
+        assert_eq!(foster_score(&repeats, &params), 6);
+        params.foster_repeat_begin = "T".to_string();
+        assert_eq!(foster_score(&repeats, &params), 4);
     }
 
     #[test]

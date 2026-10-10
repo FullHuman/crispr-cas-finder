@@ -83,6 +83,7 @@ pub struct Cli {
     #[arg(long, alias = "levelMin", value_name = "INT", default_value_t = 1)]
     min_evidence_level: usize,
     #[arg(long, alias = "forceDetection", action = clap::ArgAction::SetTrue)]
+    #[arg(help = "Favour repeats matching the --foster-repeat-* settings and use --foster-repeat-length as the minimum repeat length")]
     force_detection: bool,
     #[arg(
         long,
@@ -90,17 +91,18 @@ pub struct Cli {
         value_name = "INT",
         default_value_t = 30
     )]
-    #[arg(help = "Unsupported compatibility setting; only the default is accepted")]
+    #[arg(help = "Repeat length favoured by --force-detection")]
     foster_repeat_length: usize,
     #[arg(long, alias = "fosterDRBegin", value_name = "STR", default_value = "G")]
-    #[arg(help = "Unsupported compatibility setting; only the default is accepted")]
+    #[arg(help = "IUPAC pattern ('.' = any base) a favoured repeat starts with")]
     foster_repeat_begin: String,
     #[arg(long, alias = "fosterDREnd", value_name = "STR", default_value = "AA.")]
-    #[arg(help = "Unsupported compatibility setting; only the default is accepted")]
+    #[arg(help = "IUPAC pattern ('.' = any base) a favoured repeat ends with")]
     foster_repeat_end: String,
     #[arg(long, alias = "minNbSpacers", value_name = "INT", default_value_t = 1)]
     min_spacer_count: usize,
     #[arg(long, alias = "betterDetectTrunc", action = clap::ArgAction::SetTrue)]
+    #[arg(help = "Look for a truncated terminal repeat on each side of every array")]
     better_detect_truncated: bool,
     #[arg(
         long,
@@ -108,7 +110,7 @@ pub struct Cli {
         value_name = "FLOAT",
         default_value_t = 4.0
     )]
-    #[arg(help = "Unsupported compatibility setting; only the default is accepted")]
+    #[arg(help = "Percentage of mismatches allowed in the matched half of a truncated terminal repeat")]
     truncated_mismatch_percent: f64,
     #[arg(long = "cas", action = clap::ArgAction::SetTrue)]
     launch_cas_finder: bool,
@@ -363,22 +365,48 @@ mod tests {
     }
 
     #[test]
-    fn nondefault_unsupported_detection_options_are_rejected() {
-        for (flag, value) in [
-            ("--foster-repeat-length", "31"),
-            ("--foster-repeat-begin", "A"),
-            ("--foster-repeat-end", "TT"),
-            ("--truncated-mismatch-percent", "5"),
-        ] {
-            let cli = Cli::try_parse_from(["crispr-cas-finder", "--in", "input.fa", flag, value])
-                .unwrap();
-            assert!(
-                cli.detection_params()
-                    .validate()
-                    .unwrap_err()
-                    .contains("unsupported compatibility")
-            );
-        }
+    fn foster_and_truncation_options_reach_detection_params() {
+        let cli = Cli::try_parse_from([
+            "crispr-cas-finder",
+            "--in",
+            "input.fa",
+            "--force-detection",
+            "--foster-repeat-length",
+            "31",
+            "--foster-repeat-begin",
+            "A",
+            "--foster-repeat-end",
+            "TT",
+            "--better-detect-truncated",
+            "--truncated-mismatch-percent",
+            "5",
+        ])
+        .unwrap();
+        let params = cli.detection_params();
+        params.validate().unwrap();
+        assert!(params.force_detection && params.better_detect_truncated);
+        assert_eq!(params.foster_repeat_length, 31);
+        assert_eq!(params.foster_repeat_begin, "A");
+        assert_eq!(params.foster_repeat_end, "TT");
+        assert_eq!(params.truncated_mismatch_percent, 5.0);
+    }
+
+    #[test]
+    fn invalid_foster_patterns_are_rejected() {
+        let cli = Cli::try_parse_from([
+            "crispr-cas-finder",
+            "--in",
+            "input.fa",
+            "--foster-repeat-begin",
+            "[AG]",
+        ])
+        .unwrap();
+        assert!(
+            cli.detection_params()
+                .validate()
+                .unwrap_err()
+                .contains("IUPAC")
+        );
     }
 
     #[test]

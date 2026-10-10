@@ -31,9 +31,9 @@ pub use types::{
 };
 
 use detect::{
-    RepeatHit, check_short_crispr, check_spacer_similarity, cluster_repeats, extract_spacers,
-    find_direct_repeats, get_repeat_candidates, infer_orientation, refine_cluster_with_consensus,
-    trim_consensus,
+    RepeatHit, check_short_crispr, check_spacer_similarity, cluster_repeats,
+    extend_with_truncated_repeats, extract_spacers, find_direct_repeats, foster_score,
+    get_repeat_candidates, infer_orientation, refine_cluster_with_consensus, trim_consensus,
 };
 
 /// Detect CRISPR arrays in a set of sequences.
@@ -50,6 +50,7 @@ use detect::{
 /// A `Vec<CrisprArray>` of detected arrays, each with repeats, spacers, and
 /// an evidence level.
 pub fn detect_crisprs(sequences: &[(&str, &[u8])], params: &DetectionParams) -> Vec<CrisprArray> {
+    let params = &*params.effective();
     let min_repeat_count = params.min_spacer_count.max(1) + 1;
 
     if sequences.len() > 1 {
@@ -125,6 +126,7 @@ fn process_cluster(
     let mut best_consensus = String::new();
     let mut best_refined: Vec<RepeatHit> = Vec::new();
     let mut best_spacers: Vec<String> = Vec::new();
+    let mut best_foster_score = 0usize;
 
     for consensus in &repeat_candidates {
         let refined = refine_cluster_with_consensus(consensus, cluster, seq, params);
@@ -157,11 +159,20 @@ fn process_cluster(
 
         // Pick the candidate that produces the most spacers.
         // Tie-break: prefer longer DR (vmatch finds maximal repeats).
-        if spacers.len() > best_spacers.len()
+        // With `force_detection`, fostered repeat properties come first.
+        let candidate_foster_score = if params.force_detection {
+            foster_score(&refined, params)
+        } else {
+            0
+        };
+        let more_spacers = spacers.len() > best_spacers.len()
             || (spacers.len() == best_spacers.len()
                 && !best_spacers.is_empty()
-                && consensus.len() > best_consensus.len())
+                && consensus.len() > best_consensus.len());
+        if candidate_foster_score > best_foster_score
+            || (candidate_foster_score == best_foster_score && more_spacers)
         {
+            best_foster_score = candidate_foster_score;
             best_consensus = consensus.clone();
             best_refined = refined;
             best_spacers = spacers;
@@ -185,6 +196,14 @@ fn process_cluster(
         if let (Some(first), Some(last)) = (best_refined.first(), best_refined.last()) {
             cluster = (first.pos1, last.pos1);
         }
+        best_spacers = extract_spacers(&best_refined, cluster, seq, params);
+    }
+
+    if params.better_detect_truncated
+        && extend_with_truncated_repeats(&best_consensus, &mut best_refined, seq, params) > 0
+        && let (Some(first), Some(last)) = (best_refined.first(), best_refined.last())
+    {
+        cluster = (first.pos1, last.pos1);
         best_spacers = extract_spacers(&best_refined, cluster, seq, params);
     }
 
