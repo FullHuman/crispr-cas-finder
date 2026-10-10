@@ -1,8 +1,8 @@
-use crate::{cas_types::RepliconTopology, casparser::CasCluster};
+use crate::cas_types::RepliconTopology;
 use serde::{Deserialize, Serialize};
 
 /// A single direct repeat within a CRISPR array.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Repeat {
     /// 1-based start position on the sequence.
     pub start: usize,
@@ -13,7 +13,7 @@ pub struct Repeat {
 }
 
 /// A single spacer between two direct repeats.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Spacer {
     /// 1-based start position on the sequence.
     pub start: usize,
@@ -45,8 +45,11 @@ impl std::fmt::Display for Orientation {
 }
 
 /// A detected CRISPR array with its repeats, spacers, and evidence level.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CrisprArray {
+    /// Stable identifier, `<seq_id>_CRISPR_<n>` with `n` counted per sequence.
+    #[serde(default)]
+    pub id: String,
     /// Identifier of the source sequence (FASTA header).
     pub seq_id: String,
     /// 1-based start position of the first repeat.
@@ -80,7 +83,7 @@ pub struct CrisprArray {
 ///
 /// This struct contains no file paths, output flags, or subprocess
 /// configuration — only the knobs that control the detection algorithm.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DetectionParams {
     pub min_repeat_length: usize,
     pub max_repeat_length: usize,
@@ -220,7 +223,16 @@ impl Default for DetectionParams {
 #[derive(Debug, Clone)]
 pub struct CasFinderConfig {
     pub genetic_code: usize,
+    /// Predict genes in metagenomic mode for every sequence.
     pub metagenome: bool,
+    /// Sequences shorter than this are predicted in metagenomic mode even
+    /// when `metagenome` is false; `0` disables the automatic switch.
+    pub auto_metagenome_below: usize,
+    /// GFF3 annotation to use instead of predicting genes. Requires
+    /// `proteome_faa`.
+    pub annotation_gff: Option<std::path::PathBuf>,
+    /// Protein FASTA matching `annotation_gff`.
+    pub proteome_faa: Option<std::path::PathBuf>,
     /// Number of HMM-search threads; `0` uses Rayon's default worker count.
     pub workers: usize,
     pub definition: String,
@@ -240,6 +252,9 @@ impl Default for CasFinderConfig {
         Self {
             genetic_code: 11,
             metagenome: false,
+            auto_metagenome_below: crate::annotation::AUTO_METAGENOME_BELOW,
+            annotation_gff: None,
+            proteome_faa: None,
             workers: 0,
             definition: "SubTyping".to_string(),
             quiet: false,
@@ -249,11 +264,4 @@ impl Default for CasFinderConfig {
             cas_profiles_dir: None,
         }
     }
-}
-
-/// Combined CRISPR + Cas analysis result for higher-level library callers.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct FullAnalysisResult {
-    pub crisprs: Vec<CrisprArray>,
-    pub cas_clusters: Vec<CasCluster>,
 }

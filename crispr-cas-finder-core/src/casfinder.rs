@@ -1,15 +1,21 @@
+pub use crate::annotation::RepliconProteins;
+use crate::annotation::{
+    GenePredictionOptions, Proteome, predict_proteome, proteome_from_annotation,
+};
 use crate::cas_pipeline::{
-    ModelDefinition, assign_hits_to_model, build_model_registry, codon_table, evaluate_cluster,
-    reverse_complement_dna, translate_dna, validate_genetic_code,
+    ModelDefinition, assign_hits_to_model, build_model_registry, evaluate_cluster,
+    gene_coordinates_from_records, validate_genetic_code,
 };
 use crate::cas_types::{
     DetectedSystem, HmmerHit, ModelRegistry, RepliconTopology, SearchResults, SequenceIndex,
     cluster_hits, select_best_solution,
 };
+use crate::casparser::{CasCluster, from_search_results_with_gene_map};
 use crate::hmmer_core::{
     alphabet::Alphabet,
     background::BackgroundModel,
     config::SearchMode,
+    hmm::Hmm,
     modelconfig,
     pipeline::search::{CapacityHints, FilterPolicy, SearchOutcome, SearchPlan, SearchQuery},
     profile::Profile,
@@ -18,68 +24,78 @@ use crate::hmmer_core::{
 use crate::hmmer_io::HmmFile;
 use crate::types::CasFinderConfig;
 use anyhow::{Context, Result};
-use bio::bio_types::strand::Strand;
 use bio::io::fasta::Reader as FastaReader;
 use log::info;
-use orphos_core::{
-    OrphosAnalyzer,
-    config::{OrphosConfig, OutputFormat},
-    output::write_results,
-};
 use rayon::{ThreadPoolBuilder, prelude::*};
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// CAS profiles must cover at least 40% of the HMM to count as gene hits.
-const MIN_PROFILE_COVERAGE: f64 = 0.4;
+pub const MIN_PROFILE_COVERAGE: f64 = 0.4;
 /// Match HMMER's default per-domain inclusion threshold.
-const MAX_DOMAIN_INCLUSION_EVALUE: f64 = 0.01;
+pub const MAX_DOMAIN_INCLUSION_EVALUE: f64 = 0.01;
 
-struct PredictedProteome {
-    path: PathBuf,
-    replicons: Vec<RepliconProteins>,
+/// Outcome of Cas detection: the annotated proteins and the systems found.
+#[derive(Debug, Default)]
+pub struct CasAnalysis {
+    pub proteome: Proteome,
+    pub systems: Vec<DetectedSystem>,
+    pub clusters: Vec<CasCluster>,
 }
 
-/// Protein IDs in genomic order for one input replicon.
-pub struct RepliconProteins {
-    pub name: String,
-    pub protein_ids: Vec<String>,
+/// Read a genome FASTA and detect Cas systems in it.
+pub fn run_casfinder(input: &Path, config: &CasFinderConfig) -> Result<CasAnalysis> {
+    validate_config(config)?;
+    let reader = FastaReader::from_file(input)
+        .with_context(|| format!("Cannot read genome FASTA: {}", input.display()))?;
+    let mut sequences: Vec<(String, Vec<u8>)> = Vec::new();
+    for record in reader.records() {
+        let record = record.context("Reading FASTA record")?;
+        sequences.push((record.id().to_string(), record.seq().to_vec()));
+    }
+    detect_cas_systems(&sequences, config, None)
 }
 
-/// Run Orphos gene prediction and then detect Cas systems using
-/// hmmer-core for HMM search (pure Rust, no external subprocess).
-pub fn run_casfinder(
-    input: &Path,
-    basename: &str,
-    outdir: &Path,
-    config: &CasFinderConfig,
-) -> Result<SearchResults> {
+fn validate_config(config: &CasFinderConfig) -> Result<()> {
     validate_genetic_code(config.genetic_code)?;
     if !config.min_best_hit_score.is_finite() {
         anyhow::bail!("Minimum CAS hit score must be finite");
     }
+    if config.annotation_gff.is_some() != config.proteome_faa.is_some() {
+        anyhow::bail!("An annotation GFF and a protein FASTA must be supplied together");
+    }
+    Ok(())
+}
 
-    let annotation_dir = outdir.join(format!("orphos_{}", basename));
-    fs::create_dir_all(&annotation_dir).context("Creating annotation output dir")?;
-    let predicted_proteome = predict_and_write_proteome(input, basename, &annotation_dir, config)?;
-
-    let metadata = fs::metadata(&predicted_proteome.path).with_context(|| {
-        format!(
-            "Cannot stat proteome file: {}",
-            predicted_proteome.path.display()
-        )
-    })?;
-    if metadata.len() == 0 {
-        info!("Proteome file is empty, skipping CasFinder");
-        return Ok(SearchResults::default());
+/// Detect Cas systems in in-memory sequences.
+///
+/// Proteins are predicted per sequence unless the configuration supplies an
+/// annotation. `include` restricts the search to the listed sequence IDs,
+/// which is how "only where a CRISPR array was found" is implemented.
+pub fn detect_cas_systems(
+    sequences: &[(String, Vec<u8>)],
+    config: &CasFinderConfig,
+    include: Option<&HashSet<String>>,
+) -> Result<CasAnalysis> {
+    validate_config(config)?;
+    let proteome = load_proteome(sequences, config, include)?;
+    if proteome.is_empty() {
+        info!("No protein-coding gene to search, skipping CasFinder");
+        return Ok(CasAnalysis {
+            proteome,
+            ..CasAnalysis::default()
+        });
     }
 
     let amino_alphabet = Alphabet::amino();
-    let protein_sequences = load_protein_sequences(&predicted_proteome.path, &amino_alphabet)?;
-    validate_proteome_layout(&protein_sequences, &predicted_proteome.replicons)?;
-
+    let protein_sequences: Vec<DigitalSequence> = proteome
+        .genes
+        .iter()
+        .map(|gene| {
+            DigitalSequence::from_bytes(&gene.id, "", gene.protein.as_bytes(), &amino_alphabet)
+        })
+        .collect();
     info!("Loaded {} protein sequences", protein_sequences.len());
 
     let models_dir = resolve_models_dir(config)?;
@@ -110,99 +126,86 @@ pub fn run_casfinder(
     )?;
     info!("HMM search found hits for {} profiles", all_hits.len());
 
-    let mut detected_systems = evaluate_detected_systems(
+    let (systems, clusters) = finalize_systems(
         &registry,
         &model_fully_qualified_names,
         &all_hits,
-        &predicted_proteome.replicons,
+        &proteome,
         config.replicon_topology,
+        config.min_best_hit_score,
     );
-    if detected_systems.len() > 1 {
-        detected_systems = select_best_solution(detected_systems);
-    }
-    filter_low_confidence_systems(&mut detected_systems, config.min_best_hit_score);
+    info!("CasFinder found {} systems", systems.len());
 
-    info!("CasFinder found {} systems", detected_systems.len());
-
-    Ok(SearchResults {
-        systems: detected_systems,
-        rejected: Vec::new(),
-        skipped_replicons: Vec::new(),
+    Ok(CasAnalysis {
+        proteome,
+        systems,
+        clusters,
     })
 }
 
-fn predict_and_write_proteome(
-    input: &Path,
-    basename: &str,
-    annotation_dir: &Path,
+fn load_proteome(
+    sequences: &[(String, Vec<u8>)],
     config: &CasFinderConfig,
-) -> Result<PredictedProteome> {
-    info!("Running Orphos gene prediction on {}", input.display());
-    let orphos_config = OrphosConfig {
-        metagenomic: config.metagenome,
-        closed_ends: true,
-        quiet: config.quiet,
-        translation_table: Some(validate_genetic_code(config.genetic_code)?),
-        ..OrphosConfig::default()
-    };
-    let analyzer = OrphosAnalyzer::new(orphos_config);
-    let input_path = path_as_utf8(input, "Genome FASTA")?;
-    let results = analyzer
-        .analyze_fasta_file(input_path)
-        .context("Orphos gene prediction failed")?;
-
-    let gff_path = annotation_dir.join(format!("{}.gff", basename));
-    let mut gff_file = fs::File::create(&gff_path)
-        .with_context(|| format!("Creating Orphos GFF: {}", gff_path.display()))?;
-    for gene_prediction_result in &results {
-        write_results(&mut gff_file, gene_prediction_result, OutputFormat::Gff)
-            .context("Writing GFF from Orphos results")?;
-    }
-
-    let faa_path = annotation_dir.join(format!("{}.faa", basename));
-    let replicons = write_faa_from_genes(input, &results, config.genetic_code, &faa_path)
-        .context("Writing FAA from Orphos gene predictions")?;
-    Ok(PredictedProteome {
-        path: faa_path,
-        replicons,
-    })
-}
-
-fn load_protein_sequences(proteome: &Path, alphabet: &Alphabet) -> Result<Vec<DigitalSequence>> {
-    let proteome_path = path_as_utf8(proteome, "Predicted proteome")?;
-    crate::hmmer_io::read_fasta_digital_sequences(alphabet, proteome_path)
-        .map_err(|e| anyhow::anyhow!("Failed to load proteins from {}: {e}", proteome.display()))
-}
-
-fn validate_proteome_layout(
-    protein_sequences: &[DigitalSequence],
-    replicons: &[RepliconProteins],
-) -> Result<()> {
-    let layout_count = replicons
-        .iter()
-        .map(|replicon| replicon.protein_ids.len())
-        .sum::<usize>();
-    if protein_sequences.len() != layout_count {
-        anyhow::bail!(
-            "Predicted proteome contains {} proteins, but its replicon layout contains {}",
-            protein_sequences.len(),
-            layout_count
-        );
-    }
-
-    for (sequence, expected_id) in protein_sequences
-        .iter()
-        .zip(replicons.iter().flat_map(|replicon| &replicon.protein_ids))
-    {
-        if sequence.name != *expected_id {
-            anyhow::bail!(
-                "Predicted proteome order mismatch: expected '{}', found '{}'",
-                expected_id,
-                sequence.name
-            );
+    include: Option<&HashSet<String>>,
+) -> Result<Proteome> {
+    if let (Some(gff_path), Some(faa_path)) = (&config.annotation_gff, &config.proteome_faa) {
+        let gff = fs::read_to_string(gff_path)
+            .with_context(|| format!("Cannot read annotation GFF: {}", gff_path.display()))?;
+        let faa = fs::read_to_string(faa_path)
+            .with_context(|| format!("Cannot read protein FASTA: {}", faa_path.display()))?;
+        let mut proteome = proteome_from_annotation(&gff, &faa)?;
+        if let Some(include) = include {
+            proteome.genes.retain(|gene| include.contains(&gene.seq_id));
+            proteome
+                .replicons
+                .retain(|replicon| include.contains(&replicon.name));
         }
+        return Ok(proteome);
     }
-    Ok(())
+    info!("Predicting genes for {} sequence(s)", sequences.len());
+    predict_proteome(
+        sequences,
+        &GenePredictionOptions {
+            genetic_code: config.genetic_code,
+            metagenome: config.metagenome,
+            auto_metagenome_below: config.auto_metagenome_below,
+        },
+        include,
+    )
+}
+
+/// Cluster hits, pick the best non-overlapping systems, drop low-confidence
+/// ones and attach genomic coordinates. Shared by native and WASM callers.
+pub fn finalize_systems(
+    registry: &ModelRegistry,
+    model_fully_qualified_names: &[String],
+    all_hits: &HashMap<String, Vec<HmmerHit>>,
+    proteome: &Proteome,
+    replicon_topology: RepliconTopology,
+    min_best_hit_score: f64,
+) -> (Vec<DetectedSystem>, Vec<CasCluster>) {
+    let mut systems = evaluate_detected_systems(
+        registry,
+        model_fully_qualified_names,
+        all_hits,
+        &proteome.replicons,
+        replicon_topology,
+    );
+    if systems.len() > 1 {
+        systems = select_best_solution(systems);
+    }
+    filter_low_confidence_systems(&mut systems, min_best_hit_score);
+
+    let gene_map = gene_coordinates_from_records(&proteome.genes);
+    let clusters = from_search_results_with_gene_map(
+        &SearchResults {
+            systems: systems.clone(),
+            rejected: Vec::new(),
+            skipped_replicons: Vec::new(),
+        },
+        &gene_map,
+    );
+    (systems, clusters)
 }
 
 fn path_as_utf8<'a>(path: &'a Path, description: &str) -> Result<&'a str> {
@@ -322,17 +325,9 @@ fn run_hmm_search(
     alphabet: &Alphabet,
     workers: usize,
 ) -> Result<HashMap<String, Vec<HmmerHit>>> {
-    let average_sequence_length = if protein_sequences.is_empty() {
-        400
-    } else {
-        protein_sequences.iter().map(|s| s.len()).sum::<usize>() / protein_sequences.len()
-    };
-
     let mut all_hits: HashMap<String, Vec<HmmerHit>> = HashMap::new();
     let mut profile_names: Vec<String> = needed_profiles.iter().cloned().collect();
     profile_names.sort_unstable();
-    let mut sequence_search_order: Vec<usize> = (0..protein_sequences.len()).collect();
-    sequence_search_order.sort_unstable_by_key(|&index| (protein_sequences[index].len(), index));
 
     let pool = build_hmm_search_pool(workers)?;
     info!(
@@ -345,15 +340,7 @@ fn run_hmm_search(
         profile_names
             .par_iter()
             .map(|profile_name| {
-                search_profile_hits(
-                    profiles_dir,
-                    profile_name,
-                    protein_sequences,
-                    &sequence_search_order,
-                    alphabet,
-                    average_sequence_length,
-                    MIN_PROFILE_COVERAGE,
-                )
+                search_profile_hits(profiles_dir, profile_name, protein_sequences, alphabet)
             })
             .collect::<Vec<_>>()
     });
@@ -371,10 +358,7 @@ fn search_profile_hits(
     profiles_dir: &Path,
     profile_name: &str,
     protein_sequences: &[DigitalSequence],
-    sequence_search_order: &[usize],
     alphabet: &Alphabet,
-    average_sequence_length: usize,
-    coverage_threshold: f64,
 ) -> Result<Option<(String, Vec<HmmerHit>)>> {
     let hmm_path = profiles_dir.join(format!("{}.hmm", profile_name));
     if !hmm_path.is_file() {
@@ -385,13 +369,32 @@ fn search_profile_hits(
         );
     }
 
-    let background_model = BackgroundModel::new(alphabet);
     let hmm_path_string = path_as_utf8(&hmm_path, "HMM profile")?;
     let mut hmm_file = HmmFile::open(hmm_path_string, None)
         .map_err(|e| anyhow::anyhow!("Failed to open {}: {}", profile_name, e))?;
     let (hmm_alphabet, hmm) = hmm_file
         .read()
         .map_err(|e| anyhow::anyhow!("Failed to parse {}: {}", profile_name, e))?;
+    let profile_hits = search_hmm_profile(
+        profile_name,
+        &hmm_alphabet,
+        &hmm,
+        protein_sequences,
+        alphabet,
+    )?;
+    Ok((!profile_hits.is_empty()).then(|| (profile_name.to_string(), profile_hits)))
+}
+
+/// Search one parsed HMM profile against all proteins and return the
+/// domains passing the inclusion E-value and profile-coverage thresholds,
+/// in protein order. Shared by native and WASM callers.
+pub fn search_hmm_profile(
+    profile_name: &str,
+    hmm_alphabet: &Alphabet,
+    hmm: &Hmm,
+    protein_sequences: &[DigitalSequence],
+    alphabet: &Alphabet,
+) -> Result<Vec<HmmerHit>> {
     if hmm_alphabet.kind != alphabet.kind || hmm_alphabet.canonical_size != alphabet.canonical_size
     {
         anyhow::bail!(
@@ -401,14 +404,23 @@ fn search_profile_hits(
             alphabet.kind
         );
     }
-
     let num_nodes = hmm.num_nodes;
     if num_nodes == 0 {
         anyhow::bail!("HMM profile '{}' contains no model nodes", profile_name);
     }
+    let average_sequence_length = if protein_sequences.is_empty() {
+        400
+    } else {
+        protein_sequences.iter().map(|s| s.len()).sum::<usize>() / protein_sequences.len()
+    };
+    // Searching in length order keeps the worker's matrices growing steadily.
+    let mut sequence_search_order: Vec<usize> = (0..protein_sequences.len()).collect();
+    sequence_search_order.sort_unstable_by_key(|&index| (protein_sequences[index].len(), index));
+
+    let background_model = BackgroundModel::new(alphabet);
     let mut configured_profile = Profile::new(num_nodes, alphabet);
     modelconfig::profile_config(
-        &hmm,
+        hmm,
         &background_model,
         &mut configured_profile,
         average_sequence_length,
@@ -429,8 +441,11 @@ fn search_profile_hits(
 
     let mut profile_hits: Vec<(usize, HmmerHit)> = Vec::new();
 
-    for &sequence_index in sequence_search_order {
+    for &sequence_index in &sequence_search_order {
         let target_sequence = &protein_sequences[sequence_index];
+        if target_sequence.is_empty() {
+            continue;
+        }
         let report = worker
             .search(target_sequence)
             .map_err(|e| anyhow::anyhow!("Search error {}: {}", profile_name, e))?;
@@ -446,7 +461,7 @@ fn search_profile_hits(
                     continue;
                 };
                 let profile_coverage = profile_span as f64 / num_nodes as f64;
-                if profile_coverage < coverage_threshold {
+                if profile_coverage < MIN_PROFILE_COVERAGE {
                     continue;
                 }
                 let Some(sequence_span) =
@@ -474,13 +489,7 @@ fn search_profile_hits(
     }
 
     profile_hits.sort_by_key(|(sequence_index, _)| *sequence_index);
-    let profile_hits: Vec<HmmerHit> = profile_hits.into_iter().map(|(_, hit)| hit).collect();
-
-    if profile_hits.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some((profile_name.to_string(), profile_hits)))
-    }
+    Ok(profile_hits.into_iter().map(|(_, hit)| hit).collect())
 }
 
 fn inclusive_span(start: usize, end: usize) -> Option<usize> {
@@ -587,99 +596,6 @@ fn filter_low_confidence_systems(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Gene prediction helpers
-// ---------------------------------------------------------------------------
-
-/// Translate predicted CDS directly from the genome and write a FASTA protein file.
-fn write_faa_from_genes(
-    fasta_path: &Path,
-    results: &[orphos_core::results::OrphosResults],
-    genetic_code: usize,
-    faa_path: &Path,
-) -> Result<Vec<RepliconProteins>> {
-    let reader = FastaReader::from_file(fasta_path)
-        .with_context(|| format!("Cannot read genome FASTA: {:?}", fasta_path))?;
-    let mut sequences: Vec<(String, Vec<u8>)> = Vec::new();
-    for result in reader.records() {
-        let record = result.context("Reading FASTA record")?;
-        sequences.push((record.id().to_string(), record.seq().to_vec()));
-    }
-    if results.len() != sequences.len() {
-        anyhow::bail!(
-            "Orphos returned results for {} sequences, but the input FASTA contains {}",
-            results.len(),
-            sequences.len()
-        );
-    }
-
-    let translation_table = codon_table(genetic_code)?;
-    let mut output_file = fs::File::create(faa_path).context("Creating .faa file")?;
-    let mut gene_count = 0usize;
-    let mut replicons = Vec::with_capacity(results.len());
-
-    for (orphos_result, (sequence_id, genomic_sequence)) in results.iter().zip(&sequences) {
-        if orphos_result.sequence_info.header != *sequence_id {
-            anyhow::bail!(
-                "Orphos result order mismatch: expected sequence '{}', found '{}'",
-                sequence_id,
-                orphos_result.sequence_info.header
-            );
-        }
-        let mut protein_ids = Vec::with_capacity(orphos_result.genes.len());
-
-        for gene in &orphos_result.genes {
-            let begin = gene.coordinates.begin.checked_sub(1).ok_or_else(|| {
-                anyhow::anyhow!("Orphos returned a zero start coordinate for '{sequence_id}'")
-            })?;
-            let end = gene.coordinates.end.checked_sub(1).ok_or_else(|| {
-                anyhow::anyhow!("Orphos returned a zero end coordinate for '{sequence_id}'")
-            })?;
-            if begin > end || end >= genomic_sequence.len() {
-                anyhow::bail!(
-                    "Orphos returned invalid coordinates {}..{} for '{}' (length {})",
-                    gene.coordinates.begin,
-                    gene.coordinates.end,
-                    sequence_id,
-                    genomic_sequence.len()
-                );
-            }
-
-            let coding_dna_nucleotides = &genomic_sequence[begin..=end];
-            let (coding_dna_nucleotides, strand_int) = match gene.coordinates.strand {
-                Strand::Forward => (coding_dna_nucleotides.to_vec(), 1),
-                Strand::Reverse => (reverse_complement_dna(coding_dna_nucleotides), -1),
-                Strand::Unknown => {
-                    anyhow::bail!("Orphos returned an unknown strand for '{sequence_id}'")
-                }
-            };
-
-            let protein = translate_dna(&coding_dna_nucleotides, &translation_table);
-            if protein.is_empty() {
-                continue;
-            }
-
-            gene_count += 1;
-            let protein_id = format!("{}_{}", orphos_result.sequence_info.header, gene_count);
-            let gene_id = format!(
-                "{} # {} # {} # {} # ID={}",
-                protein_id, gene.coordinates.begin, gene.coordinates.end, strand_int, gene_count
-            );
-            protein_ids.push(protein_id);
-            writeln!(output_file, ">{}", gene_id)?;
-            for chunk in protein.as_bytes().chunks(60) {
-                output_file.write_all(chunk)?;
-                output_file.write_all(b"\n")?;
-            }
-        }
-        replicons.push(RepliconProteins {
-            name: sequence_id.clone(),
-            protein_ids,
-        });
-    }
-    Ok(replicons)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -688,17 +604,23 @@ mod tests {
     use std::fs::File;
 
     #[test]
-    fn unsupported_genetic_code_fails_before_creating_output() {
-        let directory = tempfile::tempdir().unwrap();
-        let output = directory.path().join("output");
+    fn unsupported_genetic_code_fails_before_reading_input() {
         let config = CasFinderConfig {
             genetic_code: 267,
             ..CasFinderConfig::default()
         };
-        let error =
-            run_casfinder(Path::new("missing.fa"), "missing", &output, &config).unwrap_err();
+        let error = run_casfinder(Path::new("missing.fa"), &config).unwrap_err();
         assert!(error.to_string().contains("only genetic code 11"));
-        assert!(!output.exists());
+    }
+
+    #[test]
+    fn annotation_gff_and_protein_fasta_must_come_together() {
+        let config = CasFinderConfig {
+            annotation_gff: Some(PathBuf::from("genes.gff")),
+            ..CasFinderConfig::default()
+        };
+        let error = detect_cas_systems(&[], &config, None).unwrap_err();
+        assert!(error.to_string().contains("supplied together"));
     }
 
     fn test_hit(id: &str, gene_name: &str, score: f64) -> HmmerHit {
@@ -746,42 +668,39 @@ mod tests {
     }
 
     #[test]
-    fn empty_proteome_returns_empty_search_results() {
-        let temporary = tempfile::tempdir().expect("temporary directory");
-        let input = temporary.path().join("short.fa");
-        fs::write(&input, format!(">short\n{}\n", "A".repeat(120))).expect("write FASTA");
+    fn empty_proteome_returns_an_empty_analysis() {
+        let sequences = vec![("short".to_string(), vec![b'A'; 120])];
 
-        let result = run_casfinder(
-            &input,
-            "short",
-            temporary.path(),
-            &CasFinderConfig::default(),
-        )
-        .expect("empty proteome is a valid result");
+        let analysis = detect_cas_systems(&sequences, &CasFinderConfig::default(), None)
+            .expect("empty proteome is a valid result");
 
-        assert!(result.systems.is_empty());
-        assert!(temporary.path().join("orphos_short/short.gff").is_file());
-        assert!(temporary.path().join("orphos_short/short.faa").is_file());
+        assert!(analysis.systems.is_empty());
+        assert!(analysis.clusters.is_empty());
+        assert_eq!(analysis.proteome.replicons.len(), 1);
     }
 
     #[test]
-    fn non_finite_minimum_score_is_rejected_before_writing_outputs() {
-        let temporary = tempfile::tempdir().expect("temporary directory");
+    fn excluded_sequences_are_not_annotated() {
+        let sequences = vec![("short".to_string(), vec![b'A'; 120])];
+        let include = HashSet::new();
+
+        let analysis =
+            detect_cas_systems(&sequences, &CasFinderConfig::default(), Some(&include)).unwrap();
+
+        assert!(analysis.proteome.replicons.is_empty());
+    }
+
+    #[test]
+    fn non_finite_minimum_score_is_rejected_before_reading_input() {
         let config = CasFinderConfig {
             min_best_hit_score: f64::NAN,
             ..CasFinderConfig::default()
         };
 
-        let error = run_casfinder(
-            &temporary.path().join("missing.fa"),
-            "missing",
-            temporary.path(),
-            &config,
-        )
-        .expect_err("NaN threshold must be rejected");
+        let error = run_casfinder(Path::new("missing.fa"), &config)
+            .expect_err("NaN threshold must be rejected");
 
         assert!(error.to_string().contains("must be finite"));
-        assert!(!temporary.path().join("orphos_missing").exists());
     }
 
     #[test]

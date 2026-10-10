@@ -5,11 +5,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
 use crispr_cas_finder_core::{
-    CasFinderConfig, CrisprArray, DetectionParams, FullAnalysisResult, RepliconTopology,
-    casfinder::run_casfinder,
-    casparser::from_search_results,
-    detect_crisprs_in_fasta_path,
-    io::{write_gff, write_json},
+    AnalysisOptions, CasFinderConfig, DetectionParams, RepliconTopology, analyze, annotation, io,
+    parse_fasta,
 };
 use log::info;
 
@@ -35,6 +32,30 @@ enum TopologyArgument {
     #[default]
     Circular,
     Linear,
+}
+
+/// Cas model sets shipped with CasFinder. `General` is upstream's name for
+/// the class-level definitions.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+enum DefinitionArgument {
+    #[default]
+    #[value(name = "SubTyping", alias = "S")]
+    SubTyping,
+    #[value(name = "Typing", alias = "T")]
+    Typing,
+    #[value(name = "General", alias = "G", alias = "Class")]
+    General,
+}
+
+impl DefinitionArgument {
+    /// Directory stem of the model set inside a CasFinder distribution.
+    fn directory_stem(self) -> &'static str {
+        match self {
+            Self::SubTyping => "SubTyping",
+            Self::Typing => "Typing",
+            Self::General => "Class",
+        }
+    }
 }
 
 impl From<TopologyArgument> for RepliconTopology {
@@ -125,13 +146,43 @@ pub struct Cli {
         default_value_t = 0
     )]
     workers: usize,
-    #[arg(long, value_name = "STR", default_value = "SubTyping")]
-    definition: String,
+    #[arg(long, value_enum, ignore_case = true, default_value_t = DefinitionArgument::SubTyping)]
+    #[arg(help = "Cas model set: SubTyping, Typing, or General (class level)")]
+    definition: DefinitionArgument,
     #[arg(long, alias = "geneticCode", value_name = "INT", default_value_t = 11,
         value_parser = parse_genetic_code, help = "Genetic code (only 11 is currently supported)")]
     genetic_code: usize,
     #[arg(long, action = clap::ArgAction::SetTrue)]
+    #[arg(help = "Predict genes in metagenomic mode for every sequence")]
     metagenome: bool,
+    #[arg(long, value_name = "INT", default_value_t = annotation::AUTO_METAGENOME_BELOW)]
+    #[arg(help = "Sequences shorter than this use metagenomic gene prediction; 0 disables")]
+    auto_metagenome_below: usize,
+    #[arg(
+        long = "gff",
+        alias = "gffAnnot",
+        value_name = "FILE",
+        requires = "faa"
+    )]
+    #[arg(help = "GFF3 annotation to use instead of predicting genes (needs --faa)")]
+    gff: Option<PathBuf>,
+    #[arg(
+        long = "faa",
+        alias = "proteome",
+        value_name = "FILE",
+        requires = "gff"
+    )]
+    #[arg(help = "Protein FASTA matching --gff")]
+    faa: Option<PathBuf>,
+    #[arg(long, alias = "rcfowce", action = clap::ArgAction::SetTrue)]
+    #[arg(help = "Search Cas systems only on sequences with at least one CRISPR array")]
+    cas_only_with_crispr: bool,
+    #[arg(long, value_name = "INT", default_value_t = 600)]
+    #[arg(help = "Report arrays within this many bp of a Cas system")]
+    vicinity: usize,
+    #[arg(long, alias = "cluster", value_name = "INT")]
+    #[arg(help = "Chain arrays and Cas systems closer than this many bp into loci")]
+    locus_distance: Option<usize>,
     #[arg(long, value_enum, default_value_t = TopologyArgument::Circular)]
     topology: TopologyArgument,
     #[arg(long = "min-cas-score", value_name = "FLOAT", default_value_t = 25.0)]
@@ -177,7 +228,7 @@ impl Cli {
         let cas_models_dir = self.cas_models_dir.as_ref().map(PathBuf::from).or_else(|| {
             data_root
                 .as_ref()
-                .map(|root| root.join(format!("DEF-{}-2.0.3", self.definition)))
+                .map(|root| root.join(format!("DEF-{}-2.0.3", self.definition.directory_stem())))
         });
 
         let cas_profiles_dir = self
@@ -202,8 +253,11 @@ impl Cli {
             config: CasFinderConfig {
                 genetic_code: self.genetic_code,
                 metagenome: self.metagenome,
+                auto_metagenome_below: self.auto_metagenome_below,
+                annotation_gff: self.gff.clone(),
+                proteome_faa: self.faa.clone(),
                 workers: self.workers,
-                definition: self.definition.clone(),
+                definition: self.definition.directory_stem().to_string(),
                 quiet: self.quiet,
                 replicon_topology: self.topology.into(),
                 min_best_hit_score: self.min_cas_score,
@@ -234,25 +288,41 @@ pub fn run(cli: Cli) -> Result<()> {
         .launch_cas_finder
         .then(|| cli.casfinder_config())
         .transpose()?;
-    let params = cli.detection_params();
+    let options = AnalysisOptions {
+        detection: cli.detection_params(),
+        cas: casfinder_config
+            .as_ref()
+            .map(|prepared| prepared.config.clone()),
+        cas_only_with_crispr: cli.cas_only_with_crispr,
+        vicinity: cli.vicinity,
+        locus_distance: cli.locus_distance,
+    };
+    options.detection.validate().map_err(anyhow::Error::msg)?;
+
     let input_path = &cli.input;
+    // Open separately so callers can inspect the underlying I/O error kind.
+    let input_file = File::open(input_path)
+        .with_context(|| format!("Failed to open FASTA: {:?}", input_path))?;
+    let sequences = parse_fasta(input_file)
+        .with_context(|| format!("Failed to read FASTA: {:?}", input_path))?;
     info!(
-        "Scanning {:?} for CRISPR direct repeats (min_repeat_length={}, max_repeat_length={}, mism={})",
-        input_path,
-        params.min_repeat_length,
-        params.max_repeat_length,
-        if params.no_mismatch { 0 } else { 1 }
+        "Analysing {} sequence(s) from {:?}",
+        sequences.len(),
+        input_path
     );
 
-    let arrays: Vec<CrisprArray> = detect_crisprs_in_fasta_path(input_path, &params)
-        .with_context(|| format!("Failed to detect CRISPRs from FASTA: {:?}", input_path))?;
-
-    info!("Detected {} CRISPR arrays", arrays.len());
-    for (array_index, array) in arrays.iter().enumerate() {
+    let analysis = analyze(&sequences, &options)
+        .with_context(|| format!("Analysis failed for {:?}", input_path))?;
+    let report = &analysis.report;
+    info!(
+        "Detected {} CRISPR arrays and {} Cas systems",
+        report.crisprs.len(),
+        report.cas_clusters.len()
+    );
+    for array in &report.crisprs {
         info!(
-            "  Array {}: {} ({}..{}), DR={} (len={}), {} spacers, evidence={}, orientation={}",
-            array_index + 1,
-            array.seq_id,
+            "  {}: {}..{}, DR={} (len={}), {} spacers, evidence={}, orientation={}",
+            array.id,
             array.start,
             array.end,
             array.consensus_repeat,
@@ -274,41 +344,63 @@ pub fn run(cli: Cli) -> Result<()> {
         .map_or_else(|| default_output_directory(&basename), Ok)?;
     create_dir_all(&outdir)?;
 
-    let gff_path = outdir.join(format!("{}.gff", basename));
-    info!("Writing GFF to {:?}", gff_path);
-    let mut gff_file = File::create(&gff_path)
-        .with_context(|| format!("Failed to create GFF file: {:?}", gff_path))?;
-    write_gff(&arrays, &mut gff_file)?;
-
-    let json_path = outdir.join(format!("{}.json", basename));
-    info!("Writing JSON to {:?}", json_path);
-    let mut json_file = File::create(&json_path)
-        .with_context(|| format!("Failed to create JSON file: {:?}", json_path))?;
-    write_json(&arrays, &mut json_file)?;
-
-    info!("GFF and JSON outputs created in {:?}", outdir);
-
-    if let Some(casfinder_config) = casfinder_config {
-        let search_results =
-            run_casfinder(input_path, &basename, &outdir, &casfinder_config.config)
-                .context("CasFinder pipeline failed")?;
-        info!("CasFinder found {} systems", search_results.systems.len());
-        let faa_path = outdir
-            .join(format!("orphos_{basename}"))
-            .join(format!("{basename}.faa"));
-        let faa_content = std::fs::read_to_string(&faa_path).ok();
-        let cas_clusters = from_search_results(&search_results, faa_content.as_deref());
-        let report = FullAnalysisResult {
-            crisprs: arrays.clone(),
-            cas_clusters,
-        };
-        let report_path = outdir.join("report.json");
-        let report_file = File::create(&report_path).context("Creating merged report JSON")?;
-        serde_json::to_writer_pretty(report_file, &report).context("Writing merged report JSON")?;
-        info!("Merged report written to {:?}", report_path);
+    write_output(&outdir, "report.json", |file| {
+        io::write_report_json(report, file)
+    })?;
+    write_output(&outdir, "sequences.tsv", |file| {
+        io::write_sequences_tsv(report, file)
+    })?;
+    write_output(&outdir, "crisprs.tsv", |file| {
+        io::write_crisprs_tsv(report, file)
+    })?;
+    write_output(&outdir, "features.gff", |file| io::write_gff(report, file))?;
+    write_output(&outdir, "arrays.fna", |file| {
+        io::write_arrays_fasta(report, file)
+    })?;
+    write_output(&outdir, "repeats.fna", |file| {
+        io::write_repeats_fasta(report, file)
+    })?;
+    write_output(&outdir, "spacers.fna", |file| {
+        io::write_spacers_fasta(report, file)
+    })?;
+    if let Some(proteome) = &analysis.proteome {
+        write_output(&outdir, "cas_systems.tsv", |file| {
+            io::write_cas_tsv(report, file)
+        })?;
+        write_output(&outdir, "associations.tsv", |file| {
+            io::write_associations_tsv(report, file)
+        })?;
+        write_output(&outdir, "cas_proteins.faa", |file| {
+            io::write_cas_proteins_fasta(report, proteome, file)
+        })?;
+        let annotation_dir = outdir.join("annotation");
+        create_dir_all(&annotation_dir)?;
+        write_output(&annotation_dir, "proteins.faa", |file| {
+            io::write_proteome_fasta(proteome, file)
+        })?;
+        std::fs::write(
+            annotation_dir.join("genes.gff"),
+            annotation::gff_content(proteome),
+        )
+        .context("Writing annotation/genes.gff")?;
     }
+    if report.parameters.locus_distance.is_some() {
+        write_output(&outdir, "loci.tsv", |file| io::write_loci_tsv(report, file))?;
+    }
+    info!("Results written to {:?}", outdir);
 
     Ok(())
+}
+
+fn write_output(
+    directory: &Path,
+    name: &str,
+    write: impl FnOnce(&mut File) -> Result<()>,
+) -> Result<()> {
+    let path = directory.join(name);
+    let mut file =
+        File::create(&path).with_context(|| format!("Failed to create {}", path.display()))?;
+    write(&mut file).with_context(|| format!("Failed to write {}", path.display()))
 }
 
 fn require_cas_data_directory(
@@ -361,11 +453,44 @@ mod tests {
             let result = Cli::try_parse_from(["crispr-cas-finder", "--in", "input.fa", flag]);
             assert!(result.is_err(), "{flag} should no longer be accepted");
         }
-        for flag in ["--vicinity", "--clustering-threshold", "--cluster"] {
-            let result =
-                Cli::try_parse_from(["crispr-cas-finder", "--in", "input.fa", flag, "100"]);
-            assert!(result.is_err(), "{flag} should no longer be accepted");
-        }
+    }
+
+    #[test]
+    fn association_and_annotation_options_are_parsed() {
+        let cli = Cli::try_parse_from([
+            "crispr-cas-finder",
+            "--in",
+            "input.fa",
+            "--vicinity",
+            "1000",
+            "--cluster",
+            "20000",
+            "--rcfowce",
+            "--gff",
+            "genes.gff",
+            "--faa",
+            "proteins.faa",
+            "--definition",
+            "general",
+        ])
+        .unwrap();
+        assert_eq!(cli.vicinity, 1000);
+        assert_eq!(cli.locus_distance, Some(20000));
+        assert!(cli.cas_only_with_crispr);
+        assert_eq!(cli.gff.as_deref(), Some(Path::new("genes.gff")));
+        assert_eq!(cli.definition.directory_stem(), "Class");
+    }
+
+    #[test]
+    fn annotation_gff_requires_a_protein_fasta() {
+        let result = Cli::try_parse_from([
+            "crispr-cas-finder",
+            "--in",
+            "input.fa",
+            "--gff",
+            "genes.gff",
+        ]);
+        assert!(result.is_err());
     }
 
     #[test]
@@ -524,7 +649,8 @@ mod tests {
         run(cli).expect("an input with no predicted CDS is valid");
 
         let report = std::fs::read_to_string(output.join("report.json")).expect("merged report");
-        let report: FullAnalysisResult = serde_json::from_str(&report).expect("parse report");
+        let report: crispr_cas_finder_core::AnalysisReport =
+            serde_json::from_str(&report).expect("parse report");
         assert!(report.cas_clusters.is_empty());
     }
 }

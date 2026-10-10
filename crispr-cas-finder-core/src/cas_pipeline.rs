@@ -21,6 +21,9 @@ pub struct ModelDefinition {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GeneRecord {
     pub id: String,
+    /// Identifier of the sequence the gene lies on.
+    #[serde(default)]
+    pub seq_id: String,
     pub protein: String,
     pub start: usize,
     pub end: usize,
@@ -619,6 +622,7 @@ mod tests {
     #[test]
     fn protein_fasta_wraps_at_sixty_ascii_residues() {
         let genes = [GeneRecord {
+            seq_id: String::new(),
             id: "gene-1".to_string(),
             protein: "A".repeat(61),
             start: 1,
@@ -637,6 +641,7 @@ mod tests {
     #[test]
     fn protein_fasta_rejects_non_ascii_residues() {
         let genes = [GeneRecord {
+            seq_id: String::new(),
             id: "bad-gene".to_string(),
             protein: "MÉT".to_string(),
             start: 1,

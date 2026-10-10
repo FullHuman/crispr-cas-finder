@@ -12,6 +12,8 @@ use log::info;
 use rayon::prelude::*;
 use std::path::Path;
 
+pub mod annotation;
+pub mod association;
 pub mod cas_pipeline;
 pub mod cas_types;
 pub mod casfinder;
@@ -21,6 +23,7 @@ pub mod detect;
 mod dna;
 pub mod io;
 pub mod repeat_db;
+pub mod report;
 pub mod types;
 
 pub use cas_pipeline::{GeneRecord, ModelDefinition};
@@ -28,9 +31,10 @@ pub use cas_types::RepliconTopology;
 pub use casparser::{CasCluster, CasGene, GeneCoordinates};
 pub use conservation::ArrayStatistics;
 pub use repeat_db::{RepeatLookup, lookup_repeat};
-pub use types::{
-    CasFinderConfig, CrisprArray, DetectionParams, FullAnalysisResult, Orientation, Repeat, Spacer,
+pub use report::{
+    Analysis, AnalysisOptions, AnalysisReport, SequenceRecord, analyze, build_report, parse_fasta,
 };
+pub use types::{CasFinderConfig, CrisprArray, DetectionParams, Orientation, Repeat, Spacer};
 
 use detect::{
     RepeatHit, check_short_crispr, cluster_repeats, extend_with_truncated_repeats, extract_spacers,
@@ -102,8 +106,10 @@ fn detect_crisprs_for_sequence(
 
     let mut arrays = Vec::new();
     for cluster in filtered_clusters {
-        if let Some(array) = process_cluster(seq_id, seq, &hits, cluster, params, min_repeat_count)
+        if let Some(mut array) =
+            process_cluster(seq_id, seq, &hits, cluster, params, min_repeat_count)
         {
+            array.id = format!("{seq_id}_CRISPR_{}", arrays.len() + 1);
             arrays.push(array);
         }
     }
@@ -270,6 +276,7 @@ fn process_cluster(
     let db_entry = repeat_db::lookup_repeat(&best_consensus);
 
     Some(CrisprArray {
+        id: String::new(),
         seq_id: seq_id.to_string(),
         start: array_start,
         end: array_end,
