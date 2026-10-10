@@ -16,6 +16,7 @@ pub mod cas_pipeline;
 pub mod cas_types;
 pub mod casfinder;
 pub mod casparser;
+pub mod conservation;
 pub mod detect;
 mod dna;
 pub mod io;
@@ -25,15 +26,16 @@ pub mod types;
 pub use cas_pipeline::{GeneRecord, ModelDefinition};
 pub use cas_types::RepliconTopology;
 pub use casparser::{CasCluster, CasGene, GeneCoordinates};
+pub use conservation::ArrayStatistics;
 pub use repeat_db::{RepeatLookup, lookup_repeat};
 pub use types::{
     CasFinderConfig, CrisprArray, DetectionParams, FullAnalysisResult, Orientation, Repeat, Spacer,
 };
 
 use detect::{
-    RepeatHit, check_short_crispr, check_spacer_similarity, cluster_repeats,
-    extend_with_truncated_repeats, extract_spacers, find_direct_repeats, foster_score,
-    get_repeat_candidates, infer_orientation, refine_cluster_with_consensus, trim_consensus,
+    RepeatHit, check_short_crispr, cluster_repeats, extend_with_truncated_repeats, extract_spacers,
+    find_direct_repeats, foster_score, get_repeat_candidates, infer_orientation,
+    refine_cluster_with_consensus, trim_consensus,
 };
 
 /// Detect CRISPR arrays in a set of sequences.
@@ -207,10 +209,19 @@ fn process_cluster(
         best_spacers = extract_spacers(&best_refined, cluster, seq, params);
     }
 
-    let spacers_pass_similarity =
-        check_spacer_similarity(&best_spacers, params.spacer_similarity_threshold);
-    // Multi-spacer: reject if ANY pairwise spacer identity >= spacer_similarity_threshold
-    if best_spacers.len() > 1 && !spacers_pass_similarity {
+    let repeat_sequences: Vec<&str> = best_refined
+        .iter()
+        .map(|hit| hit.repeat_sequence.as_str())
+        .collect();
+    let spacer_sequences: Vec<&str> = best_spacers.iter().map(String::as_str).collect();
+    let statistics =
+        conservation::array_statistics(&best_consensus, &repeat_sequences, &spacer_sequences);
+
+    // Multi-spacer: reject when the aligned spacers are on average at least
+    // `spacer_similarity_threshold` percent identical (tandem repeats).
+    if best_spacers.len() > 1
+        && statistics.spacer_average_identity >= params.spacer_similarity_threshold
+    {
         return None;
     }
     // Single-spacer: reject if DR aligns too well against the spacer
@@ -218,11 +229,7 @@ fn process_cluster(
         return None;
     }
 
-    let spacer_count = best_spacers.len();
-    // Similar multi-spacer candidates have already been rejected. This detector
-    // currently reports level 1 for short arrays and level 4 for longer arrays;
-    // it does not implement separate level-2/3 conservation classifications.
-    let evidence_level = if spacer_count <= 3 { 1 } else { 4 };
+    let evidence_level = conservation::evidence_level(best_spacers.len(), &statistics);
 
     if evidence_level < params.min_evidence_level {
         return None;
@@ -270,6 +277,7 @@ fn process_cluster(
         repeats,
         spacers,
         evidence_level,
+        statistics,
         orientation,
         repeat_id: db_entry.repeat_id,
         crispr_direction: db_entry.crispr_direction,

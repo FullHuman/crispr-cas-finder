@@ -1,7 +1,5 @@
 use crate::dna::reverse_complement;
 use crate::types::{DetectionParams, Orientation};
-use bio::alignment::AlignmentOperation;
-use bio::alignment::pairwise::{Aligner, Scoring};
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::hash::{BuildHasherDefault, Hasher};
@@ -1005,7 +1003,11 @@ pub fn extend_with_truncated_repeats(
         (repeat_length as f64 * params.max_spacer_to_repeat_ratio).ceil() as usize;
     let spacer_lengths: Vec<usize> = repeats
         .windows(2)
-        .map(|pair| pair[1].pos1.saturating_sub(pair[0].pos1 + pair[0].repeat_length))
+        .map(|pair| {
+            pair[1]
+                .pos1
+                .saturating_sub(pair[0].pos1 + pair[0].repeat_length)
+        })
         .collect();
     let typical_spacer_length = spacer_lengths.iter().sum::<usize>() / spacer_lengths.len();
 
@@ -1066,50 +1068,6 @@ pub fn extend_with_truncated_repeats(
         }
     }
     added
-}
-
-/// Re-scan the cluster region using the consensus DR (fuzznuc-style).
-///
-/// Mirrors the Perl pipeline's second pass: after choosing the consensus DR
-/// via `choose_consensus_repeat`, Perl runs fuzznuc through the ±500 bp cluster
-/// window using `err = floor(DRlength / DRtrunMism)` mismatches, then
-/// re-derives the DR hit list and spacers from those fresh positions.
-/// Spacers whose length falls outside `[min_spacer_to_repeat_ratio × DRlen, max_spacer_to_repeat_ratio ×
-/// DRlen]` are dropped, matching Perl's `definespacers` filter.
-///
-/// Compute pairwise percent identity with global alignment.
-///
-/// Unlike the fixed-length Hamming helper, spacer comparisons must account for
-/// insertions, deletions, and unequal lengths, so both implementations remain.
-fn percent_identity(a: &str, b: &str) -> f64 {
-    let scoring = Scoring::from_scores(-5, -1, 1, -1);
-    let mut aligner = Aligner::with_scoring(scoring);
-    let al = aligner.global(a.as_bytes(), b.as_bytes());
-    let matches = al
-        .operations
-        .iter()
-        .filter(|&&op| op == AlignmentOperation::Match)
-        .count();
-    let len = al.operations.len();
-    if len == 0 {
-        0.0
-    } else {
-        matches as f64 / len as f64 * 100.0
-    }
-}
-
-/// Check that no two spacers exceed similarity threshold; returns true if pass
-pub fn check_spacer_similarity(spacers: &[String], threshold: f64) -> bool {
-    for left_index in 0..spacers.len() {
-        for right_index in (left_index + 1)..spacers.len() {
-            let pairwise_identity_percent =
-                percent_identity(&spacers[left_index], &spacers[right_index]);
-            if pairwise_identity_percent >= threshold {
-                return false;
-            }
-        }
-    }
-    true
 }
 
 /// Perl `check_short_crispr`: for 1-spacer arrays, align the DR consensus
@@ -1625,35 +1583,6 @@ mod tests {
         assert_eq!(most_frequent_repeat_sequence(&refs), Some("AAAA"));
     }
 
-    // ── check_spacer_similarity ───────────────────────────────────────────────
-
-    #[test]
-    fn spacer_similarity_distinct_spacers_pass() {
-        // Completely different sequences → low identity → passes
-        let spacers = vec![
-            "ACGTACGTACGTACGTACGTACGTACGT".to_string(),
-            "TTTTTTTTTTTTTTTTTTTTTTTTTTTT".to_string(),
-        ];
-        assert!(check_spacer_similarity(&spacers, 60.0));
-    }
-
-    #[test]
-    fn spacer_similarity_identical_spacers_fail() {
-        // 100 % identity → above any threshold → fails
-        let spacers = vec![
-            "ACGTACGTACGTACGT".to_string(),
-            "ACGTACGTACGTACGT".to_string(),
-        ];
-        assert!(!check_spacer_similarity(&spacers, 60.0));
-    }
-
-    #[test]
-    fn spacer_similarity_single_spacer_passes() {
-        // Nothing to compare against → trivially passes
-        let spacers = vec!["ACGTACGTACGTACGT".to_string()];
-        assert!(check_spacer_similarity(&spacers, 60.0));
-    }
-
     // ── find_direct_repeats: core pipeline ────────────────────────────────────────
     //
     // Synthetic CRISPR layout (1-based coords after 100-bp flank):
@@ -1799,8 +1728,7 @@ mod tests {
         let consensus = std::str::from_utf8(DR).unwrap();
         let mut repeats = hits_at(&seq, &[101, 161, 221]);
 
-        let added =
-            extend_with_truncated_repeats(consensus, &mut repeats, &seq, &default_params());
+        let added = extend_with_truncated_repeats(consensus, &mut repeats, &seq, &default_params());
 
         assert_eq!(added, 1);
         assert_eq!(repeats.last().unwrap().pos1, 281);
@@ -1817,8 +1745,7 @@ mod tests {
         let consensus = std::str::from_utf8(DR).unwrap();
         let mut repeats = hits_at(&seq, &[161, 221, 281]);
 
-        let added =
-            extend_with_truncated_repeats(consensus, &mut repeats, &seq, &default_params());
+        let added = extend_with_truncated_repeats(consensus, &mut repeats, &seq, &default_params());
 
         assert_eq!(added, 1);
         assert_eq!(repeats[0].pos1, 101);
@@ -1832,8 +1759,7 @@ mod tests {
         let consensus = std::str::from_utf8(DR).unwrap();
         let mut repeats = hits_at(&seq, &[101, 161, 221]);
 
-        let added =
-            extend_with_truncated_repeats(consensus, &mut repeats, &seq, &default_params());
+        let added = extend_with_truncated_repeats(consensus, &mut repeats, &seq, &default_params());
 
         assert_eq!(added, 0);
         assert_eq!(repeats.len(), 3);

@@ -83,7 +83,9 @@ pub struct Cli {
     #[arg(long, alias = "levelMin", value_name = "INT", default_value_t = 1)]
     min_evidence_level: usize,
     #[arg(long, alias = "forceDetection", action = clap::ArgAction::SetTrue)]
-    #[arg(help = "Favour repeats matching the --foster-repeat-* settings and use --foster-repeat-length as the minimum repeat length")]
+    #[arg(
+        help = "Favour repeats matching the --foster-repeat-* settings and use --foster-repeat-length as the minimum repeat length"
+    )]
     force_detection: bool,
     #[arg(
         long,
@@ -110,7 +112,9 @@ pub struct Cli {
         value_name = "FLOAT",
         default_value_t = 4.0
     )]
-    #[arg(help = "Percentage of mismatches allowed in the matched half of a truncated terminal repeat")]
+    #[arg(
+        help = "Percentage of mismatches allowed in the matched half of a truncated terminal repeat"
+    )]
     truncated_mismatch_percent: f64,
     #[arg(long = "cas", action = clap::ArgAction::SetTrue)]
     launch_cas_finder: bool,

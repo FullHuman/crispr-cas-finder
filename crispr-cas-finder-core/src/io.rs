@@ -97,6 +97,7 @@ mod tests {
             consensus_repeat: "ACGT".into(),
             orientation: Orientation::Unknown,
             evidence_level: 1,
+            statistics: Default::default(),
             repeat_id: "db=x;y".into(),
             crispr_direction: "+".into(),
         };

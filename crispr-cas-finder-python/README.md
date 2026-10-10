@@ -106,6 +106,6 @@ Both share the same three fields: `start` (int), `end` (int), `sequence` (str).
 
 ## Experimental status
 
-The detector currently emits evidence levels 1 and 4; it does not implement the
-original level-2/3 conservation classifications. Broader biological validation is
+The detector emits evidence levels 1 to 4 using the CRISPRCasFinder thresholds
+with an internal aligner in place of MUSCLE. Broader biological validation is
 ongoing. See the [limitations and validation notes](https://github.com/FullHuman/crispr-cas-finder/blob/main/LIMITATIONS.md).

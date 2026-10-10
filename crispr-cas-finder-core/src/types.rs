@@ -61,6 +61,9 @@ pub struct CrisprArray {
     pub spacers: Vec<Spacer>,
     /// Evidence level (1–4). Higher is more confident.
     pub evidence_level: usize,
+    /// Conservation scores and spacer length statistics behind the level.
+    #[serde(default)]
+    pub statistics: crate::conservation::ArrayStatistics,
     /// Potential orientation inferred from flanking AT% content.
     pub orientation: Orientation,
     /// Canonical repeat ID from the CRISPRdb repeat database

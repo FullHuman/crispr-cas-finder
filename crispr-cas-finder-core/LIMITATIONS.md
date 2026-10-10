@@ -10,10 +10,16 @@ specificity, and performance comparisons remain ongoing.
 - Cas detection supports **genetic code 11 only**. Other codes return an error
   in the CLI, native Cas API, and WASM API. Do not use this release to analyze
   Cas proteins in organisms requiring another code.
-- Evidence levels are experimental: arrays with at most three spacers receive
-  level 1 and longer arrays receive level 4 after filtering. The original
-  CRISPRCasFinder level-2/3 conservation classifications are not implemented.
-  Selecting minimum evidence 2 or 3 therefore has the same effect as selecting 4.
+- Evidence levels follow the CRISPRCasFinder rules: level 1 for at most three
+  spacers, level 2 when repeat conservation is below 70, level 3 when more than
+  8% of aligned spacer columns are identical, and level 4 otherwise. Repeats and
+  spacers are aligned by an internal center-star aligner, not MUSCLE, so scores
+  near a threshold can differ from upstream. An array is rejected when its
+  aligned spacers are on average at least `--spacer-similarity-threshold`
+  percent identical; a residue facing a gap counts as a mismatch.
+- `--force-detection` and `--better-detect-truncated` are reimplemented rather
+  than copied: fostered start/end patterns are IUPAC codes (`.` = any base), and
+  truncated detection adds at most one terminal repeat per side.
 - Gene prediction uses Orphos 0.3.0. Cas detection uses the bundled CasFinder
   2.0.3 definitions/profiles and an internal Rust HMMER implementation.
 - Cas hits are clustered per replicon and evaluated per locus, with linear or
