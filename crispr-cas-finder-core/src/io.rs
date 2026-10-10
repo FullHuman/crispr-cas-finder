@@ -466,6 +466,36 @@ pub fn write_cas_proteins_fasta(
     Ok(())
 }
 
+/// Tab-separated table of the HMM hits that passed the thresholds.
+pub fn write_cas_hits_tsv(
+    hits: &[crate::cas_types::HmmerHit],
+    writer: &mut impl Write,
+) -> Result<()> {
+    let mut writer = BufWriter::new(writer);
+    writeln!(
+        writer,
+        "profile\tprotein_id\tprotein_length\tscore\tevalue\tprofile_coverage\t\
+         protein_coverage\tmatch_start\tmatch_end"
+    )?;
+    for hit in hits {
+        writeln!(
+            writer,
+            "{}\t{}\t{}\t{:.1}\t{:.2e}\t{:.3}\t{:.3}\t{}\t{}",
+            tsv_field(&hit.gene_name),
+            tsv_field(&hit.id),
+            hit.seq_len,
+            hit.score,
+            hit.i_evalue,
+            hit.profile_coverage,
+            hit.seq_coverage,
+            hit.begin_match,
+            hit.end_match,
+        )?;
+    }
+    writer.flush()?;
+    Ok(())
+}
+
 /// Protein FASTA of every annotated gene, with Prodigal-style headers.
 pub fn write_proteome_fasta(proteome: &Proteome, writer: &mut impl Write) -> Result<()> {
     let mut writer = BufWriter::new(writer);

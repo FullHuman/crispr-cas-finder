@@ -1,7 +1,7 @@
 use crispr_cas_finder_core::{
-    AnalysisOptions, CasFinderConfig, CrisprArray as CoreCrisprArray, DetectionParams,
-    Orientation, Repeat as CoreRepeat, RepliconTopology, Spacer as CoreSpacer,
-    detect_crisprs_in_fasta_path, detect_crisprs_in_fasta_str, parse_fasta,
+    AnalysisOptions, CasFinderConfig, CrisprArray as CoreCrisprArray, DetectionParams, Orientation,
+    Repeat as CoreRepeat, RepliconTopology, Spacer as CoreSpacer, detect_crisprs_in_fasta_path,
+    detect_crisprs_in_fasta_str, parse_fasta,
 };
 use pyo3::exceptions::{PyFileNotFoundError, PyIOError, PyValueError};
 use pyo3::prelude::*;
@@ -160,10 +160,7 @@ impl CrisprArray {
         dict.set_item("mean_spacer_length", statistics.mean_spacer_length)?;
         dict.set_item("spacer_length_std_dev", statistics.spacer_length_std_dev)?;
         dict.set_item("exact_repeat_count", statistics.exact_repeat_count)?;
-        dict.set_item(
-            "has_duplicated_spacers",
-            statistics.has_duplicated_spacers,
-        )?;
+        dict.set_item("has_duplicated_spacers", statistics.has_duplicated_spacers)?;
         Ok(dict)
     }
 
@@ -382,8 +379,14 @@ fn find_crispr_arrays_in_file(
     min_evidence_level: usize,
 ) -> PyResult<Vec<CrisprArray>> {
     let params = DetectionParams {
-        min_repeat_length, max_repeat_length, min_spacer_length, max_spacer_length,
-        no_mismatch, min_spacer_count, min_evidence_level, ..DetectionParams::default()
+        min_repeat_length,
+        max_repeat_length,
+        min_spacer_length,
+        max_spacer_length,
+        no_mismatch,
+        min_spacer_count,
+        min_evidence_level,
+        ..DetectionParams::default()
     };
     let arrays = detect_crisprs_in_fasta_path(&PathBuf::from(path), &params).map_err(|error| {
         if let Some(io) = error.downcast_ref::<std::io::Error>() {
@@ -412,12 +415,12 @@ fn find_crispr_arrays_in_file(
 /// fasta_content : str
 ///     Multi-sequence FASTA text.
 /// cas : bool, optional
-///     Also detect Cas systems. Requires ``cas_models_dir`` and
-///     ``cas_profiles_dir``. Default: ``False``.
+///     Also detect Cas systems. Requires ``cas_models_dir``. Default: ``False``.
 /// cas_models_dir : str, optional
-///     Directory of CasFinder model definitions (XML files).
+///     Directory of CasFinder model definitions (XML files), or a MacSyFinder
+///     model package such as CasFinder 3.
 /// cas_profiles_dir : str, optional
-///     Directory of CasFinder HMM profiles.
+///     Directory of CasFinder HMM profiles. Not needed with a model package.
 /// gff, faa : str, optional
 ///     GFF3 annotation and matching protein FASTA to use instead of
 ///     predicting genes. Must be given together.
@@ -503,12 +506,15 @@ fn analyze<'py>(
     min_evidence_level: usize,
 ) -> PyResult<Bound<'py, PyAny>> {
     let cas_config = if cas {
-        let (Some(cas_models_dir), Some(cas_profiles_dir)) = (cas_models_dir, cas_profiles_dir)
-        else {
-            return Err(PyValueError::new_err(
-                "cas=True requires cas_models_dir and cas_profiles_dir",
-            ));
+        let Some(cas_models_dir) = cas_models_dir else {
+            return Err(PyValueError::new_err("cas=True requires cas_models_dir"));
         };
+        // A MacSyFinder model package carries its own profiles.
+        if cas_profiles_dir.is_none() && !cas_models_dir.join("definitions").is_dir() {
+            return Err(PyValueError::new_err(
+                "cas=True requires cas_profiles_dir unless cas_models_dir is a model package",
+            ));
+        }
         Some(CasFinderConfig {
             metagenome,
             auto_metagenome_below,
@@ -522,7 +528,7 @@ fn analyze<'py>(
                 RepliconTopology::Circular
             },
             cas_models_dir: Some(cas_models_dir),
-            cas_profiles_dir: Some(cas_profiles_dir),
+            cas_profiles_dir,
             ..CasFinderConfig::default()
         })
     } else {
@@ -543,6 +549,7 @@ fn analyze<'py>(
         cas_only_with_crispr,
         vicinity,
         locus_distance,
+        ..AnalysisOptions::default()
     };
 
     let sequences = parse_fasta(fasta_content.as_bytes())

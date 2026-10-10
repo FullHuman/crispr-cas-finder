@@ -245,8 +245,8 @@ def analyze(
     Returns the report as a dictionary with the same structure as the
     command-line tool's ``report.json``: ``tool``, ``parameters``,
     ``sequences``, ``crisprs``, ``cas_clusters``, ``associations``, ``loci``
-    and ``summary``. ``cas=True`` requires ``cas_models_dir`` and
-    ``cas_profiles_dir``.
+    and ``summary``. ``cas=True`` requires ``cas_models_dir``, and
+    ``cas_profiles_dir`` unless the former is a MacSyFinder model package.
 
     Raises
     ------

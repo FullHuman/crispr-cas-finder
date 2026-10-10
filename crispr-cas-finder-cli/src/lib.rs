@@ -211,6 +211,9 @@ pub struct Cli {
     #[arg(long = "min-cas-score", value_name = "FLOAT", default_value_t = 25.0)]
     min_cas_score: f64,
     #[arg(long = "cas-models-dir", value_name = "DIR")]
+    #[arg(
+        help = "Directory of Cas model definitions, or a MacSyFinder model package such as CasFinder 3"
+    )]
     cas_models_dir: Option<String>,
     #[arg(long = "cas-profiles-dir", value_name = "DIR")]
     cas_profiles_dir: Option<String>,
@@ -289,9 +292,14 @@ impl Cli {
     }
 
     fn casfinder_config(&self) -> Result<PreparedCasConfig> {
-        let bundled_data = (self.cas_models_dir.is_none() || self.cas_profiles_dir.is_none())
-            .then(bundled_data::extract)
-            .transpose()?;
+        // A MacSyFinder model package carries its own profiles.
+        let models_are_a_package = self
+            .cas_models_dir
+            .as_ref()
+            .is_some_and(|directory| Path::new(directory).join("definitions").is_dir());
+        let needs_bundled_data = self.cas_models_dir.is_none()
+            || (self.cas_profiles_dir.is_none() && !models_are_a_package);
+        let bundled_data = needs_bundled_data.then(bundled_data::extract).transpose()?;
         let data_root = bundled_data.as_ref().map(|directory| directory.path());
 
         let cas_models_dir = self.cas_models_dir.as_ref().map(PathBuf::from).or_else(|| {
@@ -305,9 +313,15 @@ impl Cli {
             .as_ref()
             .map(PathBuf::from)
             .or_else(|| {
-                data_root
-                    .as_ref()
-                    .map(|root| root.join("CASprofiles-2.0.3"))
+                if models_are_a_package {
+                    cas_models_dir
+                        .as_ref()
+                        .map(|directory| directory.join("profiles"))
+                } else {
+                    data_root
+                        .as_ref()
+                        .map(|root| root.join("CASprofiles-2.0.3"))
+                }
             });
 
         let cas_models_dir = require_cas_data_directory(
@@ -448,6 +462,9 @@ pub fn run(cli: Cli) -> Result<()> {
         create_dir_all(&annotation_dir)?;
         write_output(&annotation_dir, "proteins.faa", |file| {
             io::write_proteome_fasta(proteome, file)
+        })?;
+        write_output(&annotation_dir, "cas_hits.tsv", |file| {
+            io::write_cas_hits_tsv(&analysis.cas_hits, file)
         })?;
         std::fs::write(
             annotation_dir.join("genes.gff"),

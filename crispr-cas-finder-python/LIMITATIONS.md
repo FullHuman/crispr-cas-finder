@@ -24,16 +24,29 @@ specificity, and performance comparisons remain ongoing.
   than 100 kb are predicted in metagenomic mode, as in CRISPRCasFinder;
   `--auto-metagenome-below 0` disables this. A GFF3 annotation and protein FASTA
   can be supplied instead (`--gff`, `--faa`). Prokka is not supported.
-- Cas detection uses the bundled CasFinder 2.0.3 definitions/profiles and an
-  internal Rust HMMER implementation. Current CRISPRCasFinder releases use
-  MacSyFinder 2 with CasFinder 3.1 models, which are not supported yet, so Cas
-  results can differ from a current upstream installation.
-- Cas hits are clustered per replicon and evaluated per locus, with linear or
-  circular topology. The evaluator does not implement upstream `loner`,
+- Cas detection uses an internal Rust HMMER implementation. Bit scores can
+  differ from HMMER 3.4 by a few tenths of a bit and, rarely, one domain is
+  reported where `hmmsearch` reports two, which can matter for a hit sitting
+  exactly on a threshold.
+- Two generations of Cas models are supported. The bundled default is CasFinder
+  2.0.3. CasFinder 3 packages (MacSyFinder 2 format) are loaded from a directory
+  given with `--cas-models-dir`; they are licensed CC BY-NC-SA 4.0 and are not
+  distributed with this project. The browser application uses CasFinder 2.0.3.
+- CasFinder 3 definitions are evaluated with MacSyFinder 2 rules reimplemented in
+  Rust: gathering cutoffs, one best profile per protein, clustering with
+  gene-specific spacing, quorum, scoring, and the best combination of
+  non-conflicting systems. `loner`, `multi_system` and `multi_loci` are not
+  implemented and a package using them is rejected; CasFinder 3.1.0 uses none.
+  `--definition` and `--min-cas-score` do not apply to these packages.
+- CasFinder 2.0.3 definitions are evaluated by the original evaluator of this
+  project, which clusters hits per replicon and does not implement `loner`,
   `multi_system`, `multi_model`, `multi_loci`, or gene-specific
-  `inter_gene_max_space` semantics. Parsing these XML attributes does not imply
-  that they affect evaluation. Some bundled models use `loner`, so even default
-  model results can differ from MacSyFinder/CRISPRCasFinder.
+  `inter_gene_max_space`. Some of these models use `loner`, so results can
+  differ from MacSyFinder 1.
+- Every sequence is searched as an ordered replicon. CRISPRCasFinder runs
+  MacSyFinder in unordered mode for metagenomes and for sequences shorter than
+  100 kb, which does not produce the file it reads Cas systems from; this
+  project reports Cas systems on those sequences.
 - An array is reported near a Cas system when the distance between them is at
   most `--vicinity` bp. Upstream instead tests whether the array boundary
   shifted by the vicinity falls inside the system, so the two lists can differ.
@@ -59,6 +72,7 @@ specificity, and performance comparisons remain ongoing.
 | E. coli NC_000913.3 CRISPRdb coordinates | Tracked `crispr-cas-finder-cli/data/ecoli.fasta`; default detection options; the four arrays listed for NC_000913 in CRISPRCasFinder's `CRISPR_crisprdb.csv` | Exact start, end and spacer count of each of the four arrays | One genome; a fifth, level-1 array reported here is not in CRISPRdb |
 | E. coli NC_000913.3 array comparison | Tracked `crispr-cas-finder-cli/data/ecoli.fasta`; default detection options; reference positions attributed to CRISPRCasFinder 4.2.30 in the existing regression | Five reference regions; repeat positions within 10 bp, cluster overlap within 200 bp; high-evidence spacer count within 2 | Uses the existing frozen expectations, not a fresh upstream run or a false-positive benchmark |
 | E. coli native/browser comparison | Same FASTA; genetic code 11; circular topology; SubTyping definitions; bundled CasFinder 2.0.3 | Report equality across CLI, Chromium, WebKit, threaded and sequential search, with a 1e-4 relative tolerance on floating-point values between native and browser; baseline five arrays and one type I-E system | Agreement among builds of this implementation on one genome |
+| CasFinder 3.1.0 versus MacSyFinder 2.1.6 | Eight bacterial genomes (E. coli K-12, three Erwinia amylovora, four other Enterobacterales, up to six sequences each); proteins predicted by this project; MacSyFinder run with the options CRISPRCasFinder passes | Identical systems: model, proteins, matched profiles, score and wholeness. HMM hits identical except one domain boundary | Run locally, not in CI, because the models cannot be redistributed. One genus-level clade; six systems of type I-E or I and two genomes without a system. An opt-in test (`CASFINDER3_DIR`) repeats the E. coli case |
 | HMMER Cas5 oracle | HMMER 3.4 `hmmsearch` frozen output; TIGR01868/Cas5_0_IE versus CP014688.1_298 | Sequence/domain scores, coordinates, bias, and alignment accuracy | One independently generated HMM/sequence oracle |
 | HMM filter references | Synthetic profiles and sequences in `hmmer-core/tests/filter_reference.rs` | SIMD filters compared with independent scalar calculations | Algorithmic regression cases, not biological prevalence or accuracy |
 | Python API | Synthetic repeat array and invalid inputs | Installed-wheel file/string API agreement and errors | Binding behavior, not additional biological validation |

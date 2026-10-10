@@ -22,6 +22,7 @@ use crate::hmmer_core::{
     sequence::DigitalSequence,
 };
 use crate::hmmer_io::HmmFile;
+use crate::macsy::{self, HitFiltering, HitWeights, ModelConfig};
 use crate::types::CasFinderConfig;
 use anyhow::{Context, Result};
 use bio::io::fasta::Reader as FastaReader;
@@ -36,10 +37,117 @@ pub const MIN_PROFILE_COVERAGE: f64 = 0.4;
 /// Match HMMER's default per-domain inclusion threshold.
 pub const MAX_DOMAIN_INCLUSION_EVALUE: f64 = 0.01;
 
+/// Hit thresholds for CasFinder 2 definitions: a per-domain E-value and a
+/// profile coverage, without sequence-level or gathering cutoffs.
+pub fn legacy_hit_filtering() -> HitFiltering {
+    HitFiltering {
+        e_value_search: f64::INFINITY,
+        i_evalue_sel: MAX_DOMAIN_INCLUSION_EVALUE,
+        coverage_profile: MIN_PROFILE_COVERAGE,
+        cut_ga: false,
+    }
+}
+
+/// Apply the settings CRISPRCasFinder passes to MacSyFinder on its command
+/// line, which take precedence over a package's `model_conf.xml`.
+pub fn crisprcasfinder_model_config(mut config: ModelConfig) -> ModelConfig {
+    config.weights.accessory = 1.0;
+    config.weights.exchangeable = 1.0;
+    config.weights.redundancy_penalty = 1.0;
+    config.filtering.coverage_profile = MIN_PROFILE_COVERAGE;
+    config
+}
+
+/// Model definitions with the directory of their profiles and the settings
+/// to search and score them with.
+struct ModelSet {
+    registry: ModelRegistry,
+    model_names: Vec<String>,
+    profiles_dir: PathBuf,
+    filtering: HitFiltering,
+    weights: HitWeights,
+}
+
+/// Load the configured models.
+///
+/// `cas_models_dir` is either a directory of definition files or a
+/// MacSyFinder model package (a directory with `definitions/`, `profiles/`
+/// and optionally `model_conf.xml`), in which case `cas_profiles_dir` may
+/// be omitted.
+fn load_model_set(config: &CasFinderConfig) -> Result<ModelSet> {
+    let models_dir = resolve_models_dir(config)?;
+    let package_definitions = models_dir.join("definitions");
+    let is_package = package_definitions.is_dir();
+    let (definitions_dir, family) = if is_package {
+        let family = models_dir
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "CasFinder".to_string());
+        (package_definitions, family)
+    } else {
+        (models_dir.clone(), "CASFinder".to_string())
+    };
+    let (registry, model_names) = build_model_registry_from_dir(&definitions_dir, &family)?;
+    if model_names.is_empty() {
+        anyhow::bail!(
+            "No CAS model definitions found in {}",
+            definitions_dir.display()
+        );
+    }
+
+    let models: Vec<_> = model_names
+        .iter()
+        .filter_map(|name| registry.get(name))
+        .collect();
+    let macsyfinder2 = models
+        .iter()
+        .filter(|model| model.is_macsyfinder2())
+        .count();
+    if macsyfinder2 != 0 && macsyfinder2 != models.len() {
+        anyhow::bail!(
+            "{} mixes MacSyFinder 2 definitions with older ones",
+            definitions_dir.display()
+        );
+    }
+    let (filtering, weights) = if macsyfinder2 > 0 {
+        for model in &models {
+            macsy::check_supported(model).map_err(anyhow::Error::msg)?;
+        }
+        let conf_path = models_dir.join("model_conf.xml");
+        let package_config = if is_package && conf_path.is_file() {
+            let content = fs::read_to_string(&conf_path)
+                .with_context(|| format!("Cannot read {}", conf_path.display()))?;
+            ModelConfig::parse(&content).map_err(anyhow::Error::msg)?
+        } else {
+            ModelConfig::default()
+        };
+        let model_config = crisprcasfinder_model_config(package_config);
+        (model_config.filtering, model_config.weights)
+    } else {
+        (legacy_hit_filtering(), HitWeights::default())
+    };
+
+    let profiles_dir = match &config.cas_profiles_dir {
+        Some(directory) => directory.clone(),
+        None if is_package => models_dir.join("profiles"),
+        None => resolve_profiles_dir(config)?,
+    };
+    Ok(ModelSet {
+        registry,
+        model_names,
+        profiles_dir,
+        filtering,
+        weights,
+    })
+}
+
 /// Outcome of Cas detection: the annotated proteins and the systems found.
 #[derive(Debug, Default)]
 pub struct CasAnalysis {
     pub proteome: Proteome,
+    /// Every HMM hit that passed the thresholds, in profile then protein
+    /// order, before hits are assigned to models.
+    pub hits: Vec<HmmerHit>,
     pub systems: Vec<DetectedSystem>,
     pub clusters: Vec<CasCluster>,
 }
@@ -98,46 +206,48 @@ pub fn detect_cas_systems(
         .collect();
     info!("Loaded {} protein sequences", protein_sequences.len());
 
-    let models_dir = resolve_models_dir(config)?;
-    let profiles_dir = resolve_profiles_dir(config)?;
-    let (registry, model_fully_qualified_names) = build_model_registry_from_dir(&models_dir)?;
-    if model_fully_qualified_names.is_empty() {
-        anyhow::bail!("No CAS model definitions found in {}", models_dir.display());
-    }
-    let needed_profiles = collect_needed_profiles(&registry, &model_fully_qualified_names);
+    let model_set = load_model_set(config)?;
+    let needed_profiles = collect_needed_profiles(&model_set.registry, &model_set.model_names);
     if needed_profiles.is_empty() {
-        anyhow::bail!(
-            "CAS model definitions in {} do not reference any HMM profiles",
-            models_dir.display()
-        );
+        anyhow::bail!("CAS model definitions do not reference any HMM profiles");
     }
     info!(
         "Need {} HMM profiles for {} models",
         needed_profiles.len(),
-        model_fully_qualified_names.len()
+        model_set.model_names.len()
     );
 
     let all_hits = run_hmm_search(
-        &profiles_dir,
+        &model_set.profiles_dir,
         &needed_profiles,
         &protein_sequences,
         &amino_alphabet,
         config.workers,
+        &model_set.filtering,
     )?;
     info!("HMM search found hits for {} profiles", all_hits.len());
 
     let (systems, clusters) = finalize_systems(
-        &registry,
-        &model_fully_qualified_names,
+        &model_set.registry,
+        &model_set.model_names,
         &all_hits,
         &proteome,
         config.replicon_topology,
         config.min_best_hit_score,
+        &model_set.weights,
     );
     info!("CasFinder found {} systems", systems.len());
 
+    let mut profile_names: Vec<&String> = all_hits.keys().collect();
+    profile_names.sort_unstable();
+    let hits = profile_names
+        .into_iter()
+        .flat_map(|profile| all_hits[profile].iter().cloned())
+        .collect();
+
     Ok(CasAnalysis {
         proteome,
+        hits,
         systems,
         clusters,
     })
@@ -174,8 +284,12 @@ fn load_proteome(
     )
 }
 
-/// Cluster hits, pick the best non-overlapping systems, drop low-confidence
-/// ones and attach genomic coordinates. Shared by native and WASM callers.
+/// Cluster hits, pick the best non-overlapping systems and attach genomic
+/// coordinates. Shared by native and WASM callers.
+///
+/// MacSyFinder 2 definitions are evaluated with MacSyFinder 2 rules and
+/// `weights`. Older definitions use the original evaluator, where a system
+/// also needs one hit scoring at least `min_best_hit_score`.
 pub fn finalize_systems(
     registry: &ModelRegistry,
     model_fully_qualified_names: &[String],
@@ -183,18 +297,37 @@ pub fn finalize_systems(
     proteome: &Proteome,
     replicon_topology: RepliconTopology,
     min_best_hit_score: f64,
+    weights: &HitWeights,
 ) -> (Vec<DetectedSystem>, Vec<CasCluster>) {
-    let mut systems = evaluate_detected_systems(
-        registry,
-        model_fully_qualified_names,
-        all_hits,
-        &proteome.replicons,
-        replicon_topology,
-    );
-    if systems.len() > 1 {
-        systems = select_best_solution(systems);
-    }
-    filter_low_confidence_systems(&mut systems, min_best_hit_score);
+    let mut models: Vec<_> = model_fully_qualified_names
+        .iter()
+        .filter_map(|name| registry.get(name))
+        .collect();
+    let systems = if models.first().is_some_and(|model| model.is_macsyfinder2()) {
+        // MacSyFinder evaluates models in name order.
+        models.sort_by(|left, right| left.name.cmp(&right.name));
+        let candidates = macsy::find_systems(
+            &models,
+            all_hits,
+            &proteome.replicons,
+            replicon_topology,
+            weights,
+        );
+        macsy::best_solution(candidates, &models)
+    } else {
+        let mut systems = evaluate_detected_systems(
+            registry,
+            model_fully_qualified_names,
+            all_hits,
+            &proteome.replicons,
+            replicon_topology,
+        );
+        if systems.len() > 1 {
+            systems = select_best_solution(systems);
+        }
+        filter_low_confidence_systems(&mut systems, min_best_hit_score);
+        systems
+    };
 
     let gene_map = gene_coordinates_from_records(&proteome.genes);
     let clusters = from_search_results_with_gene_map(
@@ -276,8 +409,11 @@ fn resolve_profiles_dir(config: &CasFinderConfig) -> Result<PathBuf> {
 // ---------------------------------------------------------------------------
 
 /// Build a ModelRegistry from CAS XML definitions on disk.
-fn build_model_registry_from_dir(models_dir: &Path) -> Result<(ModelRegistry, Vec<String>)> {
-    let family = "CASFinder".to_string();
+fn build_model_registry_from_dir(
+    models_dir: &Path,
+    family: &str,
+) -> Result<(ModelRegistry, Vec<String>)> {
+    let family = family.to_string();
     let mut models = Vec::new();
 
     let mut model_paths = fs::read_dir(models_dir)
@@ -324,6 +460,7 @@ fn run_hmm_search(
     protein_sequences: &[DigitalSequence],
     alphabet: &Alphabet,
     workers: usize,
+    filtering: &HitFiltering,
 ) -> Result<HashMap<String, Vec<HmmerHit>>> {
     let mut all_hits: HashMap<String, Vec<HmmerHit>> = HashMap::new();
     let mut profile_names: Vec<String> = needed_profiles.iter().cloned().collect();
@@ -340,7 +477,13 @@ fn run_hmm_search(
         profile_names
             .par_iter()
             .map(|profile_name| {
-                search_profile_hits(profiles_dir, profile_name, protein_sequences, alphabet)
+                search_profile_hits(
+                    profiles_dir,
+                    profile_name,
+                    protein_sequences,
+                    alphabet,
+                    filtering,
+                )
             })
             .collect::<Vec<_>>()
     });
@@ -359,6 +502,7 @@ fn search_profile_hits(
     profile_name: &str,
     protein_sequences: &[DigitalSequence],
     alphabet: &Alphabet,
+    filtering: &HitFiltering,
 ) -> Result<Option<(String, Vec<HmmerHit>)>> {
     let hmm_path = profiles_dir.join(format!("{}.hmm", profile_name));
     if !hmm_path.is_file() {
@@ -381,19 +525,26 @@ fn search_profile_hits(
         &hmm,
         protein_sequences,
         alphabet,
+        filtering,
     )?;
     Ok((!profile_hits.is_empty()).then(|| (profile_name.to_string(), profile_hits)))
 }
 
 /// Search one parsed HMM profile against all proteins and return the
-/// domains passing the inclusion E-value and profile-coverage thresholds,
-/// in protein order. Shared by native and WASM callers.
+/// domains passing `filtering`, in protein order. Shared by native and WASM
+/// callers.
+///
+/// With `cut_ga` and a profile carrying gathering cutoffs, the sequence and
+/// domain bit scores must reach them, as with `hmmsearch --cut_ga`;
+/// otherwise the sequence E-value must not exceed `e_value_search`. Domains
+/// must also pass `i_evalue_sel` and `coverage_profile`.
 pub fn search_hmm_profile(
     profile_name: &str,
     hmm_alphabet: &Alphabet,
     hmm: &Hmm,
     protein_sequences: &[DigitalSequence],
     alphabet: &Alphabet,
+    filtering: &HitFiltering,
 ) -> Result<Vec<HmmerHit>> {
     if hmm_alphabet.kind != alphabet.kind || hmm_alphabet.canonical_size != alphabet.canonical_size
     {
@@ -408,6 +559,7 @@ pub fn search_hmm_profile(
     if num_nodes == 0 {
         anyhow::bail!("HMM profile '{}' contains no model nodes", profile_name);
     }
+    let gathering_cutoffs = hmm.cutoffs.gathering.filter(|_| filtering.cut_ga);
     let average_sequence_length = if protein_sequences.is_empty() {
         400
     } else {
@@ -451,17 +603,35 @@ pub fn search_hmm_profile(
             .map_err(|e| anyhow::anyhow!("Search error {}: {}", profile_name, e))?;
 
         if let SearchOutcome::Hit(hit) = &report.outcome {
+            let database_size = protein_sequences.len().max(1) as f64;
+            match gathering_cutoffs {
+                Some((sequence_cutoff, _)) => {
+                    if hit.score < sequence_cutoff {
+                        continue;
+                    }
+                }
+                None => {
+                    let sequence_evalue = hit.log_pvalue.exp() * database_size;
+                    if sequence_evalue.is_nan() || sequence_evalue > filtering.e_value_search {
+                        continue;
+                    }
+                }
+            }
             for domain in &hit.domains {
-                let inclusion_evalue =
-                    domain.log_pvalue.exp() * protein_sequences.len().max(1) as f64;
-                if !inclusion_evalue.is_finite() || inclusion_evalue > MAX_DOMAIN_INCLUSION_EVALUE {
+                if gathering_cutoffs
+                    .is_some_and(|(_, domain_cutoff)| domain.bitscore < domain_cutoff)
+                {
+                    continue;
+                }
+                let inclusion_evalue = domain.log_pvalue.exp() * database_size;
+                if !inclusion_evalue.is_finite() || inclusion_evalue > filtering.i_evalue_sel {
                     continue;
                 }
                 let Some(profile_span) = inclusive_span(domain.hmm_from, domain.hmm_to) else {
                     continue;
                 };
                 let profile_coverage = profile_span as f64 / num_nodes as f64;
-                if profile_coverage < MIN_PROFILE_COVERAGE {
+                if profile_coverage < filtering.coverage_profile {
                     continue;
                 }
                 let Some(sequence_span) =
@@ -703,6 +873,145 @@ mod tests {
         assert!(error.to_string().contains("must be finite"));
     }
 
+    fn write_package(root: &Path, definition: &str, model_conf: Option<&str>) -> PathBuf {
+        let package = root.join("TestFinder");
+        fs::create_dir_all(package.join("definitions")).unwrap();
+        fs::create_dir_all(package.join("profiles")).unwrap();
+        fs::write(package.join("definitions/sys_A.xml"), definition).unwrap();
+        if let Some(model_conf) = model_conf {
+            fs::write(package.join("model_conf.xml"), model_conf).unwrap();
+        }
+        package
+    }
+
+    const PACKAGE_MODEL: &str = concat!(
+        "<model inter_gene_max_space=\"3\" min_mandatory_genes_required=\"1\" ",
+        "min_genes_required=\"2\" max_nb_genes=\"4\" vers=\"2.0\">\n",
+        "### comment line ###\n",
+        "<gene name=\"a_1\" presence=\"mandatory\">\n",
+        "  <exchangeables><gene name=\"a_2\"/> #inline note\n</exchangeables>\n",
+        "</gene>\n",
+        "<gene name=\"b_1\" presence=\"accessory\" multi_model=\"1\"></gene>\n",
+        "<gene name=\"n_1\" presence=\"neutral\" inter_gene_max_space=\"1\"> </gene>\n",
+        "</model>\n"
+    );
+
+    #[test]
+    fn model_package_supplies_definitions_profiles_and_settings() {
+        let temporary = tempfile::tempdir().unwrap();
+        let package = write_package(
+            temporary.path(),
+            PACKAGE_MODEL,
+            Some(
+                "<model_config><weights><mandatory>2</mandatory><accessory>0.5</accessory>\
+                 </weights><filtering><i_evalue_sel>0.01</i_evalue_sel>\
+                 <coverage_profile>0.9</coverage_profile><cut_ga>True</cut_ga></filtering>\
+                 </model_config>",
+            ),
+        );
+        let config = CasFinderConfig {
+            cas_models_dir: Some(package.clone()),
+            ..CasFinderConfig::default()
+        };
+
+        let model_set = load_model_set(&config).unwrap();
+
+        assert_eq!(model_set.model_names, ["TestFinder/sys_A"]);
+        assert_eq!(model_set.profiles_dir, package.join("profiles"));
+        let model = model_set.registry.get("TestFinder/sys_A").unwrap();
+        assert!(model.is_macsyfinder2());
+        assert_eq!(model.complete_gene_count(), 4);
+        assert_eq!(model.genes[0].exchangeables, ["a_2"]);
+        assert!(model.genes[1].multi_model);
+        assert_eq!(model.genes[2].inter_gene_max_space, Some(1));
+        // Package settings, then the values CRISPRCasFinder always passes.
+        assert_eq!(model_set.weights.mandatory, 2.0);
+        assert_eq!(model_set.weights.accessory, 1.0);
+        assert_eq!(model_set.weights.redundancy_penalty, 1.0);
+        assert_eq!(model_set.filtering.i_evalue_sel, 0.01);
+        assert_eq!(model_set.filtering.coverage_profile, MIN_PROFILE_COVERAGE);
+        assert!(model_set.filtering.cut_ga);
+    }
+
+    #[test]
+    fn model_package_with_unsupported_rules_is_rejected() {
+        let temporary = tempfile::tempdir().unwrap();
+        let package = write_package(
+            temporary.path(),
+            &PACKAGE_MODEL.replace("multi_model=\"1\"", "loner=\"1\""),
+            None,
+        );
+        let config = CasFinderConfig {
+            cas_models_dir: Some(package),
+            ..CasFinderConfig::default()
+        };
+        let error = load_model_set(&config)
+            .err()
+            .expect("loner must be rejected");
+        assert!(error.to_string().contains("loner"));
+    }
+
+    #[test]
+    fn legacy_definitions_keep_their_thresholds() {
+        let data_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../crispr-cas-finder-cli/data");
+        let config = CasFinderConfig {
+            cas_models_dir: Some(data_root.join("CasFinder-2.0.3/DEF-SubTyping-2.0.3")),
+            cas_profiles_dir: Some(data_root.join("CasFinder-2.0.3/CASprofiles-2.0.3")),
+            ..CasFinderConfig::default()
+        };
+        let model_set = load_model_set(&config).unwrap();
+        assert_eq!(model_set.filtering, legacy_hit_filtering());
+        assert!(!model_set.filtering.cut_ga);
+        assert!(
+            model_set
+                .model_names
+                .contains(&"CASFinder/CAS-TypeIE".to_string())
+        );
+    }
+
+    /// Opt-in check against a locally downloaded CasFinder 3 package, which
+    /// cannot be redistributed with this repository (CC BY-NC-SA 4.0).
+    /// Set `CASFINDER3_DIR` to the package directory to run it. The expected
+    /// system is MacSyFinder 2.1.6's best solution for the same proteome.
+    #[test]
+    fn casfinder3_finds_the_ecoli_type_ie_system_like_macsyfinder() {
+        let Some(package) = std::env::var_os("CASFINDER3_DIR") else {
+            return;
+        };
+        let fasta =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../crispr-cas-finder-cli/data/ecoli.fasta");
+        let config = CasFinderConfig {
+            cas_models_dir: Some(PathBuf::from(package)),
+            ..CasFinderConfig::default()
+        };
+
+        let analysis = run_casfinder(&fasta, &config).unwrap();
+
+        assert_eq!(analysis.clusters.len(), 1);
+        let system = &analysis.clusters[0];
+        assert_eq!(system.system, "CasFinder/CAS_Class1-Subtype-I-E");
+        assert_eq!(system.score, 8.0);
+        assert_eq!(system.wholeness, 1.0);
+        let genes: Vec<(&str, &str)> = system
+            .genes
+            .iter()
+            .map(|gene| (gene.name.as_str(), gene.profile.as_str()))
+            .collect();
+        assert_eq!(
+            genes,
+            [
+                ("cas2_I-E_1", "cas2_I-E_2"),
+                ("cas1_I-E_1", "cas1_I-E_1"),
+                ("cas6e_I_II_III_IV_V_VI_1", "cas6e_I_II_III_IV_V_VI_1"),
+                ("cas5_I-E_3", "cas5_I-E_3"),
+                ("cas7_I-E_16", "cas7_I-E_2"),
+                ("cse2gr11_I-E_2", "cse2gr11_I-E_1"),
+                ("cas8e_I-E_1", "cas8e_I-E_1"),
+                ("cas3_I_5", "cas3_I_5"),
+            ]
+        );
+    }
+
     #[test]
     fn model_registry_uses_sorted_file_order() {
         let temporary = tempfile::tempdir().expect("temporary directory");
@@ -716,8 +1025,8 @@ mod tests {
         fs::write(temporary.path().join("alpha.xml"), model).expect("write alpha model");
         fs::write(temporary.path().join("ignored.txt"), model).expect("write ignored file");
 
-        let (registry, names) =
-            build_model_registry_from_dir(temporary.path()).expect("load model registry");
+        let (registry, names) = build_model_registry_from_dir(temporary.path(), "CASFinder")
+            .expect("load model registry");
 
         assert_eq!(names, ["CASFinder/alpha", "CASFinder/zeta"]);
         assert!(registry.get("CASFinder/alpha").is_some());
@@ -737,7 +1046,7 @@ mod tests {
 
         let mut model_count = 0;
         for directory in definition_directories {
-            let (_, names) = build_model_registry_from_dir(&data_root.join(directory))
+            let (_, names) = build_model_registry_from_dir(&data_root.join(directory), "CASFinder")
                 .unwrap_or_else(|error| panic!("failed to parse {directory}: {error:#}"));
             model_count += names.len();
         }
@@ -752,8 +1061,15 @@ mod tests {
         write_test_hmm(temporary.path(), "Cas1", &alphabet);
         let profiles = HashSet::from(["Cas1".to_string()]);
 
-        let hits = run_hmm_search(temporary.path(), &profiles, &[], &alphabet, 1)
-            .expect("load and configure HMM profile");
+        let hits = run_hmm_search(
+            temporary.path(),
+            &profiles,
+            &[],
+            &alphabet,
+            1,
+            &legacy_hit_filtering(),
+        )
+        .expect("load and configure HMM profile");
 
         assert!(hits.is_empty());
     }
@@ -763,8 +1079,15 @@ mod tests {
         let temporary = tempfile::tempdir().expect("temporary directory");
         let profiles = HashSet::from(["missing".to_string()]);
 
-        let error = run_hmm_search(temporary.path(), &profiles, &[], &Alphabet::amino(), 1)
-            .expect_err("missing profile must fail the search");
+        let error = run_hmm_search(
+            temporary.path(),
+            &profiles,
+            &[],
+            &Alphabet::amino(),
+            1,
+            &legacy_hit_filtering(),
+        )
+        .expect_err("missing profile must fail the search");
 
         assert!(error.to_string().contains("Required HMM profile 'missing'"));
     }
@@ -775,8 +1098,15 @@ mod tests {
         write_test_hmm(temporary.path(), "Cas1", &Alphabet::dna());
         let profiles = HashSet::from(["Cas1".to_string()]);
 
-        let error = run_hmm_search(temporary.path(), &profiles, &[], &Alphabet::amino(), 1)
-            .expect_err("DNA profile must not be searched as protein");
+        let error = run_hmm_search(
+            temporary.path(),
+            &profiles,
+            &[],
+            &Alphabet::amino(),
+            1,
+            &legacy_hit_filtering(),
+        )
+        .expect_err("DNA profile must not be searched as protein");
 
         assert!(error.to_string().contains("expected Amino alphabet"));
     }
@@ -796,6 +1126,7 @@ mod tests {
             min_mandatory_genes_required: 2,
             min_genes_required: 2,
             multi_loci: false,
+            max_nb_genes: None,
         };
         let mut registry = ModelRegistry::new();
         registry.add(model);
@@ -848,6 +1179,7 @@ mod tests {
             min_mandatory_genes_required: 2,
             min_genes_required: 2,
             multi_loci: false,
+            max_nb_genes: None,
         };
         let mut registry = ModelRegistry::new();
         registry.add(model);
@@ -903,6 +1235,7 @@ mod tests {
             min_mandatory_genes_required: 1,
             min_genes_required: 1,
             multi_loci: false,
+            max_nb_genes: None,
         };
 
         let hmmer_hits = HashMap::from([
@@ -936,6 +1269,7 @@ mod tests {
             min_mandatory_genes_required: 0,
             min_genes_required: 1,
             multi_loci: false,
+            max_nb_genes: None,
         };
 
         let hmmer_hits = HashMap::from([(

@@ -131,6 +131,10 @@ pub struct SystemModel {
     pub min_mandatory_genes_required: u32,
     pub min_genes_required: u32,
     pub multi_loci: bool,
+    /// Number of genes of a complete system, used for wholeness. `None`
+    /// means the number of mandatory and accessory genes.
+    #[serde(default)]
+    pub max_nb_genes: Option<u32>,
 }
 
 impl SystemModel {
@@ -158,6 +162,22 @@ impl SystemModel {
 
     pub fn accessory_count(&self) -> usize {
         self.accessory_genes().count()
+    }
+
+    /// Whether the definition uses the MacSyFinder 2 format (`vers="2.0"`),
+    /// which is evaluated with MacSyFinder 2 rules.
+    pub fn is_macsyfinder2(&self) -> bool {
+        self.version
+            .as_deref()
+            .is_some_and(|version| version.starts_with('2'))
+    }
+
+    /// Number of genes of a complete system.
+    pub fn complete_gene_count(&self) -> usize {
+        self.max_nb_genes
+            .map_or(self.mandatory_count() + self.accessory_count(), |count| {
+                count as usize
+            })
     }
 
     pub fn all_profile_names(&self) -> Vec<&str> {

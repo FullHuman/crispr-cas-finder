@@ -4,7 +4,7 @@ use crate::annotation::Proteome;
 use crate::association::{
     CrisprCasAssociation, CrisprCasLocus, associate_crisprs_with_cas, cluster_loci,
 };
-use crate::cas_types::RepliconTopology;
+use crate::cas_types::{HmmerHit, RepliconTopology};
 use crate::casfinder::detect_cas_systems;
 use crate::casparser::CasCluster;
 use crate::detect::at_percent;
@@ -294,6 +294,8 @@ pub struct Analysis {
     pub report: AnalysisReport,
     /// Proteins predicted or supplied for Cas detection; `None` without it.
     pub proteome: Option<Proteome>,
+    /// HMM hits that passed the thresholds, before assignment to models.
+    pub cas_hits: Vec<HmmerHit>,
 }
 
 /// Detect CRISPR arrays and, when configured, Cas systems, and relate them.
@@ -317,6 +319,7 @@ pub fn analyze(sequences: &[SequenceRecord], options: &AnalysisOptions) -> Resul
     }
 
     let mut proteome = None;
+    let mut cas_hits = Vec::new();
     let mut cas_clusters = Vec::new();
     if let Some(cas_config) = &options.cas {
         let min_sequence_length = options.detection.min_sequence_length;
@@ -337,6 +340,7 @@ pub fn analyze(sequences: &[SequenceRecord], options: &AnalysisOptions) -> Resul
             .collect();
         let analysis = detect_cas_systems(&owned_sequences, cas_config, Some(&included))?;
         cas_clusters = analysis.clusters;
+        cas_hits = analysis.hits;
         proteome = Some(analysis.proteome);
     }
 
@@ -348,7 +352,11 @@ pub fn analyze(sequences: &[SequenceRecord], options: &AnalysisOptions) -> Resul
         cas_clusters,
         ReportParameters::from_options(options),
     );
-    Ok(Analysis { report, proteome })
+    Ok(Analysis {
+        report,
+        proteome,
+        cas_hits,
+    })
 }
 
 #[cfg(test)]

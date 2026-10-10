@@ -122,10 +122,16 @@ pub fn parse_cas_model_xml(
                             return Err("encountered a nested model gene".to_string());
                         }
                         current_gene = Some(parse_gene_definition(&start, &reader)?);
-                    } else if element_stack.last().is_some_and(|name| name == "homologs") {
+                    } else if element_stack
+                        .last()
+                        .is_some_and(|name| is_exchangeable_container(name))
+                    {
                         add_exchangeable(&mut current_gene, &start, &reader)?;
                     } else {
-                        return Err("a nested <gene> must be inside <homologs>".to_string());
+                        return Err(
+                            "a nested <gene> must be inside <exchangeables> or <homologs>"
+                                .to_string(),
+                        );
                     }
                 }
                 element_stack.push(element_name);
@@ -142,10 +148,16 @@ pub fn parse_cas_model_xml(
                 } else if element_name == "gene" {
                     if element_stack.len() == 1 {
                         genes.push(parse_gene_definition(&empty, &reader)?);
-                    } else if element_stack.last().is_some_and(|name| name == "homologs") {
+                    } else if element_stack
+                        .last()
+                        .is_some_and(|name| is_exchangeable_container(name))
+                    {
                         add_exchangeable(&mut current_gene, &empty, &reader)?;
                     } else {
-                        return Err("a nested <gene> must be inside <homologs>".to_string());
+                        return Err(
+                            "a nested <gene> must be inside <exchangeables> or <homologs>"
+                                .to_string(),
+                        );
                     }
                 }
             }
@@ -191,12 +203,16 @@ pub fn parse_cas_model_xml(
         fully_qualified_name: format!("{family}/{model_name}"),
         family: family.to_string(),
         name: model_name.to_string(),
-        version: attributes.get("version").cloned(),
+        version: attributes
+            .get("vers")
+            .or_else(|| attributes.get("version"))
+            .cloned(),
         genes,
         inter_gene_max_space,
         min_mandatory_genes_required,
         min_genes_required,
         multi_loci,
+        max_nb_genes: parse_optional_u32_attribute(&attributes, "max_nb_genes")?,
     })
 }
 
@@ -485,6 +501,12 @@ fn add_exchangeable(
     Ok(())
 }
 
+/// Elements listing genes that can stand in for their parent gene:
+/// `exchangeables` in MacSyFinder 2, `homologs` and `analogs` before.
+fn is_exchangeable_container(element_name: &str) -> bool {
+    matches!(element_name, "exchangeables" | "homologs" | "analogs")
+}
+
 fn required_attribute<'a>(
     attributes: &'a HashMap<String, String>,
     name: &str,
@@ -579,6 +601,7 @@ mod tests {
             min_mandatory_genes_required: 1,
             min_genes_required: 1,
             multi_loci: false,
+            max_nb_genes: None,
         }
     }
 

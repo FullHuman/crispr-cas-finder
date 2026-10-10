@@ -51,6 +51,10 @@ class ApiTests(unittest.TestCase):
     def test_analyze_requires_model_directories_for_cas(self):
         with self.assertRaises(ValueError):
             finder.analyze(">tiny\nACGT", cas=True)
+        with tempfile.TemporaryDirectory() as directory:
+            # A plain definitions directory also needs a profiles directory.
+            with self.assertRaises(ValueError):
+                finder.analyze(">tiny\nACGT", cas=True, cas_models_dir=directory)
 
     def test_invalid_options(self):
         with self.assertRaises(ValueError):

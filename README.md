@@ -91,6 +91,9 @@ crispr-cas-finder -i genome.fasta
 # Detect CRISPR arrays and Cas systems
 crispr-cas-finder -i genome.fasta --cas --outdir results/
 
+# Use the CasFinder 3 models (download them first, see below)
+crispr-cas-finder -i genome.fasta --cas --cas-models-dir models/CasFinder
+
 # Use an existing annotation instead of predicting genes
 crispr-cas-finder -i genome.fasta --cas --gff genes.gff --faa proteins.faa
 
@@ -105,6 +108,22 @@ Run `crispr-cas-finder --help` for every option. Most CRISPRCasFinder option
 names are accepted as aliases (for example `--minDR`, `--rcfowce`, `--cSA`,
 `--Mrpts`, `--dbc`).
 
+#### Cas models
+
+The CLI embeds CasFinder 2.0.3 and uses it by default. Current CRISPRCasFinder
+releases use CasFinder 3.1 with MacSyFinder 2; those models are licensed
+CC BY-NC-SA 4.0 and are therefore not distributed with this GPL project. To use
+them, download the package and point `--cas-models-dir` at it:
+
+```bash
+pip install macsyfinder
+msf_data install --target models CasFinder==3.1.0
+crispr-cas-finder -i genome.fasta --cas --cas-models-dir models/CasFinder
+```
+
+MacSyFinder is needed only for the download. Definitions in the MacSyFinder 2
+format are evaluated with MacSyFinder 2 rules implemented in Rust.
+
 #### Output files
 
 | File | Content |
@@ -117,7 +136,7 @@ names are accepted as aliases (for example `--minDR`, `--rcfowce`, `--cSA`,
 | `cas_systems.tsv`, `cas_proteins.faa` | With `--cas`: one row per Cas gene, and the Cas proteins |
 | `associations.tsv` | With `--cas`: arrays within `--vicinity` bp (default 600) of a Cas system |
 | `loci.tsv` | With `--locus-distance`: arrays and Cas systems chained by proximity |
-| `annotation/` | With `--cas`: all predicted proteins and their coordinates |
+| `annotation/` | With `--cas`: all predicted proteins, their coordinates, and every HMM hit that passed the thresholds |
 
 ### Python
 

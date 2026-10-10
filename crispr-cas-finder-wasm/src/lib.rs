@@ -5,9 +5,10 @@ use crispr_cas_finder_core::{
     annotation::{AUTO_METAGENOME_BELOW, GenePredictionOptions, Proteome, predict_proteome},
     cas_pipeline::{ModelDefinition, build_model_registry, validate_genetic_code},
     cas_types::{HmmerHit, ModelRegistry, RepliconTopology},
-    casfinder::{finalize_systems, search_hmm_profile},
+    casfinder::{finalize_systems, legacy_hit_filtering, search_hmm_profile},
     casparser::CasCluster,
     detect_crisprs,
+    macsy::HitWeights,
     report::{CasParameters, DEFAULT_VICINITY, ReportParameters, SequenceInfo, build_report},
 };
 use rayon::prelude::*;
@@ -259,6 +260,7 @@ fn search_profile(
         &hmm,
         &ctx.targets,
         &ctx.amino_alphabet,
+        &legacy_hit_filtering(),
     )
     .map_err(|e| e.to_string())
 }
@@ -318,6 +320,7 @@ pub fn cas_finalize() -> Result<JsValue, JsValue> {
         &ctx.proteome,
         RepliconTopology::Circular,
         CasFinderConfig::default().min_best_hit_score,
+        &HitWeights::default(),
     );
     to_js(&cas_clusters)
 }
@@ -509,6 +512,7 @@ mod tests {
             min_mandatory_genes_required: 1,
             min_genes_required: 1,
             multi_loci: false,
+            max_nb_genes: None,
         };
 
         let hmmer_hits = HashMap::from([
@@ -542,6 +546,7 @@ mod tests {
             min_mandatory_genes_required: 0,
             min_genes_required: 1,
             multi_loci: false,
+            max_nb_genes: None,
         };
 
         let hmmer_hits = HashMap::from([(
