@@ -88,15 +88,37 @@ crispr-cas-finder-core = "0.1.0"
 # Detect CRISPR arrays
 crispr-cas-finder -i genome.fasta
 
-# Detect CRISPR arrays and run Cas protein subtyping
-crispr-cas-finder -i genome.fasta --cas
+# Detect CRISPR arrays and Cas systems, and write an HTML report
+crispr-cas-finder -i genome.fasta --cas --html --outdir results/
 
-# Specify output directory
-crispr-cas-finder -i genome.fasta --outdir results/
+# Use an existing annotation instead of predicting genes
+crispr-cas-finder -i genome.fasta --cas --gff genes.gff --faa proteins.faa
 
-# Metagenomic mode
+# Group arrays and Cas systems lying within 20 kb of each other
+crispr-cas-finder -i genome.fasta --cas --locus-distance 20000
+
+# Metagenomic mode for every sequence
 crispr-cas-finder -i metagenome.fasta --metagenome --cas
 ```
+
+Run `crispr-cas-finder --help` for every option. Most CRISPRCasFinder option
+names are accepted as aliases (for example `--minDR`, `--rcfowce`, `--cSA`,
+`--Mrpts`, `--dbc`).
+
+#### Output files
+
+| File | Content |
+| --- | --- |
+| `report.json` | Everything below in one document: parameters, per-sequence summaries, arrays, Cas systems, arrays near a Cas system, loci, totals |
+| `sequences.tsv` | One row per input sequence |
+| `crisprs.tsv` | One row per array: coordinates, evidence level, consensus repeat, conservation scores, spacer statistics |
+| `features.gff` | GFF3 with arrays, repeats, spacers, flanking regions and Cas genes |
+| `arrays.fna`, `repeats.fna`, `spacers.fna` | Array sequences, consensus repeats and spacers |
+| `cas_systems.tsv`, `cas_proteins.faa` | With `--cas`: one row per Cas gene, and the Cas proteins |
+| `associations.tsv` | With `--cas`: arrays within `--vicinity` bp (default 600) of a Cas system |
+| `loci.tsv` | With `--locus-distance`: arrays and Cas systems chained by proximity |
+| `annotation/` | With `--cas`: all predicted proteins and their coordinates |
+| `report.html` | With `--html`: a self-contained page for browsing the results |
 
 ### Python
 
@@ -118,24 +140,30 @@ arrays = crispr_cas_finder.find_crispr_arrays(
     max_spacer_length=60,
     min_evidence_level=2,
 )
+
+# Full report as a dictionary (same structure as report.json), with Cas systems
+report = crispr_cas_finder.analyze(
+    fasta_content,
+    cas=True,
+    cas_models_dir="CasFinder-2.0.3/DEF-SubTyping-2.0.3",
+    cas_profiles_dir="CasFinder-2.0.3/CASprofiles-2.0.3",
+)
+print(report["summary"])
 ```
 
 ### Rust Library (crispr-cas-finder-core)
 
 ```rust
-use crispr_cas_finder_core::{DetectionParams, detect_crisprs_in_fasta_str};
+use crispr_cas_finder_core::{AnalysisOptions, analyze, parse_fasta};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let fasta = std::fs::read_to_string("genome.fasta")?;
-    let params = DetectionParams::default();
+    let sequences = parse_fasta(std::fs::File::open("genome.fasta")?)?;
+    let analysis = analyze(&sequences, &AnalysisOptions::default())?;
 
-    let arrays = detect_crisprs_in_fasta_str(&fasta, &params)?;
-    println!("Found {} CRISPR arrays", arrays.len());
-
-    for array in &arrays {
+    for array in &analysis.report.crisprs {
         println!(
-            "  {} ({}..{}) — {} spacers, evidence level {}",
-            array.seq_id, array.start, array.end,
+            "{} ({}..{}): {} spacers, evidence level {}",
+            array.id, array.start, array.end,
             array.spacers.len(), array.evidence_level
         );
     }
@@ -143,6 +171,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 ```
+
+Set `AnalysisOptions::cas` to a `CasFinderConfig` with model and profile
+directories to detect Cas systems as well. `detect_crisprs` remains available
+for array detection on in-memory sequences.
 
 ## Browser application
 

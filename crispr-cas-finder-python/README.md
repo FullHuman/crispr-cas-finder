@@ -1,7 +1,8 @@
 # crispr-cas-finder (Python)
 
-Python bindings for CRISPR array detection written in Rust. Cas protein/system
-detection is currently available through the CLI and browser app.
+Python bindings for CRISPR array and Cas system detection written in Rust.
+`analyze` returns the same report as the command-line tool; Cas detection needs
+the CasFinder model and profile directories, which the wheel does not bundle.
 
 ## Installation
 
@@ -80,17 +81,43 @@ All keyword arguments after `fasta_content` are keyword-only.
 Read a FASTA file through the core path API, without an intermediate Python/Rust text copy.
 Raises `FileNotFoundError` if `path` does not exist.
 
+### `analyze(fasta_content, *, cas=False, ...)` → `dict`
+
+Runs array detection and, with `cas=True`, Cas detection, and returns the report
+as a dictionary with the keys `tool`, `parameters`, `sequences`, `crisprs`,
+`cas_clusters`, `associations`, `loci` and `summary` (the structure of the CLI's
+`report.json`).
+
+```python
+report = analyze(
+    open("genome.fasta").read(),
+    cas=True,
+    cas_models_dir="CasFinder-2.0.3/DEF-SubTyping-2.0.3",
+    cas_profiles_dir="CasFinder-2.0.3/CASprofiles-2.0.3",
+    locus_distance=20_000,
+)
+for system in report["cas_clusters"]:
+    print(system["system"], system["start"], system["end"])
+```
+
+Other keyword arguments: `gff` and `faa` (use an existing annotation),
+`metagenome`, `auto_metagenome_below`, `linear`, `cas_only_with_crispr`,
+`vicinity`, `workers`, and the detection settings of `find_crispr_arrays`.
+The interpreter lock is released while the analysis runs.
+
 ### `CrisprArray`
 
 | Attribute | Type | Description |
 |---|---|---|
+| `id` | `str` | Stable identifier, `<seq_id>_CRISPR_<n>` |
 | `seq_id` | `str` | Source sequence ID |
 | `start` | `int` | 1-based array start |
 | `end` | `int` | 1-based array end (inclusive) |
 | `consensus_repeat` | `str` | Consensus direct repeat sequence |
 | `repeats` | `list[Repeat]` | All direct repeats |
 | `spacers` | `list[Spacer]` | All spacers |
-| `evidence_level` | `int` | Experimental score: 1 (at most 3 spacers) or 4 (longer arrays) |
+| `evidence_level` | `int` | 1 (at most 3 spacers) to 4 (conserved repeats, dissimilar spacers) |
+| `statistics` *(property)* | `dict` | Conservation scores and spacer length statistics |
 | `orientation` | `str` | `"+"`, `"-"`, or `"."` |
 | `repeat_id` | `str` | CRISPRdb canonical repeat ID |
 | `crispr_direction` | `str` | CRISPRDirection database direction |
