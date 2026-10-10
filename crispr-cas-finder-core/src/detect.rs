@@ -600,6 +600,9 @@ pub fn find_direct_repeats(seq: &[u8], params: &DetectionParams) -> Vec<RepeatHi
     {
         return Vec::new();
     }
+    if !params.query_repeats.is_empty() {
+        return find_query_repeats(seq, &params.query_repeats, max_mismatches);
+    }
     let seed_length = (min_repeat_length / 2).max(1);
 
     let minimum_sequence_length = min_repeat_length
@@ -836,6 +839,57 @@ pub fn find_direct_repeats(seq: &[u8], params: &DetectionParams) -> Vec<RepeatHi
     }
 
     deduped
+}
+
+/// Find occurrences of user-supplied repeats on either strand.
+///
+/// Replaces repeat discovery, like `vmatch -q` upstream. Overlapping
+/// occurrences keep the leftmost, then the longest.
+pub fn find_query_repeats(
+    seq: &[u8],
+    query_repeats: &[String],
+    max_mismatches: usize,
+) -> Vec<RepeatHit> {
+    let mut patterns: Vec<Vec<u8>> = Vec::new();
+    for query in query_repeats {
+        let forward = query.trim().to_ascii_uppercase().into_bytes();
+        if forward.is_empty() {
+            continue;
+        }
+        let reverse = reverse_complement(&forward);
+        for pattern in [forward, reverse] {
+            if !patterns.contains(&pattern) {
+                patterns.push(pattern);
+            }
+        }
+    }
+
+    let mut occurrences: Vec<(usize, usize)> = patterns
+        .par_iter()
+        .flat_map_iter(|pattern| {
+            slide_search(seq, pattern, max_mismatches)
+                .into_iter()
+                .map(|(start, _)| (start, pattern.len()))
+        })
+        .collect();
+    occurrences.sort_unstable_by(|left, right| left.0.cmp(&right.0).then(right.1.cmp(&left.1)));
+    occurrences.dedup();
+
+    let mut hits: Vec<RepeatHit> = Vec::new();
+    let mut next_free = 0usize;
+    for (start, repeat_length) in occurrences {
+        if !hits.is_empty() && start < next_free {
+            continue;
+        }
+        next_free = start + repeat_length;
+        hits.push(RepeatHit {
+            repeat_length,
+            pos1: start + 1,
+            repeat_sequence: String::from_utf8_lossy(&seq[start..start + repeat_length])
+                .to_string(),
+        });
+    }
+    hits
 }
 
 /// Extract spacer sequences from a cluster of DR hits.
@@ -1776,6 +1830,28 @@ mod tests {
         assert_eq!(foster_score(&repeats, &params), 6);
         params.foster_repeat_begin = "T".to_string();
         assert_eq!(foster_score(&repeats, &params), 4);
+    }
+
+    #[test]
+    fn query_repeats_are_found_on_both_strands_with_a_mismatch() {
+        let spacer = b"CAGTTTCAGCGATACGATCGATCGATCGTTTT";
+        let mut mutated = DR.to_vec();
+        mutated[5] = b'T';
+        let seq = build_crispr_seq(&[DR, &mutated, DR], &[spacer, spacer], 100);
+        let reverse_query = String::from_utf8(reverse_complement(DR)).unwrap();
+
+        let exact = find_query_repeats(&seq, std::slice::from_ref(&reverse_query), 0);
+        assert_eq!(
+            exact.iter().map(|hit| hit.pos1).collect::<Vec<_>>(),
+            [101, 221]
+        );
+
+        let tolerant = find_query_repeats(&seq, &[reverse_query], 1);
+        assert_eq!(
+            tolerant.iter().map(|hit| hit.pos1).collect::<Vec<_>>(),
+            [101, 161, 221]
+        );
+        assert_eq!(tolerant[1].repeat_sequence.as_bytes(), mutated.as_slice());
     }
 
     #[test]

@@ -189,13 +189,14 @@ pub fn write_crisprs_tsv(report: &AnalysisReport, writer: &mut impl Write) -> Re
         "crispr_id\tseq_id\tstart\tend\tlength\torientation\tcrispr_direction\tevidence_level\t\
          consensus_repeat\trepeat_length\trepeat_id\trepeat_count\tspacer_count\texact_repeat_count\t\
          repeat_conservation\trepeat_identity\tspacer_conservation\tspacer_identity\t\
-         spacer_average_identity\tmean_spacer_length\tspacer_length_std_dev\tduplicated_spacers"
+         spacer_average_identity\tmean_spacer_length\tspacer_length_std_dev\tduplicated_spacers\t\
+         crisprdb_repeat_count\tknown_in_crisprdb\treclassified_from"
     )?;
     for array in &report.crisprs {
         let statistics = &array.statistics;
         writeln!(
             writer,
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{}\t{}\t{}\t{}",
             tsv_field(&array.id),
             tsv_field(&array.seq_id),
             array.start,
@@ -218,6 +219,13 @@ pub fn write_crisprs_tsv(report: &AnalysisReport, writer: &mut impl Write) -> Re
             statistics.mean_spacer_length,
             statistics.spacer_length_std_dev,
             statistics.has_duplicated_spacers,
+            array.crisprdb_repeat_count,
+            array
+                .known_in_crisprdb
+                .map_or_else(|| "NA".to_string(), |known| known.to_string()),
+            array
+                .reclassified_from
+                .map_or_else(|| "NA".to_string(), |level| level.to_string()),
         )?;
     }
     writer.flush()?;
@@ -543,6 +551,9 @@ mod tests {
             statistics: Default::default(),
             repeat_id: "db=x;y".into(),
             crispr_direction: "+".into(),
+            crisprdb_repeat_count: 0,
+            known_in_crisprdb: None,
+            reclassified_from: None,
         }
     }
 

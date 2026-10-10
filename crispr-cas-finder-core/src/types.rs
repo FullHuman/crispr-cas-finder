@@ -77,6 +77,17 @@ pub struct CrisprArray {
     /// This is derived by looking up the `repeat_id` in `repeatDirection.tsv`
     /// from the original CRISPRCasFinder supplementary data.
     pub crispr_direction: String,
+    /// Number of CRISPRdb arrays sharing this consensus repeat.
+    #[serde(default)]
+    pub crisprdb_repeat_count: usize,
+    /// Whether the array is recorded in a supplied CRISPRdb export; `None`
+    /// when no export was supplied.
+    #[serde(default)]
+    pub known_in_crisprdb: Option<bool>,
+    /// Evidence level before reclassification as a small array sharing its
+    /// repeat with a level-4 array; `None` if the level was not changed.
+    #[serde(default)]
+    pub reclassified_from: Option<usize>,
 }
 
 /// Algorithm-only parameters for CRISPR detection.
@@ -115,6 +126,14 @@ pub struct DetectionParams {
     /// Percentage of mismatches allowed in the matched half of a truncated
     /// terminal repeat; at least one mismatch is always allowed.
     pub truncated_mismatch_percent: f64,
+    /// Raise arrays of evidence level 1 to level 4 when their consensus
+    /// repeat, or its reverse complement, is that of a level-4 array.
+    #[serde(default)]
+    pub classify_small_arrays: bool,
+    /// Repeats to look for instead of discovering repeats in the sequence.
+    /// Both strands are searched; empty means normal discovery.
+    #[serde(default)]
+    pub query_repeats: Vec<String>,
 }
 
 impl DetectionParams {
@@ -145,6 +164,15 @@ impl DetectionParams {
                     "{name} must contain only IUPAC nucleotide codes or '.'"
                 ));
             }
+        }
+        if let Some(query) = self
+            .query_repeats
+            .iter()
+            .find(|query| query.is_empty() || !crate::dna::is_iupac_pattern(query))
+        {
+            return Err(format!(
+                "query repeat {query:?} must be a non-empty nucleotide sequence"
+            ));
         }
         if self.force_detection && self.foster_repeat_length > self.max_repeat_length {
             return Err("foster_repeat_length must not exceed max_repeat_length".into());
@@ -214,6 +242,8 @@ impl Default for DetectionParams {
             foster_repeat_end: "AA.".to_string(),
             better_detect_truncated: false,
             truncated_mismatch_percent: 4.0,
+            classify_small_arrays: false,
+            query_repeats: Vec::new(),
         }
     }
 }

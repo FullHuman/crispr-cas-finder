@@ -7,6 +7,7 @@ use clap::{Parser, ValueEnum};
 use crispr_cas_finder_core::{
     AnalysisOptions, CasFinderConfig, DetectionParams, RepliconTopology, analyze, annotation, io,
     parse_fasta,
+    repeat_db::{KnownCrisprs, RepeatDatabase},
 };
 use log::info;
 
@@ -137,6 +138,28 @@ pub struct Cli {
         help = "Percentage of mismatches allowed in the matched half of a truncated terminal repeat"
     )]
     truncated_mismatch_percent: f64,
+    #[arg(long, aliases = ["classifySmallArrays", "classifySmall", "cSA"], action = clap::ArgAction::SetTrue)]
+    #[arg(
+        help = "Raise level-1 arrays to level 4 when they share their repeat with a level-4 array"
+    )]
+    classify_small_arrays: bool,
+    #[arg(long, aliases = ["MatchingRepeats", "Mrpts"], value_name = "FILE")]
+    #[arg(help = "FASTA of repeats to search for instead of discovering repeats")]
+    matching_repeats: Option<PathBuf>,
+    #[arg(
+        long,
+        alias = "rpts",
+        value_name = "FILE",
+        requires = "repeat_directions"
+    )]
+    #[arg(help = "Repeat list (sequence;id;count;orientation) replacing the embedded one")]
+    repeats: Option<PathBuf>,
+    #[arg(long, aliases = ["DIRrepeat", "drpt"], value_name = "FILE", requires = "repeats")]
+    #[arg(help = "Repeat directions (id<TAB>direction) matching --repeats")]
+    repeat_directions: Option<PathBuf>,
+    #[arg(long, aliases = ["DBcrispr", "dbc"], value_name = "FILE")]
+    #[arg(help = "CRISPRdb export used to flag arrays that are already recorded")]
+    crisprdb: Option<PathBuf>,
     #[arg(long = "cas", action = clap::ArgAction::SetTrue)]
     launch_cas_finder: bool,
     #[arg(
@@ -194,8 +217,26 @@ pub struct Cli {
 }
 
 impl Cli {
-    fn detection_params(&self) -> DetectionParams {
-        DetectionParams {
+    fn detection_params(&self) -> Result<DetectionParams> {
+        let query_repeats = match &self.matching_repeats {
+            Some(path) => {
+                let file = File::open(path)
+                    .with_context(|| format!("Failed to open repeats FASTA: {:?}", path))?;
+                let repeats: Vec<String> = parse_fasta(file)
+                    .with_context(|| format!("Failed to read repeats FASTA: {:?}", path))?
+                    .into_iter()
+                    .map(|record| String::from_utf8_lossy(&record.sequence).into_owned())
+                    .collect();
+                if repeats.is_empty() {
+                    bail!("Repeats FASTA contains no sequence: {:?}", path);
+                }
+                repeats
+            }
+            None => Vec::new(),
+        };
+        Ok(DetectionParams {
+            classify_small_arrays: self.classify_small_arrays,
+            query_repeats,
             min_repeat_length: self.min_repeat_length,
             max_repeat_length: self.max_repeat_length,
             min_spacer_length: self.min_spacer_length,
@@ -216,7 +257,35 @@ impl Cli {
             foster_repeat_end: self.foster_repeat_end.clone(),
             better_detect_truncated: self.better_detect_truncated,
             truncated_mismatch_percent: self.truncated_mismatch_percent,
+        })
+    }
+
+    fn repeat_database(&self) -> Result<Option<RepeatDatabase>> {
+        let (Some(repeats), Some(directions)) = (&self.repeats, &self.repeat_directions) else {
+            return Ok(None);
+        };
+        let repeat_list = std::fs::read_to_string(repeats)
+            .with_context(|| format!("Failed to read repeat list: {:?}", repeats))?;
+        let direction_list = std::fs::read_to_string(directions)
+            .with_context(|| format!("Failed to read repeat directions: {:?}", directions))?;
+        let database = RepeatDatabase::parse(&repeat_list, &direction_list);
+        if database.is_empty() {
+            bail!("Repeat list contains no repeat: {:?}", repeats);
         }
+        Ok(Some(database))
+    }
+
+    fn known_crisprs(&self) -> Result<Option<KnownCrisprs>> {
+        let Some(path) = &self.crisprdb else {
+            return Ok(None);
+        };
+        let content = std::fs::read_to_string(path)
+            .with_context(|| format!("Failed to read CRISPRdb export: {:?}", path))?;
+        let known = KnownCrisprs::parse(&content);
+        if known.is_empty() {
+            bail!("CRISPRdb export contains no array: {:?}", path);
+        }
+        Ok(Some(known))
     }
 
     fn casfinder_config(&self) -> Result<PreparedCasConfig> {
@@ -289,13 +358,15 @@ pub fn run(cli: Cli) -> Result<()> {
         .then(|| cli.casfinder_config())
         .transpose()?;
     let options = AnalysisOptions {
-        detection: cli.detection_params(),
+        detection: cli.detection_params()?,
         cas: casfinder_config
             .as_ref()
             .map(|prepared| prepared.config.clone()),
         cas_only_with_crispr: cli.cas_only_with_crispr,
         vicinity: cli.vicinity,
         locus_distance: cli.locus_distance,
+        repeat_database: cli.repeat_database()?,
+        known_crisprs: cli.known_crisprs()?,
     };
     options.detection.validate().map_err(anyhow::Error::msg)?;
 
@@ -511,7 +582,7 @@ mod tests {
             "5",
         ])
         .unwrap();
-        let params = cli.detection_params();
+        let params = cli.detection_params().unwrap();
         params.validate().unwrap();
         assert!(params.force_detection && params.better_detect_truncated);
         assert_eq!(params.foster_repeat_length, 31);
@@ -532,6 +603,7 @@ mod tests {
         .unwrap();
         assert!(
             cli.detection_params()
+                .unwrap()
                 .validate()
                 .unwrap_err()
                 .contains("IUPAC")

@@ -8,6 +8,7 @@ use crate::cas_types::RepliconTopology;
 use crate::casfinder::detect_cas_systems;
 use crate::casparser::CasCluster;
 use crate::detect::at_percent;
+use crate::repeat_db::{KnownCrisprs, RepeatDatabase};
 use crate::types::{CasFinderConfig, CrisprArray, DetectionParams};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -55,6 +56,11 @@ pub struct AnalysisOptions {
     pub vicinity: usize,
     /// Chain arrays and Cas systems closer than this many bp into loci.
     pub locus_distance: Option<usize>,
+    /// Repeat database replacing the embedded one for repeat IDs,
+    /// directions and CRISPRdb counts.
+    pub repeat_database: Option<RepeatDatabase>,
+    /// CRISPRdb export used to flag arrays that are already recorded.
+    pub known_crisprs: Option<KnownCrisprs>,
 }
 
 impl Default for AnalysisOptions {
@@ -65,6 +71,8 @@ impl Default for AnalysisOptions {
             cas_only_with_crispr: false,
             vicinity: DEFAULT_VICINITY,
             locus_distance: None,
+            repeat_database: None,
+            known_crisprs: None,
         }
     }
 }
@@ -295,7 +303,18 @@ pub fn analyze(sequences: &[SequenceRecord], options: &AnalysisOptions) -> Resul
         .iter()
         .map(|record| (record.id.as_str(), record.sequence.as_slice()))
         .collect();
-    let crisprs = crate::detect_crisprs(&sequence_refs, &options.detection);
+    let mut crisprs = crate::detect_crisprs(&sequence_refs, &options.detection);
+    for array in &mut crisprs {
+        if let Some(database) = &options.repeat_database {
+            let entry = database.lookup(&array.consensus_repeat);
+            array.repeat_id = entry.repeat_id;
+            array.crispr_direction = entry.crispr_direction;
+            array.crisprdb_repeat_count = entry.crisprdb_count;
+        }
+        if let Some(known) = &options.known_crisprs {
+            array.known_in_crisprdb = Some(known.contains(&array.seq_id, array.start, array.end));
+        }
+    }
 
     let mut proteome = None;
     let mut cas_clusters = Vec::new();

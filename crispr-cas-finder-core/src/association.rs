@@ -227,6 +227,9 @@ mod tests {
             orientation: crate::types::Orientation::Unknown,
             repeat_id: "Unknown".to_string(),
             crispr_direction: "ND".to_string(),
+            crisprdb_repeat_count: 0,
+            known_in_crisprdb: None,
+            reclassified_from: None,
         }
     }
 
