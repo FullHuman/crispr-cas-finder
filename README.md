@@ -88,8 +88,8 @@ crispr-cas-finder-core = "0.1.0"
 # Detect CRISPR arrays
 crispr-cas-finder -i genome.fasta
 
-# Detect CRISPR arrays and Cas systems, and write an HTML report
-crispr-cas-finder -i genome.fasta --cas --html --outdir results/
+# Detect CRISPR arrays and Cas systems
+crispr-cas-finder -i genome.fasta --cas --outdir results/
 
 # Use an existing annotation instead of predicting genes
 crispr-cas-finder -i genome.fasta --cas --gff genes.gff --faa proteins.faa
@@ -118,7 +118,6 @@ names are accepted as aliases (for example `--minDR`, `--rcfowce`, `--cSA`,
 | `associations.tsv` | With `--cas`: arrays within `--vicinity` bp (default 600) of a Cas system |
 | `loci.tsv` | With `--locus-distance`: arrays and Cas systems chained by proximity |
 | `annotation/` | With `--cas`: all predicted proteins and their coordinates |
-| `report.html` | With `--html`: a self-contained page for browsing the results |
 
 ### Python
 

@@ -78,9 +78,6 @@ pub struct Cli {
     outdir: Option<String>,
     #[arg(short = 'q', long, action = clap::ArgAction::SetTrue)]
     quiet: bool,
-    #[arg(long, alias = "HTML", action = clap::ArgAction::SetTrue)]
-    #[arg(help = "Also write report.html, a self-contained page for viewing the results")]
-    html: bool,
     #[arg(long, alias = "minSeqSize", value_name = "INT", default_value_t = 0)]
     min_sequence_length: usize,
     #[arg(long, alias = "mismDRs", value_name = "FLOAT", default_value_t = 20.0)]
@@ -457,11 +454,6 @@ pub fn run(cli: Cli) -> Result<()> {
             annotation::gff_content(proteome),
         )
         .context("Writing annotation/genes.gff")?;
-    }
-    if cli.html {
-        write_output(&outdir, "report.html", |file| {
-            crispr_cas_finder_core::html::write_html(report, file)
-        })?;
     }
     if report.parameters.locus_distance.is_some() {
         write_output(&outdir, "loci.tsv", |file| io::write_loci_tsv(report, file))?;

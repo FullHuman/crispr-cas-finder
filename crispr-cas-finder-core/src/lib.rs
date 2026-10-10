@@ -21,7 +21,6 @@ pub mod casparser;
 pub mod conservation;
 pub mod detect;
 mod dna;
-pub mod html;
 pub mod io;
 pub mod repeat_db;
 pub mod report;
