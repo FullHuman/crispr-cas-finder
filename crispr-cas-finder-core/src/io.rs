@@ -604,7 +604,7 @@ mod tests {
 
     #[test]
     fn gff_lists_flanks_children_and_cas_genes() {
-        let text = written(|report, output| write_gff(report, output));
+        let text = written(write_gff);
         assert!(text.contains("##sequence-region chr1 1 70"));
         // 100 bp flanks are clipped to the 70 bp sequence.
         assert!(text.contains("\tflanking_region\t1\t10\t"));
@@ -617,11 +617,11 @@ mod tests {
     #[test]
     fn tables_have_one_header_and_consistent_columns() {
         for text in [
-            written(|report, output| write_crisprs_tsv(report, output)),
-            written(|report, output| write_cas_tsv(report, output)),
-            written(|report, output| write_sequences_tsv(report, output)),
-            written(|report, output| write_associations_tsv(report, output)),
-            written(|report, output| write_loci_tsv(report, output)),
+            written(write_crisprs_tsv),
+            written(write_cas_tsv),
+            written(write_sequences_tsv),
+            written(write_associations_tsv),
+            written(write_loci_tsv),
         ] {
             let rows: Vec<&str> = text.lines().collect();
             assert_eq!(rows.len(), 2, "{text}");
@@ -636,16 +636,11 @@ mod tests {
     #[test]
     fn fasta_outputs_name_and_rebuild_sequences() {
         assert_eq!(
-            written(|report, output| write_spacers_fasta(report, output)),
+            written(write_spacers_fasta),
             ">chr1_CRISPR_1_spacer_1 chr1:15-18\nTTGG\n"
         );
-        assert!(
-            written(|report, output| write_arrays_fasta(report, output))
-                .ends_with("\nACGTTTGGACGA\n")
-        );
-        assert!(
-            written(|report, output| write_repeats_fasta(report, output)).ends_with("\nACGT\n")
-        );
+        assert!(written(write_arrays_fasta).ends_with("\nACGTTTGGACGA\n"));
+        assert!(written(write_repeats_fasta).ends_with("\nACGT\n"));
     }
 
     #[test]

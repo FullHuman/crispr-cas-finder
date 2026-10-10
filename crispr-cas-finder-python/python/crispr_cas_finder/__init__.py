@@ -20,6 +20,12 @@ Typical usage::
               f"({array.spacer_count} spacers, evidence level {array.evidence_level})")
         for spacer in array.spacers:
             print(f"  spacer: {spacer.sequence}")
+
+    # Full report, optionally with Cas systems (same structure as report.json)
+    report = analyze(fasta_text, cas=True,
+                     cas_models_dir="CasFinder-2.0.3/DEF-SubTyping-2.0.3",
+                     cas_profiles_dir="CasFinder-2.0.3/CASprofiles-2.0.3")
+    print(report["summary"])
 """
 
 from .crispr_cas_finder import (
@@ -27,6 +33,7 @@ from .crispr_cas_finder import (
     Repeat,
     Spacer,
     __version__,
+    analyze,
     find_crispr_arrays,
     find_crispr_arrays_in_file,
 )
@@ -36,6 +43,7 @@ __all__ = [
     "CrisprArray",
     "Repeat",
     "Spacer",
+    "analyze",
     "find_crispr_arrays",
     "find_crispr_arrays_in_file",
 ]

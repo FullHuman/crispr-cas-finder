@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from os import PathLike
+from typing import Any
+
 __version__: str
 
 class Repeat:
@@ -52,6 +55,9 @@ class CrisprArray:
     All attributes are read-only.
     """
 
+    id: str
+    """Stable identifier, ``<seq_id>_CRISPR_<n>``."""
+
     seq_id: str
     """Identifier of the source sequence (FASTA header, without the ``>``)."""
 
@@ -81,6 +87,11 @@ class CrisprArray:
 
     crispr_direction: str
     """Direction from the CRISPRDirection database (``"+"``, ``"-"``, or ``"ND"``)."""
+
+    @property
+    def statistics(self) -> dict[str, float | int | bool]:
+        """Conservation scores and spacer length statistics behind the level."""
+        ...
 
     @property
     def spacer_count(self) -> int:
@@ -203,5 +214,43 @@ def find_crispr_arrays_in_file(
     --------
     >>> arrays = find_crispr_arrays_in_file("genome.fasta")
     >>> print(f"Found {len(arrays)} CRISPR arrays")
+    """
+    ...
+
+def analyze(
+    fasta_content: str,
+    *,
+    cas: bool = False,
+    cas_models_dir: str | PathLike[str] | None = None,
+    cas_profiles_dir: str | PathLike[str] | None = None,
+    gff: str | PathLike[str] | None = None,
+    faa: str | PathLike[str] | None = None,
+    metagenome: bool = False,
+    auto_metagenome_below: int = 100_000,
+    linear: bool = False,
+    cas_only_with_crispr: bool = False,
+    vicinity: int = 600,
+    locus_distance: int | None = None,
+    workers: int = 0,
+    min_repeat_length: int = 23,
+    max_repeat_length: int = 55,
+    min_spacer_length: int = 25,
+    max_spacer_length: int = 60,
+    no_mismatch: bool = False,
+    min_spacer_count: int = 1,
+    min_evidence_level: int = 1,
+) -> dict[str, Any]:
+    """Run CRISPR detection and, optionally, Cas detection on FASTA text.
+
+    Returns the report as a dictionary with the same structure as the
+    command-line tool's ``report.json``: ``tool``, ``parameters``,
+    ``sequences``, ``crisprs``, ``cas_clusters``, ``associations``, ``loci``
+    and ``summary``. ``cas=True`` requires ``cas_models_dir`` and
+    ``cas_profiles_dir``.
+
+    Raises
+    ------
+    ValueError
+        If the input or an option is invalid, or the analysis fails.
     """
     ...
