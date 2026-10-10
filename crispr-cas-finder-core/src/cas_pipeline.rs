@@ -372,11 +372,14 @@ pub fn translate_dna(seq: &[u8], table: &HashMap<[u8; 3], u8>) -> String {
 }
 
 /// Validate the translation code shared by gene prediction and protein translation.
-/// Alternative codes are not supported by this experimental release.
+/// The gene predictor (Orphos 0.3.0) always trains with code 11 and ignores a
+/// requested table, so other codes are rejected rather than silently mispredicted.
 pub fn validate_genetic_code(genetic_code: usize) -> anyhow::Result<u8> {
     if genetic_code != 11 {
         anyhow::bail!(
-            "Unsupported genetic code {genetic_code}; only genetic code 11 is currently supported"
+            "Unsupported genetic code {genetic_code}; only genetic code 11 is currently supported \
+             for gene prediction. Supply an annotation (GFF3 and protein FASTA) to analyse \
+             organisms using another code"
         );
     }
     Ok(11)

@@ -7,9 +7,12 @@ specificity, and performance comparisons remain ongoing.
 
 ## Supported behavior and known differences
 
-- Cas detection supports **genetic code 11 only**. Other codes return an error
-  in the CLI, native Cas API, and WASM API. Do not use this release to analyze
-  Cas proteins in organisms requiring another code.
+- Gene prediction supports **genetic code 11 only**. Other codes return an
+  error in the CLI, native Cas API, and WASM API, because Orphos 0.3.0 ignores a
+  requested translation table. For organisms using another code (for example
+  Mycoplasma, code 4), supply an existing annotation with `--gff` and `--faa`.
+  With code 11, predicted genes and proteins are identical to Prodigal 2.6.3 on
+  the tracked E. coli genome (4,318 of 4,318).
 - Evidence levels follow the CRISPRCasFinder rules: level 1 for at most three
   spacers, level 2 when repeat conservation is below 70, level 3 when more than
   8% of aligned spacer columns are identical, and level 4 otherwise. Repeats and

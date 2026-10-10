@@ -119,10 +119,13 @@ pub fn predict_proteome(
                     bail!("Gene prediction returned an unknown strand for '{sequence_id}'")
                 }
             };
-            let protein = translate_dna(&coding_sequence, &translation_table);
+            let mut protein = translate_dna(&coding_sequence, &translation_table);
             if protein.is_empty() {
                 continue;
             }
+            // Genes are predicted with closed ends, so each one begins at a
+            // start codon, which is read as methionine whatever its bases.
+            protein.replace_range(..1, "M");
             let protein_id = format!("{sequence_id}_{}", proteome.genes.len() + 1);
             protein_ids.push(protein_id.clone());
             proteome.genes.push(GeneRecord {
