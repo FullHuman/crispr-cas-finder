@@ -9,6 +9,7 @@ use crate::cas_pipeline::{
 use anyhow::{Context, Result, bail};
 use bio::bio_types::strand::Strand;
 use orphos_core::{OrphosAnalyzer, config::OrphosConfig};
+use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 
 /// Sequences shorter than this are annotated in metagenomic mode, as in
@@ -87,57 +88,32 @@ pub fn predict_proteome(
     let single_analyzer = analyzer_for(false);
     let metagenome_analyzer = analyzer_for(true);
 
-    let mut proteome = Proteome::default();
-    for (sequence_id, sequence) in sequences {
-        if include.is_some_and(|ids| !ids.contains(sequence_id)) {
-            continue;
-        }
-        let analyzer = if options.uses_metagenome_mode(sequence.len()) {
-            &metagenome_analyzer
-        } else {
-            &single_analyzer
-        };
-        let results = analyzer
-            .analyze_sequence_bytes(sequence, sequence_id.clone(), None)
-            .map_err(|error| {
-                anyhow::anyhow!("Gene prediction failed for '{sequence_id}': {error}")
-            })?;
-
-        let mut protein_ids = Vec::with_capacity(results.genes.len());
-        for gene in &results.genes {
-            let (begin, end) = (gene.coordinates.begin, gene.coordinates.end);
-            if begin == 0 || begin > end || end > sequence.len() {
-                bail!(
-                    "Gene prediction returned invalid coordinates {begin}..{end} for \
-                     '{sequence_id}' (length {})",
-                    sequence.len()
-                );
-            }
-            let coding_sequence = &sequence[begin - 1..end];
-            let (coding_sequence, strand) = match gene.coordinates.strand {
-                Strand::Forward => (coding_sequence.to_vec(), "+"),
-                Strand::Reverse => (reverse_complement_dna(coding_sequence), "-"),
-                Strand::Unknown => {
-                    bail!("Gene prediction returned an unknown strand for '{sequence_id}'")
-                }
+    // Each sequence trains its own gene model, so sequences are independent
+    // and predicted in parallel. Genes are numbered afterwards, in input
+    // order, so protein IDs do not depend on the schedule.
+    let selected: Vec<&(String, Vec<u8>)> = sequences
+        .iter()
+        .filter(|(sequence_id, _)| include.is_none_or(|ids| ids.contains(sequence_id)))
+        .collect();
+    let predicted: Vec<Vec<GeneRecord>> = selected
+        .par_iter()
+        .map(|(sequence_id, sequence)| {
+            let analyzer = if options.uses_metagenome_mode(sequence.len()) {
+                &metagenome_analyzer
+            } else {
+                &single_analyzer
             };
-            let mut protein = translate_dna(&coding_sequence, &translation_table);
-            if protein.is_empty() {
-                continue;
-            }
-            // Genes are predicted with closed ends, so each one begins at a
-            // start codon, which is read as methionine whatever its bases.
-            protein.replace_range(..1, "M");
-            let protein_id = format!("{sequence_id}_{}", proteome.genes.len() + 1);
-            protein_ids.push(protein_id.clone());
-            proteome.genes.push(GeneRecord {
-                id: protein_id,
-                seq_id: sequence_id.clone(),
-                protein,
-                start: begin,
-                end,
-                strand: strand.to_string(),
-            });
+            predict_sequence(analyzer, sequence_id, sequence, &translation_table)
+        })
+        .collect::<Result<_>>()?;
+
+    let mut proteome = Proteome::default();
+    for ((sequence_id, _), genes) in selected.into_iter().zip(predicted) {
+        let mut protein_ids = Vec::with_capacity(genes.len());
+        for mut gene in genes {
+            gene.id = format!("{sequence_id}_{}", proteome.genes.len() + 1);
+            protein_ids.push(gene.id.clone());
+            proteome.genes.push(gene);
         }
         proteome.replicons.push(RepliconProteins {
             name: sequence_id.clone(),
@@ -145,6 +121,54 @@ pub fn predict_proteome(
         });
     }
     Ok(proteome)
+}
+
+/// Predict and translate the genes of one sequence; IDs are left empty.
+fn predict_sequence(
+    analyzer: &OrphosAnalyzer,
+    sequence_id: &str,
+    sequence: &[u8],
+    translation_table: &HashMap<[u8; 3], u8>,
+) -> Result<Vec<GeneRecord>> {
+    let results = analyzer
+        .analyze_sequence_bytes(sequence, sequence_id.to_string(), None)
+        .map_err(|error| anyhow::anyhow!("Gene prediction failed for '{sequence_id}': {error}"))?;
+
+    let mut genes = Vec::with_capacity(results.genes.len());
+    for gene in &results.genes {
+        let (begin, end) = (gene.coordinates.begin, gene.coordinates.end);
+        if begin == 0 || begin > end || end > sequence.len() {
+            bail!(
+                "Gene prediction returned invalid coordinates {begin}..{end} for \
+                 '{sequence_id}' (length {})",
+                sequence.len()
+            );
+        }
+        let coding_sequence = &sequence[begin - 1..end];
+        let (coding_sequence, strand) = match gene.coordinates.strand {
+            Strand::Forward => (coding_sequence.to_vec(), "+"),
+            Strand::Reverse => (reverse_complement_dna(coding_sequence), "-"),
+            Strand::Unknown => {
+                bail!("Gene prediction returned an unknown strand for '{sequence_id}'")
+            }
+        };
+        let mut protein = translate_dna(&coding_sequence, translation_table);
+        if protein.is_empty() {
+            continue;
+        }
+        // Genes are predicted with closed ends, so each one begins at a
+        // start codon, which is read as methionine whatever its bases.
+        protein.replace_range(..1, "M");
+        genes.push(GeneRecord {
+            id: String::new(),
+            seq_id: sequence_id.to_string(),
+            protein,
+            start: begin,
+            end,
+            strand: strand.to_string(),
+        });
+    }
+    Ok(genes)
 }
 
 /// Build a proteome from a GFF3 annotation and its protein FASTA.

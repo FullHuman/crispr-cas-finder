@@ -305,7 +305,40 @@ pub fn analyze(sequences: &[SequenceRecord], options: &AnalysisOptions) -> Resul
         .iter()
         .map(|record| (record.id.as_str(), record.sequence.as_slice()))
         .collect();
-    let mut crisprs = crate::detect_crisprs(&sequence_refs, &options.detection);
+    let detect_arrays = || crate::detect_crisprs(&sequence_refs, &options.detection);
+    let min_sequence_length = options.detection.min_sequence_length;
+    let run_cas = |cas_config: &CasFinderConfig, with_crispr: Option<&HashSet<&str>>| {
+        let included: HashSet<String> = sequences
+            .iter()
+            .filter(|record| record.sequence.len() >= min_sequence_length)
+            .filter(|record| with_crispr.is_none_or(|ids| ids.contains(record.id.as_str())))
+            .map(|record| record.id.clone())
+            .collect();
+        let owned_sequences: Vec<(String, Vec<u8>)> = sequences
+            .iter()
+            .filter(|record| included.contains(&record.id))
+            .map(|record| (record.id.clone(), record.sequence.clone()))
+            .collect();
+        detect_cas_systems(&owned_sequences, cas_config, Some(&included))
+    };
+
+    // Array detection and Cas detection are independent unless Cas detection
+    // is limited to sequences carrying an array, so they run side by side.
+    let (mut crisprs, cas_analysis) = match &options.cas {
+        Some(cas_config) if !options.cas_only_with_crispr => {
+            let (crisprs, cas_analysis) = rayon::join(detect_arrays, || run_cas(cas_config, None));
+            (crisprs, Some(cas_analysis?))
+        }
+        Some(cas_config) => {
+            let crisprs = detect_arrays();
+            let with_crispr: HashSet<&str> =
+                crisprs.iter().map(|array| array.seq_id.as_str()).collect();
+            let cas_analysis = run_cas(cas_config, Some(&with_crispr))?;
+            (crisprs, Some(cas_analysis))
+        }
+        None => (detect_arrays(), None),
+    };
+
     for array in &mut crisprs {
         if let Some(database) = &options.repeat_database {
             let entry = database.lookup(&array.consensus_repeat);
@@ -318,31 +351,10 @@ pub fn analyze(sequences: &[SequenceRecord], options: &AnalysisOptions) -> Resul
         }
     }
 
-    let mut proteome = None;
-    let mut cas_hits = Vec::new();
-    let mut cas_clusters = Vec::new();
-    if let Some(cas_config) = &options.cas {
-        let min_sequence_length = options.detection.min_sequence_length;
-        let with_crispr: HashSet<&str> =
-            crisprs.iter().map(|array| array.seq_id.as_str()).collect();
-        let included: HashSet<String> = sequences
-            .iter()
-            .filter(|record| record.sequence.len() >= min_sequence_length)
-            .filter(|record| {
-                !options.cas_only_with_crispr || with_crispr.contains(record.id.as_str())
-            })
-            .map(|record| record.id.clone())
-            .collect();
-        let owned_sequences: Vec<(String, Vec<u8>)> = sequences
-            .iter()
-            .filter(|record| included.contains(&record.id))
-            .map(|record| (record.id.clone(), record.sequence.clone()))
-            .collect();
-        let analysis = detect_cas_systems(&owned_sequences, cas_config, Some(&included))?;
-        cas_clusters = analysis.clusters;
-        cas_hits = analysis.hits;
-        proteome = Some(analysis.proteome);
-    }
+    let (proteome, cas_hits, cas_clusters) = match cas_analysis {
+        Some(analysis) => (Some(analysis.proteome), analysis.hits, analysis.clusters),
+        None => (None, Vec::new(), Vec::new()),
+    };
 
     let sequence_info: Vec<SequenceInfo> =
         sequences.iter().map(SequenceInfo::from_record).collect();
