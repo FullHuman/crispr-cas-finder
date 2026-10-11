@@ -780,7 +780,7 @@ mod tests {
             ..CasFinderConfig::default()
         };
         let error = run_casfinder(Path::new("missing.fa"), &config).unwrap_err();
-        assert!(error.to_string().contains("only genetic code 11"));
+        assert!(error.to_string().contains("Unsupported genetic code"));
     }
 
     #[test]

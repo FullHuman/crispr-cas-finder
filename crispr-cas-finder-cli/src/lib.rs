@@ -173,7 +173,7 @@ pub struct Cli {
     #[arg(help = "Cas model set: SubTyping, Typing, or General (class level)")]
     definition: DefinitionArgument,
     #[arg(long, alias = "geneticCode", value_name = "INT", default_value_t = 11,
-        value_parser = parse_genetic_code, help = "Genetic code (only 11 is currently supported)")]
+        value_parser = parse_genetic_code, help = "NCBI genetic code for gene prediction and translation: 1-6, 9-16 or 21-25")]
     genetic_code: usize,
     #[arg(long, action = clap::ArgAction::SetTrue)]
     #[arg(help = "Predict genes in metagenomic mode for every sequence")]
@@ -668,7 +668,7 @@ mod tests {
 
     #[test]
     fn unsupported_genetic_codes_are_rejected_before_analysis() {
-        for code in ["1", "4", "25", "267"] {
+        for code in ["0", "7", "20", "267"] {
             let error = Cli::try_parse_from([
                 "crispr-cas-finder",
                 "--in",
@@ -677,7 +677,7 @@ mod tests {
                 code,
             ])
             .unwrap_err();
-            assert!(error.to_string().contains("only genetic code 11"));
+            assert!(error.to_string().contains("Unsupported genetic code"));
         }
     }
 

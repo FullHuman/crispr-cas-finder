@@ -77,6 +77,8 @@ pub fn predict_proteome(
         OrphosAnalyzer::new(OrphosConfig {
             metagenomic,
             closed_ends: true,
+            // CRISPRCasFinder runs Prodigal with -m: no gene across a run of N.
+            mask_n_runs: true,
             quiet: true,
             translation_table: Some(translation_table_id),
             ..OrphosConfig::default()

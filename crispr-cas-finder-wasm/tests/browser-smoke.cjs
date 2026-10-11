@@ -66,8 +66,8 @@ function assertEquivalent(actual, expected, where) {
         missingHeader: fails(() => wasm.find_repeats('ACGT', {}), /FASTA/),
         emptySequence: fails(() => wasm.find_repeats('>a\n', {}), /empty FASTA/),
         defaults: Array.isArray(wasm.find_repeats('>a\nACGT', undefined)),
-        unsupportedCode: fails(() => wasm.cas_prepare('>a\nACGT', [], { genetic_code: 4 }), /only genetic code 11/),
-        overflowingCode: fails(() => wasm.cas_prepare('>a\nACGT', [], { genetic_code: 267 }), /only genetic code 11/),
+        unsupportedCode: fails(() => wasm.cas_prepare('>a\nACGT', [], { genetic_code: 7 }), /Unsupported genetic code/),
+        overflowingCode: fails(() => wasm.cas_prepare('>a\nACGT', [], { genetic_code: 267 }), /Unsupported genetic code/),
       };
       // Empty model list isolates the state machine from gene-prediction fixtures.
       const fasta = '>tiny\n' + 'ACGT'.repeat(100);

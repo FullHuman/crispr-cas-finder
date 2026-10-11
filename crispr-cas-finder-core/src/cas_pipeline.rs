@@ -371,31 +371,112 @@ pub fn translate_dna(seq: &[u8], table: &HashMap<[u8; 3], u8>) -> String {
     protein
 }
 
-/// Validate the translation code shared by gene prediction and protein translation.
-/// The gene predictor (Orphos 0.3.0) always trains with code 11 and ignores a
-/// requested table, so other codes are rejected rather than silently mispredicted.
+/// NCBI translation tables supported by the gene predictor, as amino acids
+/// for codons in TCAG order (TTT, TTC, TTA, TTG, TCT, ...).
+const TRANSLATION_TABLES: &[(usize, &[u8; 64])] = &[
+    (
+        1,
+        b"FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG",
+    ),
+    (
+        2,
+        b"FFLLSSSSYY**CCWWLLLLPPPPHHQQRRRRIIMMTTTTNNKKSS**VVVVAAAADDEEGGGG",
+    ),
+    (
+        3,
+        b"FFLLSSSSYY**CCWWTTTTPPPPHHQQRRRRIIMMTTTTNNKKSSRRVVVVAAAADDEEGGGG",
+    ),
+    (
+        4,
+        b"FFLLSSSSYY**CCWWLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG",
+    ),
+    (
+        5,
+        b"FFLLSSSSYY**CCWWLLLLPPPPHHQQRRRRIIMMTTTTNNKKSSSSVVVVAAAADDEEGGGG",
+    ),
+    (
+        6,
+        b"FFLLSSSSYYQQCC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG",
+    ),
+    (
+        9,
+        b"FFLLSSSSYY**CCWWLLLLPPPPHHQQRRRRIIIMTTTTNNNKSSSSVVVVAAAADDEEGGGG",
+    ),
+    (
+        10,
+        b"FFLLSSSSYY**CCCWLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG",
+    ),
+    (
+        11,
+        b"FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG",
+    ),
+    (
+        12,
+        b"FFLLSSSSYY**CC*WLLLSPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG",
+    ),
+    (
+        13,
+        b"FFLLSSSSYY**CCWWLLLLPPPPHHQQRRRRIIMMTTTTNNKKSSGGVVVVAAAADDEEGGGG",
+    ),
+    (
+        14,
+        b"FFLLSSSSYYY*CCWWLLLLPPPPHHQQRRRRIIIMTTTTNNNKSSSSVVVVAAAADDEEGGGG",
+    ),
+    (
+        15,
+        b"FFLLSSSSYY*QCC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG",
+    ),
+    (
+        16,
+        b"FFLLSSSSYY*LCC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG",
+    ),
+    (
+        21,
+        b"FFLLSSSSYY**CCWWLLLLPPPPHHQQRRRRIIMMTTTTNNNKSSSSVVVVAAAADDEEGGGG",
+    ),
+    (
+        22,
+        b"FFLLSS*SYY*LCC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG",
+    ),
+    (
+        23,
+        b"FF*LSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG",
+    ),
+    (
+        24,
+        b"FFLLSSSSYY**CCWWLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSSKVVVVAAAADDEEGGGG",
+    ),
+    (
+        25,
+        b"FFLLSSSSYY**CCGWLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG",
+    ),
+];
+
+/// Validate the translation code shared by gene prediction and protein
+/// translation: the NCBI tables Prodigal supports (1-6, 9-16, 21-25).
 pub fn validate_genetic_code(genetic_code: usize) -> anyhow::Result<u8> {
-    if genetic_code != 11 {
+    if !TRANSLATION_TABLES
+        .iter()
+        .any(|(code, _)| *code == genetic_code)
+    {
         anyhow::bail!(
-            "Unsupported genetic code {genetic_code}; only genetic code 11 is currently supported \
-             for gene prediction. Supply an annotation (GFF3 and protein FASTA) to analyse \
-             organisms using another code"
+            "Unsupported genetic code {genetic_code}; supported codes are 1-6, 9-16 and 21-25"
         );
     }
-    Ok(11)
+    Ok(genetic_code as u8)
 }
 
 pub fn codon_table(genetic_code: usize) -> anyhow::Result<HashMap<[u8; 3], u8>> {
     validate_genetic_code(genetic_code)?;
     const BASES: [u8; 4] = *b"TCAG";
-    // Standard code and bacterial code 11 have identical amino-acid mappings.
-    // Their difference is alternative initiation codons, which Orphos handles
-    // while predicting ORFs rather than while translating internal codons.
-    const AMINO_ACIDS: &[u8; 64] =
-        b"FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG";
+    let amino_acids = TRANSLATION_TABLES
+        .iter()
+        .find(|(code, _)| *code == genetic_code)
+        .map(|(_, amino_acids)| *amino_acids)
+        .expect("validated genetic code has a table");
 
     let mut map = HashMap::with_capacity(64);
-    for (index, amino_acid) in AMINO_ACIDS.iter().copied().enumerate() {
+    for (index, amino_acid) in amino_acids.iter().copied().enumerate() {
         map.insert(
             [BASES[index / 16], BASES[(index / 4) % 4], BASES[index % 4]],
             amino_acid,
@@ -796,14 +877,48 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_genetic_codes_are_not_silently_translated_as_code_11() {
-        for code in [0, 1, 4, 25, 267, usize::MAX] {
+    fn unsupported_genetic_codes_are_rejected() {
+        for code in [0, 7, 8, 17, 20, 26, 267] {
             assert!(
                 codon_table(code)
                     .unwrap_err()
                     .to_string()
-                    .contains("only genetic code 11")
+                    .contains("Unsupported genetic code")
             );
         }
+    }
+
+    #[test]
+    fn alternative_codes_change_only_their_documented_codons() {
+        let standard = codon_table(11).unwrap();
+        let differences = |code: usize| -> Vec<(String, char)> {
+            let table = codon_table(code).unwrap();
+            let mut changed: Vec<(String, char)> = table
+                .iter()
+                .filter(|(codon, amino_acid)| standard[*codon] != **amino_acid)
+                .map(|(codon, amino_acid)| {
+                    (
+                        String::from_utf8(codon.to_vec()).unwrap(),
+                        *amino_acid as char,
+                    )
+                })
+                .collect();
+            changed.sort();
+            changed
+        };
+        assert!(differences(1).is_empty());
+        // Mycoplasma and Spiroplasma: TGA codes for tryptophan.
+        assert_eq!(differences(4), [("TGA".to_string(), 'W')]);
+        // Candidate division SR1 and Gracilibacteria: TGA codes for glycine.
+        assert_eq!(differences(25), [("TGA".to_string(), 'G')]);
+        assert_eq!(
+            differences(6),
+            [("TAA".to_string(), 'Q'), ("TAG".to_string(), 'Q')]
+        );
+        assert_eq!(
+            translate_dna(b"ATGTGAAAATAA", &codon_table(4).unwrap()),
+            "MWK"
+        );
+        assert_eq!(translate_dna(b"ATGTGAAAATAA", &standard), "M");
     }
 }

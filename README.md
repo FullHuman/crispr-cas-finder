@@ -39,7 +39,8 @@ The CLI embeds its CasFinder 2.0.3 models, including for `cargo install` and
 downloaded executables. No separate data download or source checkout is needed.
 For Cas analysis, the embedded files are extracted to a private temporary directory
 and removed when the run finishes. Custom data can be selected with
-`--cas-models-dir` and `--cas-profiles-dir`. Only genetic code 11 is supported.
+`--cas-models-dir` and `--cas-profiles-dir`. Other genetic codes are selected
+with `--genetic-code` (for example 4 for Mycoplasma).
 
 ### From Source
 
