@@ -116,22 +116,26 @@ pub fn viterbi_filter_f32(dsq: &[u8], l: usize, om: &OptimizedProfile) -> f32 {
             dcv = *dmx_qi + dd_v;
         }
 
-        // Additional DD passes for cross-stripe propagation
+        // Additional DD passes for cross-stripe propagation. As in HMMER's
+        // lazy-F evaluation, a pass stops at the first vector the carry does
+        // not improve: from there on it would only recompute what the
+        // previous pass already propagated, so the fixed point is unchanged.
         for _pass in 1..4 {
             dcv = shr_f32x4(dcv);
-            let mut any_change = false;
+            let mut reached_end = true;
             for (qi, dmx_qi) in dmx.iter_mut().enumerate() {
-                let dd_v = F32x4::from_slice(&om.tlv[(dd_base + qi) * 4..(dd_base + qi) * 4 + 4]);
                 let old = *dmx_qi;
-                let new_val = old.simd_max(dcv);
-                if new_val.simd_gt(old).any() {
-                    any_change = true;
+                if !dcv.simd_gt(old).any() {
+                    reached_end = false;
+                    break;
                 }
+                let dd_v = F32x4::from_slice(&om.tlv[(dd_base + qi) * 4..(dd_base + qi) * 4 + 4]);
+                let new_val = old.simd_max(dcv);
                 *dmx_qi = new_val;
                 xe_v = xe_v.simd_max(new_val);
                 dcv = new_val + dd_v;
             }
-            if !any_change {
+            if !reached_end {
                 break;
             }
         }

@@ -1,40 +1,22 @@
-use crispr_cas_finder_core::hmmer_core::{
-    alphabet::Alphabet,
-    background::BackgroundModel,
-    config::SearchMode,
-    modelconfig,
-    pipeline::search::{CapacityHints, FilterPolicy, SearchOutcome, SearchPlan, SearchQuery},
-    profile::Profile,
-    sequence::DigitalSequence,
-};
+use crispr_cas_finder_core::hmmer_core::{alphabet::Alphabet, sequence::DigitalSequence};
 use crispr_cas_finder_core::hmmer_io::read_hmm;
 use crispr_cas_finder_core::{
-    DetectionParams,
-    cas_pipeline::{
-        GeneRecord, ModelDefinition, build_model_registry, codon_table,
-        gene_coordinates_from_records, reverse_complement_dna, translate_dna,
-        validate_genetic_code,
-    },
-    cas_types::{HmmerHit, HmmerOptions, ModelRegistry, RepliconTopology, select_best_solution},
-    casfinder::{RepliconProteins, evaluate_detected_systems},
-    casparser::{CasCluster, from_search_results_with_gene_map},
+    CasFinderConfig, CrisprArray, DetectionParams, SequenceRecord,
+    annotation::{AUTO_METAGENOME_BELOW, GenePredictionOptions, Proteome, predict_proteome},
+    cas_pipeline::{ModelDefinition, build_model_registry, validate_genetic_code},
+    cas_types::{HmmerHit, ModelRegistry, RepliconTopology},
+    casfinder::{finalize_systems, legacy_hit_filtering, search_hmm_profile},
+    casparser::CasCluster,
     detect_crisprs,
+    macsy::HitWeights,
+    report::{CasParameters, DEFAULT_VICINITY, ReportParameters, SequenceInfo, build_report},
 };
-use orphos_core::{OrphosAnalyzer, config::OrphosConfig};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, MutexGuard};
 use wasm_bindgen::prelude::*;
 pub use wasm_bindgen_rayon::init_thread_pool;
-
-/// Match HMMER's default per-domain inclusion threshold used by the CLI.
-const MAX_DOMAIN_INCLUSION_EVALUE: f64 = 0.01;
-
-fn included_domain_evalue(log_pvalue: f64, target_count: usize) -> Option<f64> {
-    let inclusion_evalue = log_pvalue.exp() * target_count.max(1) as f64;
-    (inclusion_evalue <= MAX_DOMAIN_INCLUSION_EVALUE).then_some(inclusion_evalue)
-}
 
 #[wasm_bindgen]
 pub fn init_panic_hook() {
@@ -57,9 +39,24 @@ pub struct WasmFinderOptions {
 pub struct CasOptions {
     pub genetic_code: Option<usize>,
     pub metagenome: Option<bool>,
+    /// Sequences shorter than this use metagenomic gene prediction; 0 disables.
+    pub auto_metagenome_below: Option<usize>,
+    /// Name of the model set the supplied models belong to.
+    pub definition: Option<String>,
+    /// Search Cas systems only on sequences carrying a CRISPR array.
+    pub only_with_crispr: Option<bool>,
+    /// Sequence IDs to annotate; all sequences when absent.
+    pub sequence_ids: Option<Vec<String>>,
 }
 
-fn parse_fasta_sequences(fasta_content: &str) -> Result<Vec<(String, Vec<u8>)>, String> {
+/// Options for relating arrays and Cas systems in the final report.
+#[derive(Deserialize, Default)]
+pub struct ReportOptions {
+    pub vicinity: Option<usize>,
+    pub locus_distance: Option<usize>,
+}
+
+fn parse_fasta_sequences(fasta_content: &str) -> Result<Vec<SequenceRecord>, String> {
     let reader = bio::io::fasta::Reader::new(fasta_content.as_bytes());
     let mut sequences = Vec::new();
     let mut ids = HashSet::new();
@@ -72,12 +69,24 @@ fn parse_fasta_sequences(fasta_content: &str) -> Result<Vec<(String, Vec<u8>)>, 
         if !ids.insert(record.id().to_string()) {
             return Err(format!("duplicate FASTA identifier: {}", record.id()));
         }
-        sequences.push((record.id().to_string(), record.seq().to_vec()));
+        sequences.push(SequenceRecord {
+            id: record.id().to_string(),
+            description: record.desc().unwrap_or_default().to_string(),
+            sequence: record.seq().to_vec(),
+        });
     }
     if sequences.is_empty() {
         return Err("FASTA input contains no sequences".to_string());
     }
     Ok(sequences)
+}
+
+/// Serialize as plain JS objects and arrays. The default serializer turns
+/// maps into JS `Map`s, which `postMessage` consumers and JSON cannot read.
+fn to_js<T: Serialize>(value: &T) -> Result<JsValue, JsValue> {
+    value
+        .serialize(&serde_wasm_bindgen::Serializer::json_compatible())
+        .map_err(|e| JsValue::from_str(&format!("serialization failed: {e}")))
 }
 
 fn parse_options<T: serde::de::DeserializeOwned + Default>(value: JsValue) -> Result<T, JsValue> {
@@ -96,12 +105,11 @@ pub fn find_repeats(fasta_content: &str, options_js: JsValue) -> Result<JsValue,
     let sequences = parse_fasta_sequences(fasta_content).map_err(|e| JsValue::from_str(&e))?;
     let seq_refs: Vec<(&str, &[u8])> = sequences
         .iter()
-        .map(|(id, seq)| (id.as_str(), seq.as_slice()))
+        .map(|record| (record.id.as_str(), record.sequence.as_slice()))
         .collect();
 
     let arrays = detect_crisprs(&seq_refs, &params);
-    serde_wasm_bindgen::to_value(&arrays)
-        .map_err(|e| JsValue::from_str(&format!("serialization failed: {e}")))
+    to_js(&arrays)
 }
 
 // ---------------------------------------------------------------------------
@@ -110,13 +118,11 @@ pub fn find_repeats(fasta_content: &str, options_js: JsValue) -> Result<JsValue,
 
 /// Opaque handle holding intermediate CAS detection state.
 struct CasContext {
-    genes: Vec<GeneRecord>,
-    replicons: Vec<RepliconProteins>,
+    proteome: Proteome,
     targets: Vec<DigitalSequence>,
     amino_alphabet: Alphabet,
     registry: ModelRegistry,
     needed_profiles: HashSet<String>,
-    hmmer_options: HmmerOptions,
     all_hits: HashMap<String, Vec<HmmerHit>>,
     models_raw: Vec<ModelDefinition>,
 }
@@ -155,70 +161,27 @@ pub fn cas_prepare(
     let cas_opts: CasOptions = parse_options(cas_options_js)?;
 
     let genetic_code = cas_opts.genetic_code.unwrap_or(11);
-    let metagenome = cas_opts.metagenome.unwrap_or(false);
-    let translation_table =
-        validate_genetic_code(genetic_code).map_err(|e| JsValue::from_str(&e.to_string()))?;
-
-    let config = OrphosConfig {
-        metagenomic: metagenome,
-        closed_ends: true,
-        quiet: true,
-        translation_table: Some(translation_table),
-        ..OrphosConfig::default()
+    validate_genetic_code(genetic_code).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let prediction_options = GenePredictionOptions {
+        genetic_code,
+        metagenome: cas_opts.metagenome.unwrap_or(false),
+        auto_metagenome_below: cas_opts
+            .auto_metagenome_below
+            .unwrap_or(AUTO_METAGENOME_BELOW),
     };
-    let analyzer = OrphosAnalyzer::new(config);
-    let sequences = parse_fasta_sequences(fasta_content).map_err(|e| JsValue::from_str(&e))?;
-
-    let mut all_genes: Vec<GeneRecord> = Vec::new();
-    let mut replicons = Vec::new();
-    let table = codon_table(genetic_code).map_err(|e| JsValue::from_str(&e.to_string()))?;
-
-    for (seq_id, seq_bytes) in &sequences {
-        let mut protein_ids = Vec::new();
-        let results = analyzer
-            .analyze_sequence_bytes(seq_bytes, seq_id.clone(), None)
-            .map_err(|e| JsValue::from_str(&format!("Gene prediction failed: {e}")))?;
-
-        for gene in &results.genes {
-            let begin = gene.coordinates.begin.saturating_sub(1);
-            let end = gene.coordinates.end.saturating_sub(1);
-            if begin > end || end >= seq_bytes.len() {
-                continue;
-            }
-            let cds_nt = &seq_bytes[begin..=end];
-            let strand_str = format!("{}", gene.coordinates.strand);
-            let cds_nt = if strand_str == "-" {
-                reverse_complement_dna(cds_nt)
-            } else {
-                cds_nt.to_vec()
-            };
-            let protein = translate_dna(&cds_nt, &table);
-            if protein.is_empty() {
-                continue;
-            }
-            let gene_count = all_genes.len() + 1;
-            let gene_id = format!("{}_{}", seq_id, gene_count);
-            protein_ids.push(gene_id.clone());
-            all_genes.push(GeneRecord {
-                id: gene_id,
-                protein,
-                start: gene.coordinates.begin,
-                end: gene.coordinates.end,
-                strand: if strand_str == "-" {
-                    "-".to_string()
-                } else {
-                    "+".to_string()
-                },
-            });
-        }
-        replicons.push(RepliconProteins {
-            name: seq_id.clone(),
-            protein_ids,
-        });
-    }
+    let sequences: Vec<(String, Vec<u8>)> = parse_fasta_sequences(fasta_content)
+        .map_err(|e| JsValue::from_str(&e))?
+        .into_iter()
+        .map(|record| (record.id, record.sequence))
+        .collect();
+    let include: Option<HashSet<String>> =
+        cas_opts.sequence_ids.map(|ids| ids.into_iter().collect());
+    let proteome = predict_proteome(&sequences, &prediction_options, include.as_ref())
+        .map_err(|e| JsValue::from_str(&format!("Gene prediction failed: {e}")))?;
 
     let amino_alphabet = Alphabet::amino();
-    let targets = all_genes
+    let targets = proteome
+        .genes
         .iter()
         .map(|gene| {
             DigitalSequence::from_bytes(&gene.id, "", gene.protein.as_bytes(), &amino_alphabet)
@@ -238,17 +201,13 @@ pub fn cas_prepare(
     }
 
     let needed_list: Vec<String> = needed_profiles.iter().cloned().collect();
-    let gene_count = all_genes.len();
+    let gene_count = proteome.genes.len();
     *context = Some(CasContext {
-        replicons,
-        genes: all_genes,
+        proteome,
         targets,
         amino_alphabet,
         registry,
         needed_profiles,
-        hmmer_options: HmmerOptions {
-            coverage_profile: 0.4,
-        },
         all_hits: HashMap::new(),
         models_raw: models,
     });
@@ -264,8 +223,7 @@ pub fn cas_prepare(
         needed_profiles: needed_list,
         gene_count,
     };
-    serde_wasm_bindgen::to_value(&info)
-        .map_err(|e| JsValue::from_str(&format!("serialization failed: {e}")))
+    to_js(&info)
 }
 
 /// Step 2 — search one HMM profile against the target proteins.
@@ -296,74 +254,15 @@ fn search_profile(
     let mut reader = std::io::BufReader::new(profile_data.as_bytes());
     let (alphabet, hmm) =
         read_hmm(&mut reader).map_err(|e| format!("Failed to parse HMM {profile_name}: {e}"))?;
-    if alphabet.kind != ctx.amino_alphabet.kind || hmm.num_nodes == 0 {
-        return Err(format!(
-            "HMM {profile_name} must be a nonempty amino-acid model"
-        ));
-    }
-    let avg_len = if ctx.targets.is_empty() {
-        400
-    } else {
-        ctx.targets.iter().map(|s| s.len()).sum::<usize>() / ctx.targets.len()
-    };
-    let bg = BackgroundModel::new(&ctx.amino_alphabet);
-    let mut gm = Profile::new(hmm.num_nodes, &ctx.amino_alphabet);
-    modelconfig::profile_config(&hmm, &bg, &mut gm, avg_len, SearchMode::Local);
-    let query = SearchQuery::from_configured_profile(gm, bg)
-        .map_err(|e| format!("Query config failed for {profile_name}: {e}"))?;
-    let plan = SearchPlan::builder(query)
-        .filters(FilterPolicy::default())
-        .build()
-        .map_err(|e| format!("Search plan failed for {profile_name}: {e}"))?;
-    let mut worker = plan
-        .spawn_worker(CapacityHints {
-            target_length: avg_len,
-        })
-        .map_err(|e| format!("Spawn worker failed for {profile_name}: {e}"))?;
-    let mut hits = Vec::new();
-    for seq in &ctx.targets {
-        let report = worker
-            .search(seq)
-            .map_err(|e| format!("Search error for {profile_name}: {e}"))?;
-        if let SearchOutcome::Hit(hit) = report.outcome {
-            for domain in hit.domains {
-                let Some(i_evalue) = included_domain_evalue(domain.log_pvalue, ctx.targets.len())
-                else {
-                    continue;
-                };
-                let Some(profile_span) = domain
-                    .hmm_to
-                    .checked_sub(domain.hmm_from)
-                    .and_then(|v| v.checked_add(1))
-                else {
-                    continue;
-                };
-                let Some(sequence_span) = domain
-                    .alignment_end
-                    .checked_sub(domain.alignment_start)
-                    .and_then(|v| v.checked_add(1))
-                else {
-                    continue;
-                };
-                let profile_coverage = profile_span as f64 / hmm.num_nodes as f64;
-                if profile_coverage < ctx.hmmer_options.coverage_profile || seq.is_empty() {
-                    continue;
-                }
-                hits.push(HmmerHit {
-                    id: hit.name.clone(),
-                    gene_name: profile_name.to_string(),
-                    seq_len: seq.len() as u32,
-                    i_evalue,
-                    score: domain.bitscore as f64,
-                    profile_coverage,
-                    seq_coverage: sequence_span as f64 / seq.len() as f64,
-                    begin_match: domain.alignment_start as u32,
-                    end_match: domain.alignment_end as u32,
-                });
-            }
-        }
-    }
-    Ok(hits)
+    search_hmm_profile(
+        profile_name,
+        &alphabet,
+        &hmm,
+        &ctx.targets,
+        &ctx.amino_alphabet,
+        &legacy_hit_filtering(),
+    )
+    .map_err(|e| e.to_string())
 }
 
 /// Search all required profiles in parallel. Any parse/search error fails the
@@ -409,36 +308,70 @@ pub fn cas_finalize() -> Result<JsValue, JsValue> {
     let ctx = lock_context()?
         .take()
         .ok_or_else(|| JsValue::from_str("cas_prepare not called"))?;
-    let gene_map = gene_coordinates_from_records(&ctx.genes);
     let model_names: Vec<_> = ctx
         .models_raw
         .iter()
         .map(|m| format!("{}/{}", m.family, m.name))
         .collect();
-    let mut detected_systems = evaluate_detected_systems(
+    let (_, cas_clusters): (_, Vec<CasCluster>) = finalize_systems(
         &ctx.registry,
         &model_names,
         &ctx.all_hits,
-        &ctx.replicons,
+        &ctx.proteome,
         RepliconTopology::Circular,
+        CasFinderConfig::default().min_best_hit_score,
+        &HitWeights::default(),
     );
-    if detected_systems.len() > 1 {
-        detected_systems = select_best_solution(detected_systems);
-    }
-    let minimum_score = crispr_cas_finder_core::CasFinderConfig::default().min_best_hit_score;
-    detected_systems.retain(|system| system.hits.iter().any(|hit| hit.hit.score >= minimum_score));
+    to_js(&cas_clusters)
+}
 
-    let cas_clusters: Vec<CasCluster> = from_search_results_with_gene_map(
-        &crispr_cas_finder_core::cas_types::SearchResults {
-            systems: detected_systems,
-            rejected: Vec::new(),
-            skipped_replicons: Vec::new(),
-        },
-        &gene_map,
-    );
+/// Step 4 — assemble the same report the command-line tool writes.
+///
+/// `crisprs` is the result of `find_repeats` and `cas_clusters` the result
+/// of `cas_finalize`. Pass `null` as `cas_options` when Cas detection did
+/// not run.
+#[wasm_bindgen]
+pub fn build_analysis_report(
+    fasta_content: &str,
+    crisprs_js: JsValue,
+    cas_clusters_js: JsValue,
+    options_js: JsValue,
+    cas_options_js: JsValue,
+    report_options_js: JsValue,
+) -> Result<JsValue, JsValue> {
+    let crisprs: Vec<CrisprArray> = serde_wasm_bindgen::from_value(crisprs_js)
+        .map_err(|e| JsValue::from_str(&format!("invalid CRISPR arrays: {e}")))?;
+    let cas_clusters: Vec<CasCluster> = parse_options(cas_clusters_js)?;
+    let options: WasmFinderOptions = parse_options(options_js)?;
+    let detection = build_detection_params(&options).map_err(|e| JsValue::from_str(&e))?;
+    let cas_ran = !(cas_options_js.is_null() || cas_options_js.is_undefined());
+    let cas_options: CasOptions = parse_options(cas_options_js)?;
+    let report_options: ReportOptions = parse_options(report_options_js)?;
+    let defaults = CasFinderConfig::default();
 
-    serde_wasm_bindgen::to_value(&cas_clusters)
-        .map_err(|e| JsValue::from_str(&format!("serialization failed: {e}")))
+    let parameters = ReportParameters {
+        detection,
+        cas: cas_ran.then(|| CasParameters {
+            definition: cas_options.definition.unwrap_or(defaults.definition),
+            genetic_code: cas_options.genetic_code.unwrap_or(defaults.genetic_code),
+            metagenome: cas_options.metagenome.unwrap_or(defaults.metagenome),
+            auto_metagenome_below: cas_options
+                .auto_metagenome_below
+                .unwrap_or(AUTO_METAGENOME_BELOW),
+            user_annotation: false,
+            topology: RepliconTopology::Circular,
+            min_best_hit_score: defaults.min_best_hit_score,
+            only_with_crispr: cas_options.only_with_crispr.unwrap_or(false),
+        }),
+        vicinity: report_options.vicinity.unwrap_or(DEFAULT_VICINITY),
+        locus_distance: report_options.locus_distance,
+    };
+    let sequences: Vec<SequenceInfo> = parse_fasta_sequences(fasta_content)
+        .map_err(|e| JsValue::from_str(&e))?
+        .iter()
+        .map(SequenceInfo::from_record)
+        .collect();
+    to_js(&build_report(&sequences, crisprs, cas_clusters, parameters))
 }
 
 fn build_detection_params(options: &WasmFinderOptions) -> Result<DetectionParams, String> {
@@ -482,8 +415,16 @@ mod tests {
         assert_eq!(
             sequences,
             vec![
-                ("a".into(), b"ACGTTGCA".to_vec()),
-                ("b".into(), b"AAAA".to_vec())
+                SequenceRecord {
+                    id: "a".into(),
+                    description: "description".into(),
+                    sequence: b"ACGTTGCA".to_vec(),
+                },
+                SequenceRecord {
+                    id: "b".into(),
+                    description: String::new(),
+                    sequence: b"AAAA".to_vec(),
+                },
             ]
         );
     }
@@ -517,13 +458,11 @@ mod tests {
     #[test]
     fn profile_errors_are_not_silently_skipped() {
         let ctx = CasContext {
-            genes: vec![],
-            replicons: vec![],
+            proteome: Proteome::default(),
             targets: vec![],
             amino_alphabet: Alphabet::amino(),
             registry: ModelRegistry::new(),
             needed_profiles: HashSet::new(),
-            hmmer_options: HmmerOptions::default(),
             all_hits: HashMap::new(),
             models_raw: vec![],
         };
@@ -559,18 +498,6 @@ mod tests {
     }
 
     #[test]
-    fn domain_inclusion_uses_database_sized_evalue() {
-        let target_count = 4_318;
-        let accepted_log_pvalue = (0.005 / target_count as f64).ln();
-        let rejected_log_pvalue = (0.02 / target_count as f64).ln();
-
-        let accepted = included_domain_evalue(accepted_log_pvalue, target_count).unwrap();
-        assert!((accepted - 0.005).abs() < 1e-12);
-        assert!(included_domain_evalue(rejected_log_pvalue, target_count).is_none());
-        assert!(included_domain_evalue(f64::NAN, target_count).is_none());
-    }
-
-    #[test]
     fn assign_hits_prefers_local_gene_over_inherited_duplicate() {
         let model = SystemModel {
             fully_qualified_name: "CASFinder/CAS-TypeIE".to_string(),
@@ -585,6 +512,7 @@ mod tests {
             min_mandatory_genes_required: 1,
             min_genes_required: 1,
             multi_loci: false,
+            max_nb_genes: None,
         };
 
         let hmmer_hits = HashMap::from([
@@ -618,6 +546,7 @@ mod tests {
             min_mandatory_genes_required: 0,
             min_genes_required: 1,
             multi_loci: false,
+            max_nb_genes: None,
         };
 
         let hmmer_hits = HashMap::from([(

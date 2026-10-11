@@ -12,28 +12,35 @@ use log::info;
 use rayon::prelude::*;
 use std::path::Path;
 
+pub mod annotation;
+pub mod association;
 pub mod cas_pipeline;
 pub mod cas_types;
 pub mod casfinder;
 pub mod casparser;
+pub mod conservation;
 pub mod detect;
 mod dna;
 pub mod io;
+pub mod macsy;
 pub mod repeat_db;
+pub mod report;
 pub mod types;
 
 pub use cas_pipeline::{GeneRecord, ModelDefinition};
 pub use cas_types::RepliconTopology;
 pub use casparser::{CasCluster, CasGene, GeneCoordinates};
+pub use conservation::ArrayStatistics;
 pub use repeat_db::{RepeatLookup, lookup_repeat};
-pub use types::{
-    CasFinderConfig, CrisprArray, DetectionParams, FullAnalysisResult, Orientation, Repeat, Spacer,
+pub use report::{
+    Analysis, AnalysisOptions, AnalysisReport, SequenceRecord, analyze, build_report, parse_fasta,
 };
+pub use types::{CasFinderConfig, CrisprArray, DetectionParams, Orientation, Repeat, Spacer};
 
 use detect::{
-    RepeatHit, check_short_crispr, check_spacer_similarity, cluster_repeats, extract_spacers,
-    find_direct_repeats, get_repeat_candidates, infer_orientation, refine_cluster_with_consensus,
-    trim_consensus,
+    RepeatHit, check_short_crispr, cluster_repeats, extend_with_truncated_repeats, extract_spacers,
+    find_direct_repeats, foster_score, get_repeat_candidates, infer_orientation,
+    refine_cluster_with_consensus, trim_consensus,
 };
 
 /// Detect CRISPR arrays in a set of sequences.
@@ -50,24 +57,69 @@ use detect::{
 /// A `Vec<CrisprArray>` of detected arrays, each with repeats, spacers, and
 /// an evidence level.
 pub fn detect_crisprs(sequences: &[(&str, &[u8])], params: &DetectionParams) -> Vec<CrisprArray> {
+    let params = &*params.effective();
     let min_repeat_count = params.min_spacer_count.max(1) + 1;
+    // Small arrays must survive detection to be reclassified, so the
+    // evidence filter is applied afterwards in that case.
+    let search_params = if params.classify_small_arrays && params.min_evidence_level > 1 {
+        std::borrow::Cow::Owned(DetectionParams {
+            min_evidence_level: 1,
+            ..params.clone()
+        })
+    } else {
+        std::borrow::Cow::Borrowed(params)
+    };
+    let search_params = &*search_params;
 
-    if sequences.len() > 1 {
+    let mut arrays: Vec<CrisprArray> = if sequences.len() > 1 {
         let arrays_by_sequence: Vec<Vec<CrisprArray>> = sequences
             .par_iter()
             .map(|&(seq_id, seq)| {
-                detect_crisprs_for_sequence(seq_id, seq, params, min_repeat_count)
+                detect_crisprs_for_sequence(seq_id, seq, search_params, min_repeat_count)
             })
             .collect();
-        return arrays_by_sequence.into_iter().flatten().collect();
+        arrays_by_sequence.into_iter().flatten().collect()
+    } else {
+        sequences
+            .iter()
+            .flat_map(|&(seq_id, seq)| {
+                detect_crisprs_for_sequence(seq_id, seq, search_params, min_repeat_count)
+            })
+            .collect()
+    };
+
+    if params.classify_small_arrays {
+        reclassify_small_arrays(&mut arrays);
+        arrays.retain(|array| array.evidence_level >= params.min_evidence_level);
     }
 
-    sequences
-        .iter()
-        .flat_map(|&(seq_id, seq)| {
-            detect_crisprs_for_sequence(seq_id, seq, params, min_repeat_count)
-        })
-        .collect()
+    let mut arrays_per_sequence: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    for array in &mut arrays {
+        let count = arrays_per_sequence.entry(array.seq_id.clone()).or_default();
+        *count += 1;
+        array.id = format!("{}_CRISPR_{count}", array.seq_id);
+    }
+    arrays
+}
+
+/// Raise level-1 arrays to level 4 when their consensus repeat, or its
+/// reverse complement, is the consensus of a level-4 array in the input.
+pub fn reclassify_small_arrays(arrays: &mut [CrisprArray]) {
+    let mut trusted_repeats = std::collections::HashSet::new();
+    for array in arrays.iter().filter(|array| array.evidence_level == 4) {
+        let repeat = array.consensus_repeat.to_ascii_uppercase();
+        trusted_repeats.insert(
+            String::from_utf8_lossy(&dna::reverse_complement(repeat.as_bytes())).into_owned(),
+        );
+        trusted_repeats.insert(repeat);
+    }
+    for array in arrays.iter_mut().filter(|array| array.evidence_level == 1) {
+        if trusted_repeats.contains(&array.consensus_repeat.to_ascii_uppercase()) {
+            array.reclassified_from = Some(1);
+            array.evidence_level = 4;
+        }
+    }
 }
 
 fn detect_crisprs_for_sequence(
@@ -108,6 +160,14 @@ fn detect_crisprs_for_sequence(
     arrays
 }
 
+/// First and last repeat start, the range `extract_spacers` works over.
+fn repeat_span(repeats: &[RepeatHit]) -> (usize, usize) {
+    (
+        repeats.first().map_or(0, |hit| hit.pos1),
+        repeats.last().map_or(0, |hit| hit.pos1),
+    )
+}
+
 /// Process a single cluster of DR hits into a CrisprArray (if valid).
 fn process_cluster(
     seq_id: &str,
@@ -125,6 +185,7 @@ fn process_cluster(
     let mut best_consensus = String::new();
     let mut best_refined: Vec<RepeatHit> = Vec::new();
     let mut best_spacers: Vec<String> = Vec::new();
+    let mut best_foster_score = 0usize;
 
     for consensus in &repeat_candidates {
         let refined = refine_cluster_with_consensus(consensus, cluster, seq, params);
@@ -153,15 +214,26 @@ fn process_cluster(
             continue;
         }
 
+        // Candidates are ranked by the spacers they explain inside the seed
+        // cluster, which favours the consensus the seed hits agree on.
         let spacers = extract_spacers(&refined, cluster, seq, params);
 
         // Pick the candidate that produces the most spacers.
         // Tie-break: prefer longer DR (vmatch finds maximal repeats).
-        if spacers.len() > best_spacers.len()
+        // With `force_detection`, fostered repeat properties come first.
+        let candidate_foster_score = if params.force_detection {
+            foster_score(&refined, params)
+        } else {
+            0
+        };
+        let more_spacers = spacers.len() > best_spacers.len()
             || (spacers.len() == best_spacers.len()
                 && !best_spacers.is_empty()
-                && consensus.len() > best_consensus.len())
+                && consensus.len() > best_consensus.len());
+        if candidate_foster_score > best_foster_score
+            || (candidate_foster_score == best_foster_score && more_spacers)
         {
+            best_foster_score = candidate_foster_score;
             best_consensus = consensus.clone();
             best_refined = refined;
             best_spacers = spacers;
@@ -172,9 +244,13 @@ fn process_cluster(
         return None;
     }
 
+    // Refinement rescans beyond the seed cluster, so the reported spacers
+    // cover the span of the refined repeats, not of the seed hits.
+    let mut cluster = repeat_span(&best_refined);
+    best_spacers = extract_spacers(&best_refined, cluster, seq, params);
+
     // Trim poorly-conserved edges from the consensus, re-refine if trimmed
     let trimmed = trim_consensus(&best_consensus, &best_refined, params.min_repeat_length);
-    let mut cluster = cluster;
     if trimmed != best_consensus {
         best_consensus = trimmed;
         best_refined = refine_cluster_with_consensus(&best_consensus, cluster, seq, params);
@@ -188,10 +264,27 @@ fn process_cluster(
         best_spacers = extract_spacers(&best_refined, cluster, seq, params);
     }
 
-    let spacers_pass_similarity =
-        check_spacer_similarity(&best_spacers, params.spacer_similarity_threshold);
-    // Multi-spacer: reject if ANY pairwise spacer identity >= spacer_similarity_threshold
-    if best_spacers.len() > 1 && !spacers_pass_similarity {
+    if params.better_detect_truncated
+        && extend_with_truncated_repeats(&best_consensus, &mut best_refined, seq, params) > 0
+        && let (Some(first), Some(last)) = (best_refined.first(), best_refined.last())
+    {
+        cluster = (first.pos1, last.pos1);
+        best_spacers = extract_spacers(&best_refined, cluster, seq, params);
+    }
+
+    let repeat_sequences: Vec<&str> = best_refined
+        .iter()
+        .map(|hit| hit.repeat_sequence.as_str())
+        .collect();
+    let spacer_sequences: Vec<&str> = best_spacers.iter().map(String::as_str).collect();
+    let statistics =
+        conservation::array_statistics(&best_consensus, &repeat_sequences, &spacer_sequences);
+
+    // Multi-spacer: reject when the aligned spacers are on average at least
+    // `spacer_similarity_threshold` percent identical (tandem repeats).
+    if best_spacers.len() > 1
+        && statistics.spacer_average_identity >= params.spacer_similarity_threshold
+    {
         return None;
     }
     // Single-spacer: reject if DR aligns too well against the spacer
@@ -199,11 +292,7 @@ fn process_cluster(
         return None;
     }
 
-    let spacer_count = best_spacers.len();
-    // Similar multi-spacer candidates have already been rejected. This detector
-    // currently reports level 1 for short arrays and level 4 for longer arrays;
-    // it does not implement separate level-2/3 conservation classifications.
-    let evidence_level = if spacer_count <= 3 { 1 } else { 4 };
+    let evidence_level = conservation::evidence_level(best_spacers.len(), &statistics);
 
     if evidence_level < params.min_evidence_level {
         return None;
@@ -244,6 +333,7 @@ fn process_cluster(
     let db_entry = repeat_db::lookup_repeat(&best_consensus);
 
     Some(CrisprArray {
+        id: String::new(),
         seq_id: seq_id.to_string(),
         start: array_start,
         end: array_end,
@@ -251,9 +341,13 @@ fn process_cluster(
         repeats,
         spacers,
         evidence_level,
+        statistics,
         orientation,
         repeat_id: db_entry.repeat_id,
         crispr_direction: db_entry.crispr_direction,
+        crisprdb_repeat_count: db_entry.crisprdb_count,
+        known_in_crisprdb: None,
+        reclassified_from: None,
     })
 }
 
@@ -305,4 +399,131 @@ pub fn detect_crisprs_in_fasta_path(
         .map(|(id, seq)| (id.as_str(), seq.as_slice()))
         .collect();
     Ok(detect_crisprs(&seq_refs, params))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const DR: &str = "GTTCACTGCCGTATAGGCAGCTAAGAAA";
+    const SPACERS: [&str; 5] = [
+        "CAGTTTCAGCGATACGATCGATCGATCGTTTT",
+        "AAAACCCCGGGGTTTTACGATCGATCGATCGA",
+        "GCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTA",
+        "TTGACCATGGCATTACGGATCCAATGCCGTAA",
+        "CCATGGTACGTTAGCAAGTCCGATTAGGCATC",
+    ];
+
+    fn array_sequence(spacers: &[&str]) -> String {
+        let flank = "TGCA".repeat(60);
+        let mut sequence = flank.clone();
+        for spacer in spacers {
+            sequence.push_str(DR);
+            sequence.push_str(spacer);
+        }
+        sequence.push_str(DR);
+        sequence.push_str(&flank);
+        sequence
+    }
+
+    #[test]
+    fn arrays_are_numbered_per_sequence() {
+        let long = array_sequence(&SPACERS);
+        let short = array_sequence(&SPACERS[..2]);
+        let arrays = detect_crisprs(
+            &[("a", long.as_bytes()), ("b", short.as_bytes())],
+            &DetectionParams::default(),
+        );
+        let ids: Vec<&str> = arrays.iter().map(|array| array.id.as_str()).collect();
+        assert_eq!(ids, ["a_CRISPR_1", "b_CRISPR_1"]);
+        assert_eq!(arrays[0].evidence_level, 4);
+        assert_eq!(arrays[1].evidence_level, 1);
+    }
+
+    #[test]
+    fn small_arrays_sharing_a_trusted_repeat_are_reclassified_before_filtering() {
+        let long = array_sequence(&SPACERS);
+        let short = array_sequence(&SPACERS[..2]);
+        let sequences = [("a", long.as_bytes()), ("b", short.as_bytes())];
+        let strict = DetectionParams {
+            min_evidence_level: 4,
+            ..DetectionParams::default()
+        };
+        assert_eq!(detect_crisprs(&sequences, &strict).len(), 1);
+
+        let reclassifying = DetectionParams {
+            classify_small_arrays: true,
+            ..strict
+        };
+        let arrays = detect_crisprs(&sequences, &reclassifying);
+        assert_eq!(arrays.len(), 2);
+        assert_eq!(arrays[1].evidence_level, 4);
+        assert_eq!(arrays[1].reclassified_from, Some(1));
+        assert_eq!(arrays[0].reclassified_from, None);
+    }
+
+    #[test]
+    fn every_array_has_one_more_repeat_than_spacers() {
+        // A query matching only the first repeats exactly still yields the
+        // whole array once the consensus is rescanned with mismatches.
+        let mut sequence = array_sequence(&SPACERS).into_bytes();
+        let last_repeat = sequence.len() - 240 - DR.len();
+        sequence[last_repeat + 3] = b'G';
+        sequence[last_repeat + 9] = b'A';
+        let params = DetectionParams {
+            query_repeats: vec![DR.to_string()],
+            ..DetectionParams::default()
+        };
+        let arrays = detect_crisprs(&[("a", sequence.as_slice())], &params);
+        assert_eq!(arrays.len(), 1);
+        assert_eq!(arrays[0].repeats.len(), 6);
+        assert_eq!(arrays[0].spacers.len(), 5);
+        assert_eq!(
+            arrays[0].spacers.last().unwrap().end + 1,
+            arrays[0].repeats.last().unwrap().start
+        );
+    }
+
+    /// The four E. coli K-12 MG1655 arrays recorded in CRISPRdb
+    /// (`CRISPR_crisprdb.csv`, accession NC_000913) with their spacer counts.
+    #[test]
+    fn ecoli_arrays_match_crisprdb_coordinates_exactly() {
+        let fasta = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../crispr-cas-finder-cli/data/ecoli.fasta");
+        let arrays = detect_crisprs_in_fasta_path(&fasta, &DetectionParams::default()).unwrap();
+        let found: Vec<(usize, usize, usize)> = arrays
+            .iter()
+            .map(|array| (array.start, array.end, array.spacers.len()))
+            .collect();
+        for expected in [
+            (411_076, 411_220, 1),
+            (2_347_201, 2_347_327, 1),
+            (2_877_701, 2_878_463, 12),
+            (2_904_014, 2_904_407, 6),
+        ] {
+            assert!(found.contains(&expected), "{expected:?} not in {found:?}");
+        }
+        for array in &arrays {
+            assert_eq!(array.repeats.len(), array.spacers.len() + 1, "{}", array.id);
+        }
+    }
+
+    #[test]
+    fn query_repeats_restrict_detection_to_the_given_repeat() {
+        let sequence = array_sequence(&SPACERS);
+        let matching = DetectionParams {
+            query_repeats: vec![DR.to_string()],
+            ..DetectionParams::default()
+        };
+        let arrays = detect_crisprs(&[("a", sequence.as_bytes())], &matching);
+        assert_eq!(arrays.len(), 1);
+        assert_eq!(arrays[0].spacers.len(), 5);
+        assert_eq!(arrays[0].repeats.len(), 6);
+
+        let other = DetectionParams {
+            query_repeats: vec!["ACGTTGCAACGTTGCAACGTTGCAAC".to_string()],
+            ..DetectionParams::default()
+        };
+        assert!(detect_crisprs(&[("a", sequence.as_bytes())], &other).is_empty());
+    }
 }

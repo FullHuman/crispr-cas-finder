@@ -10,22 +10,53 @@ pub struct GeneCoordinates {
 }
 
 /// A Cas-associated gene
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct CasGene {
+    /// Protein identifier.
     pub id: String,
+    /// Gene of the model the protein was assigned to.
     pub name: String,
     pub start: usize,
     pub end: usize,
     pub strand: String,
+    /// HMM profile that matched (differs from `name` for exchangeable genes).
+    #[serde(default)]
+    pub profile: String,
+    /// Role of the gene in the model: `mandatory`, `accessory`, `neutral`
+    /// or `forbidden`.
+    #[serde(default)]
+    pub status: String,
+    /// Bit score of the best domain.
+    #[serde(default)]
+    pub score: f64,
+    /// Independent E-value of the best domain.
+    #[serde(default)]
+    pub evalue: f64,
+    /// Fraction of the HMM profile covered by the domain.
+    #[serde(default)]
+    pub profile_coverage: f64,
 }
 
 /// A Cas system cluster
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct CasCluster {
+    /// Stable identifier, `<seq_id>_Cas_<n>` with `n` counted per sequence.
+    #[serde(default)]
+    pub id: String,
+    /// Identifier of the sequence carrying the system.
+    #[serde(default)]
+    pub seq_id: String,
+    /// Fully qualified model name, e.g. `CASFinder/CAS-TypeIE`.
     pub system: String,
     pub genes: Vec<CasGene>,
     pub start: usize,
     pub end: usize,
+    /// Sum of the gene bit scores.
+    #[serde(default)]
+    pub score: f64,
+    /// Fraction of the model's mandatory and accessory genes that were found.
+    #[serde(default)]
+    pub wholeness: f64,
 }
 
 pub fn from_search_results_with_gene_map(
@@ -52,57 +83,66 @@ fn clusters_from_search_results(
     results: &crate::cas_types::SearchResults,
     gene_map: Option<&std::collections::HashMap<String, GeneCoordinates>>,
 ) -> Vec<CasCluster> {
+    use crate::cas_types::GeneStatus;
+
     let mut clusters = Vec::new();
     for detected_system in &results.systems {
-        let mut cluster_genes = Vec::new();
-        let mut min_start = usize::MAX;
-        let mut max_end = 0usize;
-
-        for hit in &detected_system.hits {
-            let (start, end, strand) = if let Some(coordinate_map) = gene_map {
-                coordinate_map
-                    .get(hit.hit.id.as_str())
-                    .cloned()
-                    .map(|coords| (coords.start, coords.end, coords.strand))
+        let genes: Vec<CasGene> = detected_system
+            .hits
+            .iter()
+            .map(|hit| {
+                let (start, end, strand) = gene_map
+                    .and_then(|coordinates| coordinates.get(hit.hit.id.as_str()))
+                    .map(|coordinates| {
+                        (
+                            coordinates.start,
+                            coordinates.end,
+                            coordinates.strand.clone(),
+                        )
+                    })
                     .unwrap_or((
                         hit.hit.begin_match as usize,
                         hit.hit.end_match as usize,
                         ".".to_string(),
-                    ))
-            } else {
-                (
-                    hit.hit.begin_match as usize,
-                    hit.hit.end_match as usize,
-                    ".".to_string(),
-                )
-            };
-
-            if start < min_start {
-                min_start = start;
-            }
-            if end > max_end {
-                max_end = end;
-            }
-
-            cluster_genes.push(CasGene {
-                id: hit.hit.id.clone(),
-                name: hit.gene_ref.clone(),
-                start,
-                end,
-                strand,
-            });
-        }
-
+                    ));
+                CasGene {
+                    id: hit.hit.id.clone(),
+                    name: hit.gene_ref.clone(),
+                    start,
+                    end,
+                    strand,
+                    profile: hit.hit.gene_name.clone(),
+                    status: match hit.gene_status {
+                        GeneStatus::Mandatory => "mandatory",
+                        GeneStatus::Accessory => "accessory",
+                        GeneStatus::Forbidden => "forbidden",
+                        GeneStatus::Neutral => "neutral",
+                    }
+                    .to_string(),
+                    score: hit.hit.score,
+                    evalue: hit.hit.i_evalue,
+                    profile_coverage: hit.hit.profile_coverage,
+                }
+            })
+            .collect();
         clusters.push(CasCluster {
+            id: String::new(),
+            seq_id: detected_system.replicon.clone(),
             system: detected_system.model_fully_qualified_name.clone(),
-            genes: cluster_genes,
-            start: if min_start == usize::MAX {
-                0
-            } else {
-                min_start
-            },
-            end: max_end,
+            start: genes.iter().map(|gene| gene.start).min().unwrap_or(0),
+            end: genes.iter().map(|gene| gene.end).max().unwrap_or(0),
+            genes,
+            score: detected_system.score,
+            wholeness: detected_system.wholeness,
         });
+    }
+
+    let mut per_sequence: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    for cluster in &mut clusters {
+        let count = per_sequence.entry(cluster.seq_id.clone()).or_default();
+        *count += 1;
+        cluster.id = format!("{}_Cas_{count}", cluster.seq_id);
     }
     clusters
 }
@@ -197,6 +237,7 @@ pub fn parse_cas_from_strings(best_solution_tsv: &str, ann_gff: &str) -> Result<
                 start: coords.start,
                 end: coords.end,
                 strand: coords.strand.clone(),
+                ..CasGene::default()
             };
             genes_by_system_label
                 .entry(system_label)
@@ -225,6 +266,7 @@ pub fn parse_cas_from_strings(best_solution_tsv: &str, ann_gff: &str) -> Result<
             genes,
             start: min_start,
             end: max_end,
+            ..CasCluster::default()
         });
     }
     Ok(result)

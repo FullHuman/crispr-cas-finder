@@ -1,8 +1,8 @@
-use crate::{cas_types::RepliconTopology, casparser::CasCluster};
+use crate::cas_types::RepliconTopology;
 use serde::{Deserialize, Serialize};
 
 /// A single direct repeat within a CRISPR array.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Repeat {
     /// 1-based start position on the sequence.
     pub start: usize,
@@ -13,7 +13,7 @@ pub struct Repeat {
 }
 
 /// A single spacer between two direct repeats.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Spacer {
     /// 1-based start position on the sequence.
     pub start: usize,
@@ -45,8 +45,11 @@ impl std::fmt::Display for Orientation {
 }
 
 /// A detected CRISPR array with its repeats, spacers, and evidence level.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CrisprArray {
+    /// Stable identifier, `<seq_id>_CRISPR_<n>` with `n` counted per sequence.
+    #[serde(default)]
+    pub id: String,
     /// Identifier of the source sequence (FASTA header).
     pub seq_id: String,
     /// 1-based start position of the first repeat.
@@ -61,6 +64,9 @@ pub struct CrisprArray {
     pub spacers: Vec<Spacer>,
     /// Evidence level (1–4). Higher is more confident.
     pub evidence_level: usize,
+    /// Conservation scores and spacer length statistics behind the level.
+    #[serde(default)]
+    pub statistics: crate::conservation::ArrayStatistics,
     /// Potential orientation inferred from flanking AT% content.
     pub orientation: Orientation,
     /// Canonical repeat ID from the CRISPRdb repeat database
@@ -71,13 +77,24 @@ pub struct CrisprArray {
     /// This is derived by looking up the `repeat_id` in `repeatDirection.tsv`
     /// from the original CRISPRCasFinder supplementary data.
     pub crispr_direction: String,
+    /// Number of CRISPRdb arrays sharing this consensus repeat.
+    #[serde(default)]
+    pub crisprdb_repeat_count: usize,
+    /// Whether the array is recorded in a supplied CRISPRdb export; `None`
+    /// when no export was supplied.
+    #[serde(default)]
+    pub known_in_crisprdb: Option<bool>,
+    /// Evidence level before reclassification as a small array sharing its
+    /// repeat with a level-4 array; `None` if the level was not changed.
+    #[serde(default)]
+    pub reclassified_from: Option<usize>,
 }
 
 /// Algorithm-only parameters for CRISPR detection.
 ///
 /// This struct contains no file paths, output flags, or subprocess
 /// configuration — only the knobs that control the detection algorithm.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DetectionParams {
     pub min_repeat_length: usize,
     pub max_repeat_length: usize,
@@ -92,30 +109,73 @@ pub struct DetectionParams {
     pub min_spacer_count: usize,
     pub min_evidence_level: usize,
     pub min_sequence_length: usize,
+    /// Favour consensus repeats matching the `foster_repeat_*` settings when
+    /// several candidates compete for one array. Also raises the minimum
+    /// repeat length to `foster_repeat_length`.
     pub force_detection: bool,
     pub flank: usize,
-    /// Reserved for compatibility; validation rejects nondefault values.
+    /// Repeat length favoured by `force_detection`.
     pub foster_repeat_length: usize,
-    /// Reserved for compatibility; validation rejects nondefault values.
+    /// IUPAC pattern (`.` = any base) a favoured repeat starts with.
     pub foster_repeat_begin: String,
-    /// Reserved for compatibility; validation rejects nondefault values.
+    /// IUPAC pattern (`.` = any base) a favoured repeat ends with.
     pub foster_repeat_end: String,
+    /// Look for one extra terminal repeat on each side of an array that only
+    /// matches the half of the consensus nearest the array.
     pub better_detect_truncated: bool,
-    /// Reserved for compatibility; validation rejects nondefault values.
-    /// Use `truncated_repeat_mismatch_percent` for terminal repeats.
+    /// Percentage of mismatches allowed in the matched half of a truncated
+    /// terminal repeat; at least one mismatch is always allowed.
     pub truncated_mismatch_percent: f64,
+    /// Raise arrays of evidence level 1 to level 4 when their consensus
+    /// repeat, or its reverse complement, is that of a level-4 array.
+    #[serde(default)]
+    pub classify_small_arrays: bool,
+    /// Repeats to look for instead of discovering repeats in the sequence.
+    /// Both strands are searched; empty means normal discovery.
+    #[serde(default)]
+    pub query_repeats: Vec<String>,
+}
+
+impl DetectionParams {
+    /// Parameters actually used by the detector once `force_detection` has
+    /// been applied to the minimum repeat length.
+    pub(crate) fn effective(&self) -> std::borrow::Cow<'_, Self> {
+        if self.force_detection && self.min_repeat_length != self.foster_repeat_length {
+            let mut params = self.clone();
+            params.min_repeat_length = self.foster_repeat_length;
+            return std::borrow::Cow::Owned(params);
+        }
+        std::borrow::Cow::Borrowed(self)
+    }
 }
 
 impl DetectionParams {
     /// Validate length ranges and thresholds before starting detection.
     pub fn validate(&self) -> Result<(), String> {
-        let defaults = Self::default();
-        if self.foster_repeat_length != defaults.foster_repeat_length
-            || self.foster_repeat_begin != defaults.foster_repeat_begin
-            || self.foster_repeat_end != defaults.foster_repeat_end
-            || self.truncated_mismatch_percent != defaults.truncated_mismatch_percent
+        if self.foster_repeat_length == 0 {
+            return Err("foster_repeat_length must be positive".into());
+        }
+        for (name, pattern) in [
+            ("foster_repeat_begin", &self.foster_repeat_begin),
+            ("foster_repeat_end", &self.foster_repeat_end),
+        ] {
+            if !crate::dna::is_iupac_pattern(pattern) {
+                return Err(format!(
+                    "{name} must contain only IUPAC nucleotide codes or '.'"
+                ));
+            }
+        }
+        if let Some(query) = self
+            .query_repeats
+            .iter()
+            .find(|query| query.is_empty() || !crate::dna::is_iupac_pattern(query))
         {
-            return Err("foster_repeat_* and truncated_mismatch_percent are unsupported compatibility settings; use truncated_repeat_mismatch_percent for terminal repeats".into());
+            return Err(format!(
+                "query repeat {query:?} must be a non-empty nucleotide sequence"
+            ));
+        }
+        if self.force_detection && self.foster_repeat_length > self.max_repeat_length {
+            return Err("foster_repeat_length must not exceed max_repeat_length".into());
         }
         if self.min_repeat_length == 0 || self.min_repeat_length > self.max_repeat_length {
             return Err("repeat lengths must be positive with min <= max".into());
@@ -138,6 +198,10 @@ impl DetectionParams {
             (
                 "spacer_similarity_threshold",
                 self.spacer_similarity_threshold,
+            ),
+            (
+                "truncated_mismatch_percent",
+                self.truncated_mismatch_percent,
             ),
         ] {
             if !value.is_finite() || !(0.0..=100.0).contains(&value) {
@@ -178,6 +242,8 @@ impl Default for DetectionParams {
             foster_repeat_end: "AA.".to_string(),
             better_detect_truncated: false,
             truncated_mismatch_percent: 4.0,
+            classify_small_arrays: false,
+            query_repeats: Vec::new(),
         }
     }
 }
@@ -187,7 +253,16 @@ impl Default for DetectionParams {
 #[derive(Debug, Clone)]
 pub struct CasFinderConfig {
     pub genetic_code: usize,
+    /// Predict genes in metagenomic mode for every sequence.
     pub metagenome: bool,
+    /// Sequences shorter than this are predicted in metagenomic mode even
+    /// when `metagenome` is false; `0` disables the automatic switch.
+    pub auto_metagenome_below: usize,
+    /// GFF3 annotation to use instead of predicting genes. Requires
+    /// `proteome_faa`.
+    pub annotation_gff: Option<std::path::PathBuf>,
+    /// Protein FASTA matching `annotation_gff`.
+    pub proteome_faa: Option<std::path::PathBuf>,
     /// Number of HMM-search threads; `0` uses Rayon's default worker count.
     pub workers: usize,
     pub definition: String,
@@ -207,6 +282,9 @@ impl Default for CasFinderConfig {
         Self {
             genetic_code: 11,
             metagenome: false,
+            auto_metagenome_below: crate::annotation::AUTO_METAGENOME_BELOW,
+            annotation_gff: None,
+            proteome_faa: None,
             workers: 0,
             definition: "SubTyping".to_string(),
             quiet: false,
@@ -216,11 +294,4 @@ impl Default for CasFinderConfig {
             cas_profiles_dir: None,
         }
     }
-}
-
-/// Combined CRISPR + Cas analysis result for higher-level library callers.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct FullAnalysisResult {
-    pub crisprs: Vec<CrisprArray>,
-    pub cas_clusters: Vec<CasCluster>,
 }

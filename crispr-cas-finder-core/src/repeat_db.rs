@@ -11,7 +11,7 @@
 //! repeat sequence, returns the repeat ID and a normalised CRISPR direction
 //! (`"+"`, `"-"`, or `"ND"`).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
 /// Raw `Repeat_List.csv` embedded at compile time.
@@ -20,22 +20,30 @@ static REPEAT_LIST_CSV: &str = include_str!("../data/Repeat_List.csv");
 /// Raw `repeatDirection.tsv` embedded at compile time.
 static REPEAT_DIRECTION_TSV: &str = include_str!("../data/repeatDirection.tsv");
 
-// ---------------------------------------------------------------------------
-// Lazy-initialised lookup tables
-// ---------------------------------------------------------------------------
+static EMBEDDED: OnceLock<RepeatDatabase> = OnceLock::new();
 
-/// Maps trimmed uppercase repeat sequence → repeat ID (e.g. "R10").
-static SEQ_TO_ID: OnceLock<HashMap<String, String>> = OnceLock::new();
+#[derive(Debug, Clone)]
+struct RepeatEntry {
+    id: String,
+    crisprdb_count: usize,
+}
 
-/// Maps repeat ID → raw direction string from `repeatDirection.tsv`
-/// (e.g. `"F [0.37,0   Confidence: MEDIUM]"`).
-static ID_TO_DIRECTION: OnceLock<HashMap<String, String>> = OnceLock::new();
+/// Known consensus repeats with their IDs, CRISPRdb counts and directions.
+#[derive(Debug, Clone, Default)]
+pub struct RepeatDatabase {
+    /// Uppercase repeat sequence → entry.
+    by_sequence: HashMap<String, RepeatEntry>,
+    /// Repeat ID → raw direction string (e.g. `"F [0.37,0   Confidence: MEDIUM]"`).
+    direction_by_id: HashMap<String, String>,
+}
 
-fn sequence_to_repeat_id_map() -> &'static HashMap<String, String> {
-    SEQ_TO_ID.get_or_init(|| {
-        let mut repeat_id_by_sequence = HashMap::new();
-        for line in REPEAT_LIST_CSV.lines() {
-            // Skip the header and blank lines
+impl RepeatDatabase {
+    /// Parse a `Repeat_List.csv` (`sequence;id;count;orientation`) and a
+    /// `repeatDirection.tsv` (`id<TAB>direction`). Header, blank and
+    /// malformed lines are skipped.
+    pub fn parse(repeat_list: &str, directions: &str) -> Self {
+        let mut database = Self::default();
+        for line in repeat_list.lines() {
             if line.starts_with('#') || line.trim().is_empty() {
                 continue;
             }
@@ -43,51 +51,102 @@ fn sequence_to_repeat_id_map() -> &'static HashMap<String, String> {
             if columns.len() < 2 {
                 continue;
             }
-            let repeat_sequence = columns[0].trim().to_uppercase();
-            let repeat_id = columns[1].trim().to_string();
-            if !repeat_sequence.is_empty() && !repeat_id.is_empty() {
-                repeat_id_by_sequence.insert(repeat_sequence, repeat_id);
-            }
-        }
-        repeat_id_by_sequence
-    })
-}
-
-fn repeat_id_to_direction_map() -> &'static HashMap<String, String> {
-    ID_TO_DIRECTION.get_or_init(|| {
-        let mut direction_by_repeat_id = HashMap::new();
-        for line in REPEAT_DIRECTION_TSV.lines() {
-            if line.trim().is_empty() {
+            let sequence: String = columns[0]
+                .chars()
+                .filter(|character| !character.is_whitespace())
+                .collect::<String>()
+                .to_uppercase();
+            let id = columns[1].trim().to_string();
+            if sequence.is_empty() || id.is_empty() {
                 continue;
             }
-            let mut columns = line.splitn(2, '\t');
-            let repeat_id = match columns.next() {
-                Some(s) => s.trim().to_string(),
-                None => continue,
+            let crisprdb_count = columns
+                .get(2)
+                .and_then(|count| count.trim().parse().ok())
+                .unwrap_or(0);
+            database
+                .by_sequence
+                .insert(sequence, RepeatEntry { id, crisprdb_count });
+        }
+        for line in directions.lines() {
+            let Some((id, direction)) = line.split_once('\t') else {
+                continue;
             };
-            let direction = match columns.next() {
-                Some(s) => s.trim().to_string(),
-                None => continue,
-            };
-            if !repeat_id.is_empty() {
-                direction_by_repeat_id.insert(repeat_id, direction);
+            let id = id.trim();
+            if !id.is_empty() {
+                database
+                    .direction_by_id
+                    .insert(id.to_string(), direction.trim().to_string());
             }
         }
-        direction_by_repeat_id
-    })
+        database
+    }
+
+    /// The database shipped with CRISPRCasFinder.
+    pub fn embedded() -> &'static Self {
+        EMBEDDED.get_or_init(|| Self::parse(REPEAT_LIST_CSV, REPEAT_DIRECTION_TSV))
+    }
+
+    /// Number of repeat sequences in the database.
+    pub fn len(&self) -> usize {
+        self.by_sequence.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.by_sequence.is_empty()
+    }
+
+    /// Look up a consensus repeat, case-insensitively.
+    ///
+    /// Both the sequence and its reverse complement are tried:
+    /// * forward hit → direction as stored in the database
+    /// * reverse-complement hit → direction flipped (the array is on the
+    ///   opposite strand)
+    ///
+    /// If neither is found, `repeat_id` is `"Unknown"`, `crispr_direction`
+    /// is `"ND"` and `crisprdb_count` is 0.
+    pub fn lookup(&self, consensus_repeat: &str) -> RepeatLookup {
+        let forward = consensus_repeat.trim().to_uppercase();
+        let direction_of = |entry: &RepeatEntry| {
+            self.direction_by_id
+                .get(&entry.id)
+                .map_or_else(|| "ND".to_string(), |raw| normalized_direction_symbol(raw))
+        };
+        if let Some(entry) = self.by_sequence.get(&forward) {
+            return RepeatLookup {
+                repeat_id: entry.id.clone(),
+                crispr_direction: direction_of(entry),
+                crisprdb_count: entry.crisprdb_count,
+            };
+        }
+        // The detector may report the reverse complement of the stored
+        // sequence; the array is then on the opposite strand.
+        let reverse = String::from_utf8_lossy(&crate::dna::reverse_complement(forward.as_bytes()))
+            .into_owned();
+        if let Some(entry) = self.by_sequence.get(&reverse) {
+            return RepeatLookup {
+                repeat_id: entry.id.clone(),
+                crispr_direction: flipped_direction_symbol(&direction_of(entry)),
+                crisprdb_count: entry.crisprdb_count,
+            };
+        }
+        RepeatLookup {
+            repeat_id: "Unknown".to_string(),
+            crispr_direction: "ND".to_string(),
+            crisprdb_count: 0,
+        }
+    }
 }
 
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
-
 /// Result of a repeat-database lookup.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepeatLookup {
     /// The canonical repeat ID (e.g. `"R10"`), or `"Unknown"` if not found.
     pub repeat_id: String,
     /// Normalised orientation from CRISPRDirection: `"+"`, `"-"`, or `"ND"`.
     pub crispr_direction: String,
+    /// Number of CRISPRdb arrays sharing this repeat; 0 if not found.
+    pub crisprdb_count: usize,
 }
 
 /// Flip a normalised direction symbol: `"+"` ↔ `"-"`, `"ND"` stays `"ND"`.
@@ -100,61 +159,66 @@ fn flipped_direction_symbol(direction: &str) -> String {
 }
 
 /// Look up a consensus repeat sequence in the embedded database.
-///
-/// The sequence is normalised to uppercase before matching.  Both the
-/// forward sequence and its reverse complement are tried:
-/// * forward hit → direction as stored in the database
-/// * RC hit      → direction flipped (the array is on the opposite strand)
-///
-/// If neither is found the function returns `repeat_id = "Unknown"` and
-/// `crispr_direction = "ND"`.
 pub fn lookup_repeat(consensus_repeat: &str) -> RepeatLookup {
-    let normalized_repeat_sequence = consensus_repeat.trim().to_uppercase();
-    let repeat_id_by_sequence = sequence_to_repeat_id_map();
-    let direction_by_repeat_id = repeat_id_to_direction_map();
+    RepeatDatabase::embedded().lookup(consensus_repeat)
+}
 
-    // ── Forward match ──────────────────────────────────────────────────────
-    if let Some(repeat_id) = repeat_id_by_sequence
-        .get(&normalized_repeat_sequence)
-        .cloned()
-    {
-        let crispr_direction = match direction_by_repeat_id.get(&repeat_id) {
-            Some(raw_direction) => normalized_direction_symbol(raw_direction),
-            None => "ND".to_string(),
-        };
-        return RepeatLookup {
-            repeat_id,
-            crispr_direction,
-        };
-    }
+/// Accession of a sequence as CRISPRdb stores it: the last `|`-separated
+/// field without its version suffix (`gi|1|ref|NC_000913.3|` → `NC_000913`).
+pub fn crisprdb_accession(seq_id: &str) -> &str {
+    let last_field = seq_id
+        .split('|')
+        .rev()
+        .find(|field| !field.is_empty())
+        .unwrap_or(seq_id);
+    last_field.split(['.', ':']).next().unwrap_or(last_field)
+}
 
-    // ── Reverse-complement match ────────────────────────────────────────────
-    // The detection algorithm may produce a consensus that is the RC of the
-    // canonical sequence stored in Repeat_List.csv.  In that case the array
-    // is on the opposite strand, so the direction must be flipped.
-    let reverse_complement_sequence = String::from_utf8(crate::dna::reverse_complement(
-        normalized_repeat_sequence.as_bytes(),
-    ))
-    .expect("normalized DNA repeat is ASCII");
-    if let Some(repeat_id) = repeat_id_by_sequence
-        .get(&reverse_complement_sequence)
-        .cloned()
-    {
-        let crispr_direction = match direction_by_repeat_id.get(&repeat_id) {
-            Some(raw_direction) => {
-                flipped_direction_symbol(&normalized_direction_symbol(raw_direction))
+/// CRISPR arrays already recorded in CRISPRdb, from a `CRISPR_crisprdb.csv`.
+#[derive(Debug, Clone, Default)]
+pub struct KnownCrisprs {
+    /// (accession, start, end)
+    arrays: HashSet<(String, usize, usize)>,
+}
+
+impl KnownCrisprs {
+    /// Parse the tab-separated CRISPRdb export, whose columns 2, 5 and 6 are
+    /// the accession, array start and array end.
+    pub fn parse(content: &str) -> Self {
+        let mut known = Self::default();
+        for line in content.lines() {
+            let columns: Vec<&str> = line.split('\t').collect();
+            if columns.len() < 6 {
+                continue;
             }
-            None => "ND".to_string(),
-        };
-        return RepeatLookup {
-            repeat_id,
-            crispr_direction,
-        };
+            let (Ok(start), Ok(end)) = (
+                columns[4].trim().parse::<usize>(),
+                columns[5].trim().parse::<usize>(),
+            ) else {
+                continue;
+            };
+            known
+                .arrays
+                .insert((columns[1].trim().to_string(), start, end));
+        }
+        known
     }
 
-    RepeatLookup {
-        repeat_id: "Unknown".to_string(),
-        crispr_direction: "ND".to_string(),
+    pub fn len(&self) -> usize {
+        self.arrays.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.arrays.is_empty()
+    }
+
+    /// Whether an array with this start, and this end give or take one base,
+    /// is recorded for the sequence.
+    pub fn contains(&self, seq_id: &str, start: usize, end: usize) -> bool {
+        let accession = crisprdb_accession(seq_id).to_string();
+        [end.saturating_sub(1), end, end + 1]
+            .into_iter()
+            .any(|end| self.arrays.contains(&(accession.clone(), start, end)))
     }
 }
 
@@ -252,5 +316,47 @@ mod tests {
         let result = lookup_repeat(&rc);
         assert_eq!(result.repeat_id, "R20");
         assert_eq!(result.crispr_direction, "+");
+    }
+
+    #[test]
+    fn lookup_reports_the_crisprdb_count() {
+        let database = RepeatDatabase::parse(
+            "#header\nACGTAC ;R1;7;\nGGGTTT;R2;x;\n",
+            "R1\tF [0.3,0 Confidence: HIGH]\nR2\tR [0,0.3]\n",
+        );
+        assert_eq!(database.len(), 2);
+        assert_eq!(
+            database.lookup("acgtac"),
+            RepeatLookup {
+                repeat_id: "R1".into(),
+                crispr_direction: "+".into(),
+                crisprdb_count: 7,
+            }
+        );
+        // Reverse complement of GGGTTT, stored as reverse: flipped to "+".
+        assert_eq!(database.lookup("AAACCC").crispr_direction, "+");
+        assert_eq!(database.lookup("AAACCC").crisprdb_count, 0);
+        assert_eq!(database.lookup("TTTT").repeat_id, "Unknown");
+    }
+
+    #[test]
+    fn accessions_drop_separators_and_versions() {
+        assert_eq!(crisprdb_accession("NC_000913.3"), "NC_000913");
+        assert_eq!(crisprdb_accession("gi|1|ref|NC_000913.3|"), "NC_000913");
+        assert_eq!(crisprdb_accession("NC_000913.3:1-4641652"), "NC_000913");
+        assert_eq!(crisprdb_accession("contig7"), "contig7");
+    }
+
+    #[test]
+    fn known_arrays_match_start_and_end_within_one_base() {
+        let known = KnownCrisprs::parse(
+            "Specie\tRefSeq\tCRISPR_id\tHypothetical\tCrisprBegin\tCrisprEnd\n\
+             E. coli\tNC_000913\tNC_000913_1\t0\t2877701\t2878463\n",
+        );
+        assert_eq!(known.len(), 1);
+        assert!(known.contains("NC_000913.3", 2877701, 2878463));
+        assert!(known.contains("NC_000913.3", 2877701, 2878464));
+        assert!(!known.contains("NC_000913.3", 2877702, 2878463));
+        assert!(!known.contains("NC_000914.1", 2877701, 2878463));
     }
 }

@@ -259,7 +259,7 @@ source license:
 
 ## Orphos and other dependencies
 
-Gene prediction uses orphos-core 0.3.0, distributed under GPL-3.0-or-later:
+Gene prediction uses orphos-core 0.4.0, distributed under GPL-3.0-or-later:
 https://github.com/FullHuman/orphos. Other Rust dependency versions and sources
 are recorded in the accompanying Cargo.lock files and retain their own licenses.
 These notices document the bundled scientific code and datasets; they do not

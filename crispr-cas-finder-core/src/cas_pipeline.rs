@@ -21,6 +21,9 @@ pub struct ModelDefinition {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GeneRecord {
     pub id: String,
+    /// Identifier of the sequence the gene lies on.
+    #[serde(default)]
+    pub seq_id: String,
     pub protein: String,
     pub start: usize,
     pub end: usize,
@@ -119,10 +122,16 @@ pub fn parse_cas_model_xml(
                             return Err("encountered a nested model gene".to_string());
                         }
                         current_gene = Some(parse_gene_definition(&start, &reader)?);
-                    } else if element_stack.last().is_some_and(|name| name == "homologs") {
+                    } else if element_stack
+                        .last()
+                        .is_some_and(|name| is_exchangeable_container(name))
+                    {
                         add_exchangeable(&mut current_gene, &start, &reader)?;
                     } else {
-                        return Err("a nested <gene> must be inside <homologs>".to_string());
+                        return Err(
+                            "a nested <gene> must be inside <exchangeables> or <homologs>"
+                                .to_string(),
+                        );
                     }
                 }
                 element_stack.push(element_name);
@@ -139,10 +148,16 @@ pub fn parse_cas_model_xml(
                 } else if element_name == "gene" {
                     if element_stack.len() == 1 {
                         genes.push(parse_gene_definition(&empty, &reader)?);
-                    } else if element_stack.last().is_some_and(|name| name == "homologs") {
+                    } else if element_stack
+                        .last()
+                        .is_some_and(|name| is_exchangeable_container(name))
+                    {
                         add_exchangeable(&mut current_gene, &empty, &reader)?;
                     } else {
-                        return Err("a nested <gene> must be inside <homologs>".to_string());
+                        return Err(
+                            "a nested <gene> must be inside <exchangeables> or <homologs>"
+                                .to_string(),
+                        );
                     }
                 }
             }
@@ -188,12 +203,16 @@ pub fn parse_cas_model_xml(
         fully_qualified_name: format!("{family}/{model_name}"),
         family: family.to_string(),
         name: model_name.to_string(),
-        version: attributes.get("version").cloned(),
+        version: attributes
+            .get("vers")
+            .or_else(|| attributes.get("version"))
+            .cloned(),
         genes,
         inter_gene_max_space,
         min_mandatory_genes_required,
         min_genes_required,
         multi_loci,
+        max_nb_genes: parse_optional_u32_attribute(&attributes, "max_nb_genes")?,
     })
 }
 
@@ -352,28 +371,112 @@ pub fn translate_dna(seq: &[u8], table: &HashMap<[u8; 3], u8>) -> String {
     protein
 }
 
-/// Validate the translation code shared by gene prediction and protein translation.
-/// Alternative codes are not supported by this experimental release.
+/// NCBI translation tables supported by the gene predictor, as amino acids
+/// for codons in TCAG order (TTT, TTC, TTA, TTG, TCT, ...).
+const TRANSLATION_TABLES: &[(usize, &[u8; 64])] = &[
+    (
+        1,
+        b"FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG",
+    ),
+    (
+        2,
+        b"FFLLSSSSYY**CCWWLLLLPPPPHHQQRRRRIIMMTTTTNNKKSS**VVVVAAAADDEEGGGG",
+    ),
+    (
+        3,
+        b"FFLLSSSSYY**CCWWTTTTPPPPHHQQRRRRIIMMTTTTNNKKSSRRVVVVAAAADDEEGGGG",
+    ),
+    (
+        4,
+        b"FFLLSSSSYY**CCWWLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG",
+    ),
+    (
+        5,
+        b"FFLLSSSSYY**CCWWLLLLPPPPHHQQRRRRIIMMTTTTNNKKSSSSVVVVAAAADDEEGGGG",
+    ),
+    (
+        6,
+        b"FFLLSSSSYYQQCC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG",
+    ),
+    (
+        9,
+        b"FFLLSSSSYY**CCWWLLLLPPPPHHQQRRRRIIIMTTTTNNNKSSSSVVVVAAAADDEEGGGG",
+    ),
+    (
+        10,
+        b"FFLLSSSSYY**CCCWLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG",
+    ),
+    (
+        11,
+        b"FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG",
+    ),
+    (
+        12,
+        b"FFLLSSSSYY**CC*WLLLSPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG",
+    ),
+    (
+        13,
+        b"FFLLSSSSYY**CCWWLLLLPPPPHHQQRRRRIIMMTTTTNNKKSSGGVVVVAAAADDEEGGGG",
+    ),
+    (
+        14,
+        b"FFLLSSSSYYY*CCWWLLLLPPPPHHQQRRRRIIIMTTTTNNNKSSSSVVVVAAAADDEEGGGG",
+    ),
+    (
+        15,
+        b"FFLLSSSSYY*QCC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG",
+    ),
+    (
+        16,
+        b"FFLLSSSSYY*LCC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG",
+    ),
+    (
+        21,
+        b"FFLLSSSSYY**CCWWLLLLPPPPHHQQRRRRIIMMTTTTNNNKSSSSVVVVAAAADDEEGGGG",
+    ),
+    (
+        22,
+        b"FFLLSS*SYY*LCC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG",
+    ),
+    (
+        23,
+        b"FF*LSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG",
+    ),
+    (
+        24,
+        b"FFLLSSSSYY**CCWWLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSSKVVVVAAAADDEEGGGG",
+    ),
+    (
+        25,
+        b"FFLLSSSSYY**CCGWLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG",
+    ),
+];
+
+/// Validate the translation code shared by gene prediction and protein
+/// translation: the NCBI tables Prodigal supports (1-6, 9-16, 21-25).
 pub fn validate_genetic_code(genetic_code: usize) -> anyhow::Result<u8> {
-    if genetic_code != 11 {
+    if !TRANSLATION_TABLES
+        .iter()
+        .any(|(code, _)| *code == genetic_code)
+    {
         anyhow::bail!(
-            "Unsupported genetic code {genetic_code}; only genetic code 11 is currently supported"
+            "Unsupported genetic code {genetic_code}; supported codes are 1-6, 9-16 and 21-25"
         );
     }
-    Ok(11)
+    Ok(genetic_code as u8)
 }
 
 pub fn codon_table(genetic_code: usize) -> anyhow::Result<HashMap<[u8; 3], u8>> {
     validate_genetic_code(genetic_code)?;
     const BASES: [u8; 4] = *b"TCAG";
-    // Standard code and bacterial code 11 have identical amino-acid mappings.
-    // Their difference is alternative initiation codons, which Orphos handles
-    // while predicting ORFs rather than while translating internal codons.
-    const AMINO_ACIDS: &[u8; 64] =
-        b"FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG";
+    let amino_acids = TRANSLATION_TABLES
+        .iter()
+        .find(|(code, _)| *code == genetic_code)
+        .map(|(_, amino_acids)| *amino_acids)
+        .expect("validated genetic code has a table");
 
     let mut map = HashMap::with_capacity(64);
-    for (index, amino_acid) in AMINO_ACIDS.iter().copied().enumerate() {
+    for (index, amino_acid) in amino_acids.iter().copied().enumerate() {
         map.insert(
             [BASES[index / 16], BASES[(index / 4) % 4], BASES[index % 4]],
             amino_acid,
@@ -482,6 +585,12 @@ fn add_exchangeable(
     Ok(())
 }
 
+/// Elements listing genes that can stand in for their parent gene:
+/// `exchangeables` in MacSyFinder 2, `homologs` and `analogs` before.
+fn is_exchangeable_container(element_name: &str) -> bool {
+    matches!(element_name, "exchangeables" | "homologs" | "analogs")
+}
+
 fn required_attribute<'a>(
     attributes: &'a HashMap<String, String>,
     name: &str,
@@ -576,6 +685,7 @@ mod tests {
             min_mandatory_genes_required: 1,
             min_genes_required: 1,
             multi_loci: false,
+            max_nb_genes: None,
         }
     }
 
@@ -619,6 +729,7 @@ mod tests {
     #[test]
     fn protein_fasta_wraps_at_sixty_ascii_residues() {
         let genes = [GeneRecord {
+            seq_id: String::new(),
             id: "gene-1".to_string(),
             protein: "A".repeat(61),
             start: 1,
@@ -637,6 +748,7 @@ mod tests {
     #[test]
     fn protein_fasta_rejects_non_ascii_residues() {
         let genes = [GeneRecord {
+            seq_id: String::new(),
             id: "bad-gene".to_string(),
             protein: "MÉT".to_string(),
             start: 1,
@@ -765,14 +877,48 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_genetic_codes_are_not_silently_translated_as_code_11() {
-        for code in [0, 1, 4, 25, 267, usize::MAX] {
+    fn unsupported_genetic_codes_are_rejected() {
+        for code in [0, 7, 8, 17, 20, 26, 267] {
             assert!(
                 codon_table(code)
                     .unwrap_err()
                     .to_string()
-                    .contains("only genetic code 11")
+                    .contains("Unsupported genetic code")
             );
         }
+    }
+
+    #[test]
+    fn alternative_codes_change_only_their_documented_codons() {
+        let standard = codon_table(11).unwrap();
+        let differences = |code: usize| -> Vec<(String, char)> {
+            let table = codon_table(code).unwrap();
+            let mut changed: Vec<(String, char)> = table
+                .iter()
+                .filter(|(codon, amino_acid)| standard[*codon] != **amino_acid)
+                .map(|(codon, amino_acid)| {
+                    (
+                        String::from_utf8(codon.to_vec()).unwrap(),
+                        *amino_acid as char,
+                    )
+                })
+                .collect();
+            changed.sort();
+            changed
+        };
+        assert!(differences(1).is_empty());
+        // Mycoplasma and Spiroplasma: TGA codes for tryptophan.
+        assert_eq!(differences(4), [("TGA".to_string(), 'W')]);
+        // Candidate division SR1 and Gracilibacteria: TGA codes for glycine.
+        assert_eq!(differences(25), [("TGA".to_string(), 'G')]);
+        assert_eq!(
+            differences(6),
+            [("TAA".to_string(), 'Q'), ("TAG".to_string(), 'Q')]
+        );
+        assert_eq!(
+            translate_dna(b"ATGTGAAAATAA", &codon_table(4).unwrap()),
+            "MWK"
+        );
+        assert_eq!(translate_dna(b"ATGTGAAAATAA", &standard), "M");
     }
 }

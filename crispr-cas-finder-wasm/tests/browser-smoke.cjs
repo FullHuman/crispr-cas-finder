@@ -9,6 +9,22 @@ const root = path.resolve(__dirname, '..', 'www');
 const browserName = process.env.SMOKE_BROWSER || 'chromium';
 assert.ok(['chromium', 'webkit'].includes(browserName), 'SMOKE_BROWSER must be chromium or webkit');
 
+// HMM bit scores and E-values come from single-precision SIMD sums whose
+// last digits differ between native and WebAssembly builds. Everything else,
+// including coordinates and sequences, must match exactly.
+function assertEquivalent(actual, expected, where) {
+  if (typeof actual === 'number' && typeof expected === 'number') {
+    if (Number.isInteger(actual) && Number.isInteger(expected)) return assert.equal(actual, expected, where);
+    const scale = Math.max(Math.abs(actual), Math.abs(expected));
+    return assert.ok(Math.abs(actual - expected) <= 1e-4 * scale, `${where}: ${actual} != ${expected}`);
+  }
+  if (actual === null || expected === null || typeof actual !== 'object' || typeof expected !== 'object') {
+    return assert.equal(actual, expected, where);
+  }
+  assert.deepEqual(Object.keys(actual).sort(), Object.keys(expected).sort(), `${where}: keys`);
+  for (const key of Object.keys(expected)) assertEquivalent(actual[key], expected[key], `${where}.${key}`);
+}
+
 (async () => {
   // Exercise the deployment headers instead of masking configuration bugs with
   // a separate set of test-only values. Both Vercel entry points must agree.
@@ -50,8 +66,8 @@ assert.ok(['chromium', 'webkit'].includes(browserName), 'SMOKE_BROWSER must be c
         missingHeader: fails(() => wasm.find_repeats('ACGT', {}), /FASTA/),
         emptySequence: fails(() => wasm.find_repeats('>a\n', {}), /empty FASTA/),
         defaults: Array.isArray(wasm.find_repeats('>a\nACGT', undefined)),
-        unsupportedCode: fails(() => wasm.cas_prepare('>a\nACGT', [], { genetic_code: 4 }), /only genetic code 11/),
-        overflowingCode: fails(() => wasm.cas_prepare('>a\nACGT', [], { genetic_code: 267 }), /only genetic code 11/),
+        unsupportedCode: fails(() => wasm.cas_prepare('>a\nACGT', [], { genetic_code: 7 }), /Unsupported genetic code/),
+        overflowingCode: fails(() => wasm.cas_prepare('>a\nACGT', [], { genetic_code: 267 }), /Unsupported genetic code/),
       };
       // Empty model list isolates the state machine from gene-prediction fixtures.
       const fasta = '>tiny\n' + 'ACGT'.repeat(100);
@@ -102,7 +118,7 @@ assert.ok(['chromium', 'webkit'].includes(browserName), 'SMOKE_BROWSER must be c
     if (outputs.length === 2) assert.deepEqual(outputs[0], outputs[1], 'threaded and sequential results');
     if (process.env.SMOKE_NATIVE_REPORT) {
       const native = JSON.parse(await fs.readFile(process.env.SMOKE_NATIVE_REPORT, 'utf8'));
-      for (const output of outputs) assert.deepEqual(output, native, 'browser and native results');
+      for (const output of outputs) assertEquivalent(output, native, 'report');
       console.log('PASS: browser/native equivalence');
     }
     if (process.env.SMOKE_OUTPUT) await fs.writeFile(process.env.SMOKE_OUTPUT, JSON.stringify(outputs[0], null, 2));

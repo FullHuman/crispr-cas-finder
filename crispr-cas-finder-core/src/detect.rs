@@ -1,66 +1,20 @@
 use crate::dna::reverse_complement;
 use crate::types::{DetectionParams, Orientation};
-use bio::alignment::AlignmentOperation;
-use bio::alignment::pairwise::{Aligner, Scoring};
 use rayon::prelude::*;
 use std::collections::HashMap;
-use std::hash::{BuildHasherDefault, Hasher};
 
 /// Rayon setup and merge overhead outweighs parallel scanning below this many
 /// candidate starts. Keep this private so it can be retuned with benchmarks.
 const PARALLEL_PAIR_SCAN_MIN_POSITIONS: usize = 8_192;
 const ROLLING_HASH_BASE: u64 = 257;
 
-#[derive(Default)]
-struct U64IdentityHasher(u64);
-
-impl Hasher for U64IdentityHasher {
-    #[inline]
-    fn finish(&self) -> u64 {
-        self.0
-    }
-
-    #[inline]
-    fn write(&mut self, bytes: &[u8]) {
-        self.0 = fnv1a_hash64(bytes);
-    }
-
-    #[inline]
-    fn write_u64(&mut self, value: u64) {
-        self.0 = value;
-    }
-}
-
-enum SeedPositions {
-    One(usize),
-    Many(Vec<usize>),
-}
-
-impl SeedPositions {
-    #[inline]
-    fn push(&mut self, position: usize) {
-        match self {
-            Self::One(first) => {
-                let first = *first;
-                *self = Self::Many(vec![first, position]);
-            }
-            Self::Many(positions) => positions.push(position),
-        }
-    }
-
-    #[inline]
-    fn as_slice(&self) -> &[usize] {
-        match self {
-            Self::One(position) => std::slice::from_ref(position),
-            Self::Many(positions) => positions,
-        }
-    }
-}
-
-type SeedMap = HashMap<u64, SeedPositions, BuildHasherDefault<U64IdentityHasher>>;
-
+/// Hash of every seed-length window, indexed by window start.
+///
+/// A repeat's partner lies at most one repeat and one spacer ahead, so pairs
+/// are found by comparing a window's hash with the few dozen hashes in that
+/// range. No genome-wide position table is needed, which keeps memory at
+/// eight bytes per base.
 struct SeedIndex {
-    positions: SeedMap,
     hashes: Vec<u64>,
 }
 
@@ -182,39 +136,11 @@ pub fn cluster_repeats(hits: &[RepeatHit], max_gap: usize) -> Vec<(usize, usize)
 // Hashing helpers  (replaces mkvtree index building)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// FNV-1a 64-bit hash — fast with good distribution for short DNA k-mers.
-#[inline]
-fn fnv1a_hash64(data: &[u8]) -> u64 {
-    const BASIS: u64 = 14_695_981_039_346_656_037;
-    const PRIME: u64 = 1_099_511_628_211;
-    let mut hash_value = BASIS;
-    for &byte in data {
-        hash_value ^= byte as u64;
-        hash_value = hash_value.wrapping_mul(PRIME);
-    }
-    hash_value
-}
-
-/// Build a position index and retain each window hash for the scan passes.
+/// Hash each seed-length window for the scan passes.
 fn build_seed_index(seq: &[u8], seed_len: usize) -> SeedIndex {
-    if seed_len == 0 || seq.len() < seed_len {
-        return SeedIndex {
-            positions: SeedMap::default(),
-            hashes: Vec::new(),
-        };
+    SeedIndex {
+        hashes: rolling_window_hashes(seq, seed_len),
     }
-
-    let mut positions = SeedMap::default();
-    let hashes = rolling_window_hashes(seq, seed_len);
-
-    for (i, &hash) in hashes.iter().enumerate() {
-        positions
-            .entry(hash)
-            .and_modify(|bucket| bucket.push(i))
-            .or_insert(SeedPositions::One(i));
-    }
-
-    SeedIndex { positions, hashes }
 }
 
 /// Hash every fixed-length window in linear time using a wrapping polynomial.
@@ -443,10 +369,6 @@ fn find_pairs_at_position(
         Some(&hash) => hash,
         None => return,
     };
-    let positions = match index.positions.get(&hash) {
-        Some(positions) => positions.as_slice(),
-        None => return,
-    };
 
     let right_repeat_min_start = left_repeat_start
         .saturating_add(min_repeat_length)
@@ -459,14 +381,21 @@ fn find_pairs_at_position(
         return;
     }
 
-    // The shared index stores seed positions. For right-half searches, convert
-    // the desired repeat-position range to its corresponding seed-position range.
+    // The index stores seed positions. For right-half searches, convert the
+    // desired repeat-position range to its corresponding seed-position range.
     let indexed_min = right_repeat_min_start + seed_offset;
-    let indexed_max = right_repeat_max_start + seed_offset;
-    let lower_bound = positions.partition_point(|&position| position < indexed_min);
-    let upper_bound = positions.partition_point(|&position| position <= indexed_max);
+    let indexed_max = (right_repeat_max_start + seed_offset).min(index.hashes.len() - 1);
+    if indexed_min > indexed_max {
+        return;
+    }
+    let window = &index.hashes[indexed_min..=indexed_max];
 
-    for &indexed_right_repeat_start in &positions[lower_bound..upper_bound] {
+    for indexed_right_repeat_start in window
+        .iter()
+        .enumerate()
+        .filter(|&(_, &candidate)| candidate == hash)
+        .map(|(offset, _)| indexed_min + offset)
+    {
         let right_repeat_start = indexed_right_repeat_start - seed_offset;
         let repeat_distance = right_repeat_start - left_repeat_start;
         let min_candidate_repeat_length = repeat_distance
@@ -601,6 +530,9 @@ pub fn find_direct_repeats(seq: &[u8], params: &DetectionParams) -> Vec<RepeatHi
         || min_spacer_length > max_spacer_length
     {
         return Vec::new();
+    }
+    if !params.query_repeats.is_empty() {
+        return find_query_repeats(seq, &params.query_repeats, max_mismatches);
     }
     let seed_length = (min_repeat_length / 2).max(1);
 
@@ -840,6 +772,57 @@ pub fn find_direct_repeats(seq: &[u8], params: &DetectionParams) -> Vec<RepeatHi
     deduped
 }
 
+/// Find occurrences of user-supplied repeats on either strand.
+///
+/// Replaces repeat discovery, like `vmatch -q` upstream. Overlapping
+/// occurrences keep the leftmost, then the longest.
+pub fn find_query_repeats(
+    seq: &[u8],
+    query_repeats: &[String],
+    max_mismatches: usize,
+) -> Vec<RepeatHit> {
+    let mut patterns: Vec<Vec<u8>> = Vec::new();
+    for query in query_repeats {
+        let forward = query.trim().to_ascii_uppercase().into_bytes();
+        if forward.is_empty() {
+            continue;
+        }
+        let reverse = reverse_complement(&forward);
+        for pattern in [forward, reverse] {
+            if !patterns.contains(&pattern) {
+                patterns.push(pattern);
+            }
+        }
+    }
+
+    let mut occurrences: Vec<(usize, usize)> = patterns
+        .par_iter()
+        .flat_map_iter(|pattern| {
+            slide_search(seq, pattern, max_mismatches)
+                .into_iter()
+                .map(|(start, _)| (start, pattern.len()))
+        })
+        .collect();
+    occurrences.sort_unstable_by(|left, right| left.0.cmp(&right.0).then(right.1.cmp(&left.1)));
+    occurrences.dedup();
+
+    let mut hits: Vec<RepeatHit> = Vec::new();
+    let mut next_free = 0usize;
+    for (start, repeat_length) in occurrences {
+        if !hits.is_empty() && start < next_free {
+            continue;
+        }
+        next_free = start + repeat_length;
+        hits.push(RepeatHit {
+            repeat_length,
+            pos1: start + 1,
+            repeat_sequence: String::from_utf8_lossy(&seq[start..start + repeat_length])
+                .to_string(),
+        });
+    }
+    hits
+}
+
 /// Extract spacer sequences from a cluster of DR hits.
 pub fn extract_spacers(
     hits: &[RepeatHit],
@@ -958,48 +941,118 @@ pub fn refine_cluster_with_consensus(
     kept
 }
 
-/// Re-scan the cluster region using the consensus DR (fuzznuc-style).
+/// Count how many fostered properties the repeat instances of a candidate
+/// satisfy: favoured start, favoured end, and at least the favoured length.
 ///
-/// Mirrors the Perl pipeline's second pass: after choosing the consensus DR
-/// via `choose_consensus_repeat`, Perl runs fuzznuc through the ±500 bp cluster
-/// window using `err = floor(DRlength / DRtrunMism)` mismatches, then
-/// re-derives the DR hit list and spacers from those fresh positions.
-/// Spacers whose length falls outside `[min_spacer_to_repeat_ratio × DRlen, max_spacer_to_repeat_ratio ×
-/// DRlen]` are dropped, matching Perl's `definespacers` filter.
-///
-/// Compute pairwise percent identity with global alignment.
-///
-/// Unlike the fixed-length Hamming helper, spacer comparisons must account for
-/// insertions, deletions, and unequal lengths, so both implementations remain.
-fn percent_identity(a: &str, b: &str) -> f64 {
-    let scoring = Scoring::from_scores(-5, -1, 1, -1);
-    let mut aligner = Aligner::with_scoring(scoring);
-    let al = aligner.global(a.as_bytes(), b.as_bytes());
-    let matches = al
-        .operations
+/// Upstream subtracts two score points per property and instance when
+/// `-force` is set, but hardcodes `G`, `AA.` and 30; here the configured
+/// `foster_repeat_*` values are honoured.
+pub fn foster_score(repeats: &[RepeatHit], params: &DetectionParams) -> usize {
+    let begin = params.foster_repeat_begin.as_bytes();
+    let end = params.foster_repeat_end.as_bytes();
+    repeats
         .iter()
-        .filter(|&&op| op == AlignmentOperation::Match)
-        .count();
-    let len = al.operations.len();
-    if len == 0 {
-        0.0
-    } else {
-        matches as f64 / len as f64 * 100.0
-    }
+        .map(|repeat| {
+            let sequence = repeat.repeat_sequence.as_bytes();
+            usize::from(crate::dna::starts_with_iupac(sequence, begin))
+                + usize::from(crate::dna::ends_with_iupac(sequence, end))
+                + usize::from(sequence.len() >= params.foster_repeat_length)
+        })
+        .sum()
 }
 
-/// Check that no two spacers exceed similarity threshold; returns true if pass
-pub fn check_spacer_similarity(spacers: &[String], threshold: f64) -> bool {
-    for left_index in 0..spacers.len() {
-        for right_index in (left_index + 1)..spacers.len() {
-            let pairwise_identity_percent =
-                percent_identity(&spacers[left_index], &spacers[right_index]);
-            if pairwise_identity_percent >= threshold {
-                return false;
-            }
+/// Add at most one truncated terminal repeat on each side of an array.
+///
+/// The repeat farthest from the leader is often degenerate in its distal
+/// half. A candidate is accepted when the half of the window nearest the
+/// array matches the same half of the consensus within
+/// `truncated_mismatch_percent` (at least one mismatch) and the spacer it
+/// creates has a valid length. Returns the number of repeats added.
+pub fn extend_with_truncated_repeats(
+    consensus: &str,
+    repeats: &mut Vec<RepeatHit>,
+    seq: &[u8],
+    params: &DetectionParams,
+) -> usize {
+    let consensus = consensus.as_bytes();
+    let repeat_length = consensus.len();
+    let half_length = repeat_length / 2;
+    if half_length == 0 || repeats.len() < 2 {
+        return 0;
+    }
+    let allowed_mismatches =
+        ((half_length as f64 * params.truncated_mismatch_percent / 100.0).floor() as usize).max(1);
+    let min_spacer_length =
+        ((repeat_length as f64 * params.min_spacer_to_repeat_ratio).floor() as usize).max(1);
+    let max_spacer_length =
+        (repeat_length as f64 * params.max_spacer_to_repeat_ratio).ceil() as usize;
+    let spacer_lengths: Vec<usize> = repeats
+        .windows(2)
+        .map(|pair| {
+            pair[1]
+                .pos1
+                .saturating_sub(pair[0].pos1 + pair[0].repeat_length)
+        })
+        .collect();
+    let typical_spacer_length = spacer_lengths.iter().sum::<usize>() / spacer_lengths.len();
+
+    // `half_offset` selects which half of the window must match.
+    let best_start = |starts: std::ops::RangeInclusive<usize>,
+                      half_offset: usize,
+                      spacer_length: &dyn Fn(usize) -> usize| {
+        starts
+            .filter(|&start| start >= 1 && start - 1 + repeat_length <= seq.len())
+            .filter_map(|start| {
+                let window = &seq[start - 1 + half_offset..start - 1 + half_offset + half_length];
+                let expected = &consensus[half_offset..half_offset + half_length];
+                let mismatches = window
+                    .iter()
+                    .zip(expected)
+                    .filter(|(base, expected)| !base.eq_ignore_ascii_case(expected))
+                    .count();
+                (mismatches <= allowed_mismatches).then(|| {
+                    (
+                        mismatches,
+                        spacer_length(start).abs_diff(typical_spacer_length),
+                        start,
+                    )
+                })
+            })
+            .min()
+            .map(|(_, _, start)| start)
+    };
+    let hit_at = |start: usize| RepeatHit {
+        repeat_length,
+        pos1: start,
+        repeat_sequence: String::from_utf8_lossy(&seq[start - 1..start - 1 + repeat_length])
+            .to_string(),
+    };
+
+    let mut added = 0;
+    let last_end = repeats.last().map_or(0, |hit| hit.pos1 + hit.repeat_length);
+    if let Some(start) = best_start(
+        last_end + min_spacer_length..=last_end + max_spacer_length,
+        0,
+        &|start| start - last_end,
+    ) {
+        repeats.push(hit_at(start));
+        added += 1;
+    }
+
+    let first_start = repeats[0].pos1;
+    if first_start > min_spacer_length + repeat_length {
+        let highest = first_start - min_spacer_length - repeat_length;
+        let lowest = first_start
+            .saturating_sub(max_spacer_length + repeat_length)
+            .max(1);
+        if let Some(start) = best_start(lowest..=highest, repeat_length - half_length, &|start| {
+            first_start - (start + repeat_length)
+        }) {
+            repeats.insert(0, hit_at(start));
+            added += 1;
         }
     }
-    true
+    added
 }
 
 /// Perl `check_short_crispr`: for 1-spacer arrays, align the DR consensus
@@ -1515,35 +1568,6 @@ mod tests {
         assert_eq!(most_frequent_repeat_sequence(&refs), Some("AAAA"));
     }
 
-    // ── check_spacer_similarity ───────────────────────────────────────────────
-
-    #[test]
-    fn spacer_similarity_distinct_spacers_pass() {
-        // Completely different sequences → low identity → passes
-        let spacers = vec![
-            "ACGTACGTACGTACGTACGTACGTACGT".to_string(),
-            "TTTTTTTTTTTTTTTTTTTTTTTTTTTT".to_string(),
-        ];
-        assert!(check_spacer_similarity(&spacers, 60.0));
-    }
-
-    #[test]
-    fn spacer_similarity_identical_spacers_fail() {
-        // 100 % identity → above any threshold → fails
-        let spacers = vec![
-            "ACGTACGTACGTACGT".to_string(),
-            "ACGTACGTACGTACGT".to_string(),
-        ];
-        assert!(!check_spacer_similarity(&spacers, 60.0));
-    }
-
-    #[test]
-    fn spacer_similarity_single_spacer_passes() {
-        // Nothing to compare against → trivially passes
-        let spacers = vec!["ACGTACGTACGTACGT".to_string()];
-        assert!(check_spacer_similarity(&spacers, 60.0));
-    }
-
     // ── find_direct_repeats: core pipeline ────────────────────────────────────────
     //
     // Synthetic CRISPR layout (1-based coords after 100-bp flank):
@@ -1664,6 +1688,101 @@ mod tests {
             hits.len(),
             hits
         );
+    }
+
+    fn hits_at(seq: &[u8], starts: &[usize]) -> Vec<RepeatHit> {
+        starts
+            .iter()
+            .map(|&start| RepeatHit {
+                repeat_length: DR.len(),
+                pos1: start,
+                repeat_sequence: String::from_utf8_lossy(&seq[start - 1..start - 1 + DR.len()])
+                    .to_string(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn truncated_terminal_repeat_is_added_after_the_array() {
+        let sp1 = b"CAGTTTCAGCGATACGATCGATCGATCGTTTT";
+        let sp2 = b"AAAACCCCGGGGTTTTACGATCGATCGATCGA";
+        let sp3 = b"GCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTA";
+        let mut truncated = DR[..14].to_vec();
+        truncated.extend_from_slice(b"CCCCCCCCCCCCCC");
+        let seq = build_crispr_seq(&[DR, DR, DR, &truncated], &[sp1, sp2, sp3], 100);
+        let consensus = std::str::from_utf8(DR).unwrap();
+        let mut repeats = hits_at(&seq, &[101, 161, 221]);
+
+        let added = extend_with_truncated_repeats(consensus, &mut repeats, &seq, &default_params());
+
+        assert_eq!(added, 1);
+        assert_eq!(repeats.last().unwrap().pos1, 281);
+    }
+
+    #[test]
+    fn truncated_leading_repeat_must_match_the_half_nearest_the_array() {
+        let sp1 = b"CAGTTTCAGCGATACGATCGATCGATCGTTTT";
+        let sp2 = b"AAAACCCCGGGGTTTTACGATCGATCGATCGA";
+        let sp3 = b"GCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTA";
+        let mut truncated = b"CCCCCCCCCCCCCC".to_vec();
+        truncated.extend_from_slice(&DR[14..]);
+        let seq = build_crispr_seq(&[&truncated, DR, DR, DR], &[sp1, sp2, sp3], 100);
+        let consensus = std::str::from_utf8(DR).unwrap();
+        let mut repeats = hits_at(&seq, &[161, 221, 281]);
+
+        let added = extend_with_truncated_repeats(consensus, &mut repeats, &seq, &default_params());
+
+        assert_eq!(added, 1);
+        assert_eq!(repeats[0].pos1, 101);
+    }
+
+    #[test]
+    fn complete_array_gains_no_truncated_repeat() {
+        let sp1 = b"CAGTTTCAGCGATACGATCGATCGATCGTTTT";
+        let sp2 = b"AAAACCCCGGGGTTTTACGATCGATCGATCGA";
+        let seq = build_crispr_seq(&[DR, DR, DR], &[sp1, sp2], 100);
+        let consensus = std::str::from_utf8(DR).unwrap();
+        let mut repeats = hits_at(&seq, &[101, 161, 221]);
+
+        let added = extend_with_truncated_repeats(consensus, &mut repeats, &seq, &default_params());
+
+        assert_eq!(added, 0);
+        assert_eq!(repeats.len(), 3);
+    }
+
+    #[test]
+    fn foster_score_counts_configured_properties_per_repeat() {
+        let seq = build_crispr_seq(&[DR, DR], &[b"CAGTTTCAGCGATACGATCGATCGATCGTTTT"], 100);
+        let repeats = hits_at(&seq, &[101, 161]);
+        let mut params = default_params();
+        // DR starts with G, ends with AAA and is 28 bp long.
+        assert_eq!(foster_score(&repeats, &params), 4);
+        params.foster_repeat_length = 28;
+        assert_eq!(foster_score(&repeats, &params), 6);
+        params.foster_repeat_begin = "T".to_string();
+        assert_eq!(foster_score(&repeats, &params), 4);
+    }
+
+    #[test]
+    fn query_repeats_are_found_on_both_strands_with_a_mismatch() {
+        let spacer = b"CAGTTTCAGCGATACGATCGATCGATCGTTTT";
+        let mut mutated = DR.to_vec();
+        mutated[5] = b'T';
+        let seq = build_crispr_seq(&[DR, &mutated, DR], &[spacer, spacer], 100);
+        let reverse_query = String::from_utf8(reverse_complement(DR)).unwrap();
+
+        let exact = find_query_repeats(&seq, std::slice::from_ref(&reverse_query), 0);
+        assert_eq!(
+            exact.iter().map(|hit| hit.pos1).collect::<Vec<_>>(),
+            [101, 221]
+        );
+
+        let tolerant = find_query_repeats(&seq, &[reverse_query], 1);
+        assert_eq!(
+            tolerant.iter().map(|hit| hit.pos1).collect::<Vec<_>>(),
+            [101, 161, 221]
+        );
+        assert_eq!(tolerant[1].repeat_sequence.as_bytes(), mutated.as_slice());
     }
 
     #[test]

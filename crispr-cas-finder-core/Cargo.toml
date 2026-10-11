@@ -18,7 +18,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 log = "0.4"
 quick-xml = "0.41.0"
-orphos-core = "0.3.0"
+orphos-core = "0.4.0"
 bitflags = "2"
 thiserror = "2"
 ndarray = "0.17"

@@ -164,6 +164,7 @@ version = "0.1.0"
 dependencies = [
  "crispr-cas-finder-core",
  "pyo3",
+ "serde_json",
 ]
 
 [[package]]
@@ -538,9 +539,9 @@ dependencies = [
 
 [[package]]
 name = "orphos-core"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a20a04e65b7597ff725b241171f51da19eeb3f068d7ac4ac48dd307820635f6f"
+checksum = "93b0d1389bd62a0718772d79a327f7d67e057dc070cbd3e33904d11a0444dd80"
 dependencies = [
  "bio",
  "rayon",

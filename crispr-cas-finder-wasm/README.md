@@ -67,7 +67,7 @@ The test server uses the deployment headers from `www/vercel.json`.
 Run bundler tests with
 `python3 -m unittest discover -s crispr-cas-finder-wasm/tests -p 'test_*.py'`.
 
-Cas detection currently accepts genetic code 11 only. See
+The browser application predicts genes with genetic code 11; the `cas_prepare` API accepts the other codes Prodigal supports. See
 [limitations and validation](../LIMITATIONS.md) for evidence-level behavior and
 unsupported upstream model semantics. The browser distribution includes
 `LICENSE` and `THIRD_PARTY_NOTICES.md`; synchronize these copies with

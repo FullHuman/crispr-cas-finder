@@ -7,6 +7,7 @@ import init, {
   cas_search_all_profiles,
   cas_finalize,
   cas_abort,
+  build_analysis_report,
   init_panic_hook,
   initThreadPool,
 } from "./pkg/crispr_cas_finder_wasm.js";
@@ -175,10 +176,17 @@ self.onmessage = async (e) => {
       progress(id, "Evaluating CAS systems...", totalProfiles, totalProfiles);
       const casClusters = cas_finalize();
 
-      self.postMessage({
-        id,
-        result: { crisprs, cas_clusters: casClusters },
-      });
+      // 6. Same report structure as the command-line tool's report.json
+      const report = build_analysis_report(
+        payload.fasta,
+        crisprs,
+        casClusters,
+        payload.options,
+        { ...(payload.casOpts || {}) },
+        payload.reportOpts || null
+      );
+
+      self.postMessage({ id, result: report });
 
     } else {
       throw new Error(`Unknown message type: ${type}`);
