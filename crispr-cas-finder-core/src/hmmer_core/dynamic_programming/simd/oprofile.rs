@@ -9,6 +9,7 @@
 //   Forward: f32  in 4-lane vectors  (Q4  = max(2, ceil((M-1)/4)  + 1)) — odds space
 //   Log:     f32  in 4-lane vectors  (Q4)  — log-space for MSV/Viterbi filters
 
+use super::i16_msv;
 use crate::hmmer_core::config::*;
 use crate::hmmer_core::profile::Profile;
 
@@ -61,6 +62,11 @@ pub struct OptimizedProfile {
     pub rlv: Vec<Vec<f32>>, // [kp][q4 * 4] — match emission log-scores
     pub tlv: Vec<f32>,      // [(7*q4 + q4) * 4] — transition log-scores
 
+    // --- i16x8 MSV over-estimate (see i16_msv.rs) ---
+    pub q8: usize,
+    pub msv_scale: f64,           // integer units per nat
+    pub msv_units: Vec<Vec<i16>>, // [kp][q8 * 8] — match emissions, rounded up
+
     // E-value parameters
     pub ev_params: [f32; NUM_EV_PARAMS],
     pub mode: SearchMode,
@@ -83,6 +89,9 @@ impl OptimizedProfile {
             xf: [[0.0f32; 2]; NUM_XSTATES],
             rlv: vec![vec![f32::NEG_INFINITY; q4 * 4]; kp],
             tlv: vec![f32::NEG_INFINITY; (NTSC_PER_Q * q4 + q4) * 4],
+            q8: i16_msv::vector_count(m),
+            msv_scale: i16_msv::scale_for(m),
+            msv_units: vec![vec![i16::MIN; i16_msv::vector_count(m) * i16_msv::LANES]; kp],
             ev_params: [EV_PARAM_UNSET; NUM_EV_PARAMS],
             mode: SearchMode::Local,
             max_length: 0,
@@ -101,6 +110,7 @@ impl OptimizedProfile {
 
         fwd_conversion(gm, &mut om);
         log_conversion(gm, &mut om);
+        msv_units_conversion(gm, &mut om);
 
         om
     }
@@ -249,6 +259,26 @@ fn fwd_conversion(gm: &Profile, om: &mut OptimizedProfile) {
     om.xf[XST_C][XTR_MOVE] = ss.c_move.exp();
     om.xf[XST_J][XTR_LOOP] = ss.j_loop.exp();
     om.xf[XST_J][XTR_MOVE] = ss.j_move.exp();
+}
+
+// ---------- i16x8 match emissions for the MSV over-estimate ----------
+
+fn msv_units_conversion(gm: &Profile, om: &mut OptimizedProfile) {
+    let m = gm.num_nodes;
+    let nq = om.q8;
+    for x in 0..om.kp {
+        let rsc = gm.residue_scores_for(x);
+        for q in 0..nq {
+            for z in 0..i16_msv::LANES {
+                let k = q + 1 + z * nq;
+                let score_idx = k * PROFILE_NUM_EMISSIONS + PRsc::MatchScore as usize;
+                if k <= m && score_idx < rsc.len() {
+                    om.msv_units[x][q * i16_msv::LANES + z] =
+                        i16_msv::emission_units(om.msv_scale, rsc[score_idx]);
+                }
+            }
+        }
+    }
 }
 
 // ---------- Log-space f32x4 (exact scores for MSV/Viterbi) ----------

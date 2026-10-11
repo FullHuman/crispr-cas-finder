@@ -12,6 +12,7 @@ use crate::hmmer_core::domaindef::{DomainConfig, DomainWorkspace, RescoringBuffe
 use crate::hmmer_core::dynamic_programming::simd::f32_msv;
 use crate::hmmer_core::dynamic_programming::simd::f32_viterbi;
 use crate::hmmer_core::dynamic_programming::simd::forward_filter as simd_fwd;
+use crate::hmmer_core::dynamic_programming::simd::i16_msv;
 use crate::hmmer_core::dynamic_programming::simd::oprofile::OptimizedProfile;
 use crate::hmmer_core::errors::HmmerError;
 use crate::hmmer_core::evalues;
@@ -334,7 +335,12 @@ pub struct SearchTrace {
     pub sequence_length: usize,
     pub null_score: Option<f32>,
     pub bias_filter_score: Option<f32>,
+    /// Exact MSV score. `None` when the integer pre-filter already showed
+    /// that the sequence cannot pass; see `msv_score_bound`.
     pub msv_raw_score: Option<f32>,
+    /// Upper bound on the MSV score from the integer pre-filter, set when
+    /// that bound alone rejected the sequence.
+    pub msv_score_bound: Option<f32>,
     pub viterbi_raw_score: Option<f32>,
     pub forward_raw_score: Option<f32>,
     pub domain_count: usize,
@@ -524,6 +530,20 @@ impl<'w, 's> TargetRun<'w, 's, Prepared> {
 
     fn run_filters(mut self) -> ControlFlow<SearchReport, TargetRun<'w, 's, PassedFilters>> {
         let om = self.worker.engine.oprofile.as_ref().unwrap();
+
+        // Cheap over-estimate first: a sequence whose upper bound fails the
+        // MSV threshold fails the exact filter too.
+        if !self.worker.engine.do_max {
+            let bound = i16_msv::msv_upper_bound(&self.sequence.residues, self.sequence_length, om);
+            if bound.is_finite() {
+                let seq_score_bound = (bound - self.null_score) / LOG2;
+                let p_bound = SearchEngine::msv_pvalue(&self.worker.state.profile, seq_score_bound);
+                if p_bound > self.worker.engine.msv_threshold {
+                    self.trace.msv_score_bound = Some(bound);
+                    return ControlFlow::Break(self.trace.into_filtered_report(FilterReason::Msv));
+                }
+            }
+        }
 
         let msv_raw_score =
             f32_msv::msv_filter_f32(&self.sequence.residues, self.sequence_length, om);
@@ -1167,7 +1187,7 @@ mod tests {
         let report = worker.search(&sequence).unwrap();
         assert_eq!(report.trace.sequence_length, 32);
         assert!(report.trace.null_score.is_some());
-        assert!(report.trace.msv_raw_score.is_some());
+        assert!(report.trace.msv_raw_score.is_some() || report.trace.msv_score_bound.is_some());
         match report.outcome {
             SearchOutcome::Filtered(_) | SearchOutcome::Hit(_) => {}
         }

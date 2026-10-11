@@ -8,7 +8,7 @@ use hmmer_core::{
     rng::XorShift64,
     simd::{
         f32_msv::msv_filter_f32, f32_viterbi::viterbi_filter_f32, forward_filter::forward_filter,
-        oprofile::OptimizedProfile,
+        i16_msv::msv_upper_bound, oprofile::OptimizedProfile,
     },
     test_helpers::{hmm_sample, random_digital_seq},
 };
@@ -137,4 +137,67 @@ fn filters_match_scalar_recurrences_across_stripe_boundaries() {
             }
         }
     }
+}
+
+/// The integer pre-filter may only reject what the exact MSV filter would
+/// reject, so its score must never fall below the exact one. It must also
+/// stay close to it, or it would let everything through.
+#[test]
+fn integer_msv_bound_is_never_below_the_exact_score_and_stays_tight() {
+    let alphabet = Alphabet::amino();
+    let background = BackgroundModel::new(&alphabet);
+    let mut compared = 0usize;
+    let mut total_excess = 0.0f64;
+    for seed in [0, 1, 17, 42, 1234] {
+        let mut rng = XorShift64::new(seed);
+        for m in [1, 2, 7, 8, 9, 16, 17, 64, 100, 257, 600] {
+            let hmm = hmm_sample(&mut rng, m, &alphabet);
+            for l in [1, 2, 8, 51, 300, 1500] {
+                let mut profile = Profile::new(m, &alphabet);
+                modelconfig::profile_config(&hmm, &background, &mut profile, l, SearchMode::Local);
+                let optimized = OptimizedProfile::from_profile(&profile);
+                let random = random_digital_seq(
+                    &mut rng,
+                    &background.residue_frequencies,
+                    alphabet.canonical_size,
+                    l,
+                );
+                // Repeating the best residue of each model position gives
+                // long, high-scoring diagonals and exercises saturation.
+                let consensus: Vec<u8> = (0..l)
+                    .map(|position| {
+                        let k = position % m + 1;
+                        (0..alphabet.canonical_size)
+                            .max_by(|&left, &right| {
+                                profile.residue_scores_for(left)[k * 2]
+                                    .total_cmp(&profile.residue_scores_for(right)[k * 2])
+                            })
+                            .unwrap() as u8
+                    })
+                    .collect();
+                for (kind, seq) in [("random", &random), ("consensus", &consensus)] {
+                    let exact = msv_filter_f32(seq, l, &optimized);
+                    let bound = msv_upper_bound(seq, l, &optimized);
+                    assert!(
+                        bound >= exact,
+                        "{kind}: seed={seed}, M={m}, L={l}: bound {bound} < exact {exact}"
+                    );
+                    if bound.is_finite() && kind == "random" {
+                        compared += 1;
+                        total_excess += f64::from(bound - exact);
+                        assert!(
+                            bound - exact < 1.5,
+                            "{kind}: seed={seed}, M={m}, L={l}: bound {bound} far above {exact}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    assert!(compared > 300);
+    assert!(
+        total_excess / (compared as f64) < 0.25,
+        "mean excess {} nats",
+        total_excess / compared as f64
+    );
 }
