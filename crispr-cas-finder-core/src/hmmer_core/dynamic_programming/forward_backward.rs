@@ -96,88 +96,111 @@ fn generic_forward_backward_decode(
 
     // Generic Forward, matching p7_GForward(). The output matrix is used as
     // temporary Forward storage and is overwritten row-by-row by posteriors.
-    posterior.fill_main_row(0, neg_inf);
+    //
+    // Rows are handled as plain slices of `NUM_MAIN_STATES` floats per node;
+    // the arithmetic and its order are exactly those of the generic
+    // recurrence, so scores do not depend on this layout.
+    let (transitions, _) = tsc.as_chunks::<PROFILE_NUM_TRANSITIONS>();
+    let transitions = &transitions[..m];
+    let alphabet_size = profile.alphabet.full_size;
+    let stride = posterior.main_row_stride();
+    let row_cells = (m + 1) * NUM_MAIN_STATES;
     posterior.set_special_row(0, [neg_inf, 0.0, neg_inf, special.n_move, neg_inf]);
+    let mut x_b_prev = special.n_move;
+    let mut forward_specials: Vec<[f32; NUM_SPECIAL_STATES]> = Vec::with_capacity(l + 1);
+    forward_specials.push([neg_inf, 0.0, neg_inf, special.n_move, neg_inf]);
+    {
+        let main = posterior.main_as_slice_mut();
+        main[..row_cells].fill(neg_inf);
 
-    for i in 1..=l {
-        let x = digital_sequence[i - 1] as usize;
-        if x >= profile.alphabet.full_size {
-            return Err(HmmerError::Internal(format!(
-                "digital residue code {x} is outside the profile alphabet"
-            )));
-        }
-        posterior.fill_main_row(i, neg_inf);
-        let mut x_e = neg_inf;
+        for i in 1..=l {
+            let x = digital_sequence[i - 1] as usize;
+            if x >= alphabet_size {
+                return Err(HmmerError::Internal(format!(
+                    "digital residue code {x} is outside the profile alphabet"
+                )));
+            }
+            let (emissions, _) = profile
+                .residue_scores_for(x)
+                .as_chunks::<PROFILE_NUM_EMISSIONS>();
+            let emissions = &emissions[..=m];
 
-        for k in 1..m {
+            let (before, from_here) = main.split_at_mut(i * stride);
+            let (previous, _) =
+                before[(i - 1) * stride..][..row_cells].as_chunks::<NUM_MAIN_STATES>();
+            let (current, _) = from_here[..row_cells].as_chunks_mut::<NUM_MAIN_STATES>();
+            current[0] = [neg_inf; NUM_MAIN_STATES];
+
+            let mut x_e = neg_inf;
+            // Node k - 1 of the previous and current rows, and its transitions.
+            let mut previous_left = previous[0];
+            let mut current_left = current[0];
+            let mut t_left = &transitions[0];
+            for (((current_cell, previous_here), t_here), emission) in current[1..m]
+                .iter_mut()
+                .zip(&previous[1..m])
+                .zip(&transitions[1..m])
+                .zip(&emissions[1..m])
+            {
+                let from_mi = add_logs(
+                    previous_left[MATCH_CELL] + t_left[PTsc::MatchToMatch.idx()],
+                    previous_left[INSERT_CELL] + t_left[PTsc::InsertToMatch.idx()],
+                );
+                let from_bd = add_logs(
+                    x_b_prev + t_left[PTsc::BeginToMatch.idx()],
+                    previous_left[DELETE_CELL] + t_left[PTsc::DeleteToMatch.idx()],
+                );
+                let mm = add_logs(from_mi, from_bd) + emission[PRsc::MatchScore.idx()];
+                let im = add_logs(
+                    previous_here[MATCH_CELL] + t_here[PTsc::MatchToInsert.idx()],
+                    previous_here[INSERT_CELL] + t_here[PTsc::InsertToInsert.idx()],
+                ) + emission[PRsc::InsertScore.idx()];
+                let dm = add_logs(
+                    current_left[MATCH_CELL] + t_left[PTsc::MatchToDelete.idx()],
+                    current_left[DELETE_CELL] + t_left[PTsc::DeleteToDelete.idx()],
+                );
+                *current_cell = [mm, im, dm];
+                x_e = add_logs(x_e, add_logs(mm + esc, dm + esc));
+
+                previous_left = *previous_here;
+                current_left = *current_cell;
+                t_left = t_here;
+            }
+
+            // Last node: no insert state, and no local-exit term on E.
             let from_mi = add_logs(
-                posterior.main[[i - 1, k - 1, MATCH_CELL]]
-                    + transition(tsc, k - 1, PTsc::MatchToMatch),
-                posterior.main[[i - 1, k - 1, INSERT_CELL]]
-                    + transition(tsc, k - 1, PTsc::InsertToMatch),
+                previous_left[MATCH_CELL] + t_left[PTsc::MatchToMatch.idx()],
+                previous_left[INSERT_CELL] + t_left[PTsc::InsertToMatch.idx()],
             );
             let from_bd = add_logs(
-                posterior.special[[i - 1, BEGIN_STATE]]
-                    + transition(tsc, k - 1, PTsc::BeginToMatch),
-                posterior.main[[i - 1, k - 1, DELETE_CELL]]
-                    + transition(tsc, k - 1, PTsc::DeleteToMatch),
+                x_b_prev + t_left[PTsc::BeginToMatch.idx()],
+                previous_left[DELETE_CELL] + t_left[PTsc::DeleteToMatch.idx()],
             );
-            let mm = add_logs(from_mi, from_bd) + emission(profile, x, k, PRsc::MatchScore);
-            posterior.main[[i, k, MATCH_CELL]] = mm;
-
-            let im = add_logs(
-                posterior.main[[i - 1, k, MATCH_CELL]] + transition(tsc, k, PTsc::MatchToInsert),
-                posterior.main[[i - 1, k, INSERT_CELL]] + transition(tsc, k, PTsc::InsertToInsert),
-            ) + emission(profile, x, k, PRsc::InsertScore);
-            posterior.main[[i, k, INSERT_CELL]] = im;
-
+            let mm = add_logs(from_mi, from_bd) + emissions[m][PRsc::MatchScore.idx()];
             let dm = add_logs(
-                posterior.main[[i, k - 1, MATCH_CELL]]
-                    + transition(tsc, k - 1, PTsc::MatchToDelete),
-                posterior.main[[i, k - 1, DELETE_CELL]]
-                    + transition(tsc, k - 1, PTsc::DeleteToDelete),
+                current_left[MATCH_CELL] + t_left[PTsc::MatchToDelete.idx()],
+                current_left[DELETE_CELL] + t_left[PTsc::DeleteToDelete.idx()],
             );
-            posterior.main[[i, k, DELETE_CELL]] = dm;
-            x_e = add_logs(x_e, add_logs(mm + esc, dm + esc));
+            current[m] = [mm, neg_inf, dm];
+            x_e = add_logs(x_e, add_logs(mm, dm));
+
+            let previous_specials = forward_specials[i - 1];
+            let x_j = add_logs(
+                previous_specials[J_STATE] + special.j_loop,
+                x_e + special.e_loop,
+            );
+            let x_c = add_logs(
+                previous_specials[C_STATE] + special.c_loop,
+                x_e + special.e_move,
+            );
+            let x_n = previous_specials[N_STATE] + special.n_loop;
+            let x_b = add_logs(x_n + special.n_move, x_j + special.j_move);
+            forward_specials.push([x_e, x_n, x_j, x_b, x_c]);
+            x_b_prev = x_b;
         }
-
-        let k = m;
-        let from_mi = add_logs(
-            posterior.main[[i - 1, k - 1, MATCH_CELL]] + transition(tsc, k - 1, PTsc::MatchToMatch),
-            posterior.main[[i - 1, k - 1, INSERT_CELL]]
-                + transition(tsc, k - 1, PTsc::InsertToMatch),
-        );
-        let from_bd = add_logs(
-            posterior.special[[i - 1, BEGIN_STATE]] + transition(tsc, k - 1, PTsc::BeginToMatch),
-            posterior.main[[i - 1, k - 1, DELETE_CELL]]
-                + transition(tsc, k - 1, PTsc::DeleteToMatch),
-        );
-        posterior.main[[i, k, MATCH_CELL]] =
-            add_logs(from_mi, from_bd) + emission(profile, x, k, PRsc::MatchScore);
-        posterior.main[[i, k, INSERT_CELL]] = neg_inf;
-        posterior.main[[i, k, DELETE_CELL]] = add_logs(
-            posterior.main[[i, k - 1, MATCH_CELL]] + transition(tsc, k - 1, PTsc::MatchToDelete),
-            posterior.main[[i, k - 1, DELETE_CELL]] + transition(tsc, k - 1, PTsc::DeleteToDelete),
-        );
-        x_e = add_logs(
-            x_e,
-            add_logs(
-                posterior.main[[i, k, MATCH_CELL]],
-                posterior.main[[i, k, DELETE_CELL]],
-            ),
-        );
-
-        let x_j = add_logs(
-            posterior.special[[i - 1, J_STATE]] + special.j_loop,
-            x_e + special.e_loop,
-        );
-        let x_c = add_logs(
-            posterior.special[[i - 1, C_STATE]] + special.c_loop,
-            x_e + special.e_move,
-        );
-        let x_n = posterior.special[[i - 1, N_STATE]] + special.n_loop;
-        let x_b = add_logs(x_n + special.n_move, x_j + special.j_move);
-        posterior.set_special_row(i, [x_e, x_n, x_j, x_b, x_c]);
+    }
+    for (i, row) in forward_specials.iter().enumerate() {
+        posterior.set_special_row(i, *row);
     }
 
     let forward_score = posterior.special[[l, C_STATE]] + special.c_move;
@@ -191,12 +214,6 @@ fn generic_forward_backward_decode(
         )));
     }
 
-    let forward_specials: Vec<[f32; NUM_SPECIAL_STATES]> = (0..=l)
-        .map(|i| {
-            let row = posterior.special_row(i);
-            [row[0], row[1], row[2], row[3], row[4]]
-        })
-        .collect();
     let mut backward_specials = vec![[neg_inf; NUM_SPECIAL_STATES]; l + 1];
     let mut b_next = vec![[neg_inf; NUM_MAIN_STATES]; m + 1];
     let mut b_cur = vec![[neg_inf; NUM_MAIN_STATES]; m + 1];
@@ -228,15 +245,19 @@ fn generic_forward_backward_decode(
 
     for i in (1..l).rev() {
         let x_next = digital_sequence[i] as usize;
-        b_cur.fill([neg_inf; NUM_MAIN_STATES]);
+        let (emissions, _) = profile
+            .residue_scores_for(x_next)
+            .as_chunks::<PROFILE_NUM_EMISSIONS>();
+        let emissions = &emissions[..=m];
+        let next = &b_next[..=m];
 
         let mut x_b = neg_inf;
-        for (k, backward) in b_next.iter().enumerate().take(m + 1).skip(1) {
+        for k in 1..=m {
             x_b = add_logs(
                 x_b,
-                backward[MATCH_CELL]
-                    + transition(tsc, k - 1, PTsc::BeginToMatch)
-                    + emission(profile, x_next, k, PRsc::MatchScore),
+                next[k][MATCH_CELL]
+                    + transitions[k - 1][PTsc::BeginToMatch.idx()]
+                    + emissions[k][PRsc::MatchScore.idx()],
             );
         }
         let x_j = add_logs(
@@ -251,34 +272,32 @@ fn generic_forward_backward_decode(
         );
         backward_specials[i] = [x_e, x_n, x_j, x_b, x_c];
 
-        b_cur[m][MATCH_CELL] = x_e;
-        b_cur[m][DELETE_CELL] = x_e;
+        let current = &mut b_cur[..=m];
+        current[0] = [neg_inf; NUM_MAIN_STATES];
+        current[m] = [x_e, neg_inf, x_e];
+        // Delete state of node k + 1 on this row.
+        let mut delete_right = x_e;
         for k in (1..m).rev() {
-            let to_match =
-                b_next[k + 1][MATCH_CELL] + emission(profile, x_next, k + 1, PRsc::MatchScore);
-            let to_insert =
-                b_next[k][INSERT_CELL] + emission(profile, x_next, k, PRsc::InsertScore);
-            b_cur[k][MATCH_CELL] = add_logs(
+            let t = &transitions[k];
+            let to_match = next[k + 1][MATCH_CELL] + emissions[k + 1][PRsc::MatchScore.idx()];
+            let to_insert = next[k][INSERT_CELL] + emissions[k][PRsc::InsertScore.idx()];
+            let match_cell = add_logs(
                 add_logs(
-                    to_match + transition(tsc, k, PTsc::MatchToMatch),
-                    to_insert + transition(tsc, k, PTsc::MatchToInsert),
+                    to_match + t[PTsc::MatchToMatch.idx()],
+                    to_insert + t[PTsc::MatchToInsert.idx()],
                 ),
-                add_logs(
-                    x_e + esc,
-                    b_cur[k + 1][DELETE_CELL] + transition(tsc, k, PTsc::MatchToDelete),
-                ),
+                add_logs(x_e + esc, delete_right + t[PTsc::MatchToDelete.idx()]),
             );
-            b_cur[k][INSERT_CELL] = add_logs(
-                to_match + transition(tsc, k, PTsc::InsertToMatch),
-                to_insert + transition(tsc, k, PTsc::InsertToInsert),
+            let insert_cell = add_logs(
+                to_match + t[PTsc::InsertToMatch.idx()],
+                to_insert + t[PTsc::InsertToInsert.idx()],
             );
-            b_cur[k][DELETE_CELL] = add_logs(
-                to_match + transition(tsc, k, PTsc::DeleteToMatch),
-                add_logs(
-                    b_cur[k + 1][DELETE_CELL] + transition(tsc, k, PTsc::DeleteToDelete),
-                    x_e + esc,
-                ),
+            let delete_cell = add_logs(
+                to_match + t[PTsc::DeleteToMatch.idx()],
+                add_logs(delete_right + t[PTsc::DeleteToDelete.idx()], x_e + esc),
             );
+            current[k] = [match_cell, insert_cell, delete_cell];
+            delete_right = delete_cell;
         }
 
         decode_posterior_row(
@@ -364,12 +383,13 @@ fn decode_posterior_row(
     m: usize,
     special: &crate::hmmer_core::profile::SpecialScores,
 ) {
-    for (k, backward) in backward_main.iter().enumerate().take(m + 1).skip(1) {
-        posterior.main[[i, k, MATCH_CELL]] =
-            (posterior.main[[i, k, MATCH_CELL]] + backward[MATCH_CELL] - overall_score).exp();
-        posterior.main[[i, k, INSERT_CELL]] =
-            (posterior.main[[i, k, INSERT_CELL]] + backward[INSERT_CELL] - overall_score).exp();
-        posterior.main[[i, k, DELETE_CELL]] = 0.0;
+    let stride = posterior.main_row_stride();
+    let row = &mut posterior.main_as_slice_mut()[i * stride..][..(m + 1) * NUM_MAIN_STATES];
+    let (cells, _) = row.as_chunks_mut::<NUM_MAIN_STATES>();
+    for (cell, backward) in cells[1..=m].iter_mut().zip(&backward_main[1..=m]) {
+        cell[MATCH_CELL] = (cell[MATCH_CELL] + backward[MATCH_CELL] - overall_score).exp();
+        cell[INSERT_CELL] = (cell[INSERT_CELL] + backward[INSERT_CELL] - overall_score).exp();
+        cell[DELETE_CELL] = 0.0;
     }
     let n = (forward_specials[i - 1][N_STATE] + special.n_loop + backward_specials[i][N_STATE]
         - overall_score)

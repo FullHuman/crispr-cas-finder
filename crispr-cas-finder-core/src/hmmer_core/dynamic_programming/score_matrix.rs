@@ -159,6 +159,23 @@ impl ScoreMatrix {
         self.special[[i, s]] = val;
     }
 
+    // ── Flat access for DP inner loops ──────────────────────────────────────
+
+    /// Number of floats between the starts of consecutive main rows.
+    #[inline]
+    pub(crate) fn main_row_stride(&self) -> usize {
+        (self.alloc_m + 1) * NUM_MAIN_STATES
+    }
+
+    /// The whole main-state buffer, rows of [`Self::main_row_stride`] floats
+    /// with `NUM_MAIN_STATES` floats per node.
+    #[inline]
+    pub(crate) fn main_as_slice_mut(&mut self) -> &mut [f32] {
+        self.main
+            .as_slice_mut()
+            .expect("main matrix is allocated in standard layout")
+    }
+
     // ── Row-level slice accessors ───────────────────────────────────────────
 
     /// Returns a 2D view of main states at row `i`: shape `(num_nodes+1, 3)`.
