@@ -2,63 +2,19 @@ use crate::dna::reverse_complement;
 use crate::types::{DetectionParams, Orientation};
 use rayon::prelude::*;
 use std::collections::HashMap;
-use std::hash::{BuildHasherDefault, Hasher};
 
 /// Rayon setup and merge overhead outweighs parallel scanning below this many
 /// candidate starts. Keep this private so it can be retuned with benchmarks.
 const PARALLEL_PAIR_SCAN_MIN_POSITIONS: usize = 8_192;
 const ROLLING_HASH_BASE: u64 = 257;
 
-#[derive(Default)]
-struct U64IdentityHasher(u64);
-
-impl Hasher for U64IdentityHasher {
-    #[inline]
-    fn finish(&self) -> u64 {
-        self.0
-    }
-
-    #[inline]
-    fn write(&mut self, bytes: &[u8]) {
-        self.0 = fnv1a_hash64(bytes);
-    }
-
-    #[inline]
-    fn write_u64(&mut self, value: u64) {
-        self.0 = value;
-    }
-}
-
-enum SeedPositions {
-    One(usize),
-    Many(Vec<usize>),
-}
-
-impl SeedPositions {
-    #[inline]
-    fn push(&mut self, position: usize) {
-        match self {
-            Self::One(first) => {
-                let first = *first;
-                *self = Self::Many(vec![first, position]);
-            }
-            Self::Many(positions) => positions.push(position),
-        }
-    }
-
-    #[inline]
-    fn as_slice(&self) -> &[usize] {
-        match self {
-            Self::One(position) => std::slice::from_ref(position),
-            Self::Many(positions) => positions,
-        }
-    }
-}
-
-type SeedMap = HashMap<u64, SeedPositions, BuildHasherDefault<U64IdentityHasher>>;
-
+/// Hash of every seed-length window, indexed by window start.
+///
+/// A repeat's partner lies at most one repeat and one spacer ahead, so pairs
+/// are found by comparing a window's hash with the few dozen hashes in that
+/// range. No genome-wide position table is needed, which keeps memory at
+/// eight bytes per base.
 struct SeedIndex {
-    positions: SeedMap,
     hashes: Vec<u64>,
 }
 
@@ -180,39 +136,11 @@ pub fn cluster_repeats(hits: &[RepeatHit], max_gap: usize) -> Vec<(usize, usize)
 // Hashing helpers  (replaces mkvtree index building)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// FNV-1a 64-bit hash — fast with good distribution for short DNA k-mers.
-#[inline]
-fn fnv1a_hash64(data: &[u8]) -> u64 {
-    const BASIS: u64 = 14_695_981_039_346_656_037;
-    const PRIME: u64 = 1_099_511_628_211;
-    let mut hash_value = BASIS;
-    for &byte in data {
-        hash_value ^= byte as u64;
-        hash_value = hash_value.wrapping_mul(PRIME);
-    }
-    hash_value
-}
-
-/// Build a position index and retain each window hash for the scan passes.
+/// Hash each seed-length window for the scan passes.
 fn build_seed_index(seq: &[u8], seed_len: usize) -> SeedIndex {
-    if seed_len == 0 || seq.len() < seed_len {
-        return SeedIndex {
-            positions: SeedMap::default(),
-            hashes: Vec::new(),
-        };
+    SeedIndex {
+        hashes: rolling_window_hashes(seq, seed_len),
     }
-
-    let mut positions = SeedMap::default();
-    let hashes = rolling_window_hashes(seq, seed_len);
-
-    for (i, &hash) in hashes.iter().enumerate() {
-        positions
-            .entry(hash)
-            .and_modify(|bucket| bucket.push(i))
-            .or_insert(SeedPositions::One(i));
-    }
-
-    SeedIndex { positions, hashes }
 }
 
 /// Hash every fixed-length window in linear time using a wrapping polynomial.
@@ -441,10 +369,6 @@ fn find_pairs_at_position(
         Some(&hash) => hash,
         None => return,
     };
-    let positions = match index.positions.get(&hash) {
-        Some(positions) => positions.as_slice(),
-        None => return,
-    };
 
     let right_repeat_min_start = left_repeat_start
         .saturating_add(min_repeat_length)
@@ -457,14 +381,21 @@ fn find_pairs_at_position(
         return;
     }
 
-    // The shared index stores seed positions. For right-half searches, convert
-    // the desired repeat-position range to its corresponding seed-position range.
+    // The index stores seed positions. For right-half searches, convert the
+    // desired repeat-position range to its corresponding seed-position range.
     let indexed_min = right_repeat_min_start + seed_offset;
-    let indexed_max = right_repeat_max_start + seed_offset;
-    let lower_bound = positions.partition_point(|&position| position < indexed_min);
-    let upper_bound = positions.partition_point(|&position| position <= indexed_max);
+    let indexed_max = (right_repeat_max_start + seed_offset).min(index.hashes.len() - 1);
+    if indexed_min > indexed_max {
+        return;
+    }
+    let window = &index.hashes[indexed_min..=indexed_max];
 
-    for &indexed_right_repeat_start in &positions[lower_bound..upper_bound] {
+    for indexed_right_repeat_start in window
+        .iter()
+        .enumerate()
+        .filter(|&(_, &candidate)| candidate == hash)
+        .map(|(offset, _)| indexed_min + offset)
+    {
         let right_repeat_start = indexed_right_repeat_start - seed_offset;
         let repeat_distance = right_repeat_start - left_repeat_start;
         let min_candidate_repeat_length = repeat_distance
