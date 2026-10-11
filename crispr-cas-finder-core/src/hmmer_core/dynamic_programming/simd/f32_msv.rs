@@ -54,9 +54,9 @@ pub fn msv_filter_f32(dsq: &[u8], l: usize, om: &OptimizedProfile) -> f32 {
         // next. Keeping several independent running maxima stops that max
         // from serialising the loop; max is exact, so the result is the same.
         let mut xe_lanes = [neg_inf_v; XE_ACCUMULATORS];
-        let mut cells = m_row.chunks_exact_mut(XE_ACCUMULATORS);
-        let mut scores = rsc_vectors.chunks_exact(XE_ACCUMULATORS);
-        for (cell_group, rsc_group) in cells.by_ref().zip(scores.by_ref()) {
+        let (cell_groups, cell_rest) = m_row.as_chunks_mut::<XE_ACCUMULATORS>();
+        let (rsc_groups, rsc_rest) = rsc_vectors.as_chunks::<XE_ACCUMULATORS>();
+        for (cell_group, rsc_group) in cell_groups.iter_mut().zip(rsc_groups) {
             for index in 0..XE_ACCUMULATORS {
                 // M(i,q) = max(M(i-1,q-1), xB+tBMk) + rsc
                 let sv = mpv.simd_max(xb_tbmk_v) + F32x4::from_array(rsc_group[index]);
@@ -65,7 +65,7 @@ pub fn msv_filter_f32(dsq: &[u8], l: usize, om: &OptimizedProfile) -> f32 {
                 cell_group[index] = sv;
             }
         }
-        for (cell, rsc_vector) in cells.into_remainder().iter_mut().zip(scores.remainder()) {
+        for (cell, rsc_vector) in cell_rest.iter_mut().zip(rsc_rest) {
             let sv = mpv.simd_max(xb_tbmk_v) + F32x4::from_array(*rsc_vector);
             xe_lanes[0] = xe_lanes[0].simd_max(sv);
             mpv = *cell;
