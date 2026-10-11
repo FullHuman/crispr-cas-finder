@@ -9,7 +9,7 @@
 //   Forward: f32  in 4-lane vectors  (Q4  = max(2, ceil((M-1)/4)  + 1)) — odds space
 //   Log:     f32  in 4-lane vectors  (Q4)  — log-space for MSV/Viterbi filters
 
-use super::i16_msv;
+use super::{i16_msv, i16_viterbi};
 use crate::hmmer_core::config::*;
 use crate::hmmer_core::profile::Profile;
 
@@ -66,6 +66,8 @@ pub struct OptimizedProfile {
     pub q8: usize,
     pub msv_scale: f64,           // integer units per nat
     pub msv_units: Vec<Vec<i16>>, // [kp][q8 * 8] — match emissions, rounded up
+    pub vit_units: Vec<i16>,      // [(7*q8 + q8) * 8] — transitions, rounded up
+    pub vit_min_begin_units: i16, // smallest finite begin transition
 
     // E-value parameters
     pub ev_params: [f32; NUM_EV_PARAMS],
@@ -92,6 +94,8 @@ impl OptimizedProfile {
             q8: i16_msv::vector_count(m),
             msv_scale: i16_msv::scale_for(m),
             msv_units: vec![vec![i16::MIN; i16_msv::vector_count(m) * i16_msv::LANES]; kp],
+            vit_units: vec![i16::MIN; (NTSC_PER_Q + 1) * i16_msv::vector_count(m) * i16_msv::LANES],
+            vit_min_begin_units: 0,
             ev_params: [EV_PARAM_UNSET; NUM_EV_PARAMS],
             mode: SearchMode::Local,
             max_length: 0,
@@ -111,6 +115,7 @@ impl OptimizedProfile {
         fwd_conversion(gm, &mut om);
         log_conversion(gm, &mut om);
         msv_units_conversion(gm, &mut om);
+        vit_units_conversion(gm, &mut om);
 
         om
     }
@@ -279,6 +284,64 @@ fn msv_units_conversion(gm: &Profile, om: &mut OptimizedProfile) {
             }
         }
     }
+}
+
+// ---------- i16x8 transitions for the Viterbi over-estimate ----------
+
+/// Same striped layout as `tlv`, with eight lanes: seven transitions per
+/// vector, then the delete-to-delete transitions.
+fn vit_units_conversion(gm: &Profile, om: &mut OptimizedProfile) {
+    let m = gm.num_nodes;
+    let nq = om.q8;
+    let lanes = i16_msv::LANES;
+    let tsc = gm.transition_scores_raw();
+    let units = |index: usize| {
+        tsc.get(index).map_or(i16::MIN, |&score| {
+            i16_viterbi::transition_units(om.msv_scale, score)
+        })
+    };
+
+    let t_map: [(usize, usize); NTSC_PER_Q] = [
+        (PTsc::BeginToMatch.idx(), 1),
+        (PTsc::MatchToMatch.idx(), 1),
+        (PTsc::InsertToMatch.idx(), 1),
+        (PTsc::DeleteToMatch.idx(), 1),
+        (PTsc::MatchToDelete.idx(), 0),
+        (PTsc::MatchToInsert.idx(), 0),
+        (PTsc::InsertToInsert.idx(), 0),
+    ];
+    let mut min_begin = i16::MAX;
+    let mut j = 0usize;
+    for q in 0..nq {
+        for (slot, &(kind, back)) in t_map.iter().enumerate() {
+            for z in 0..lanes {
+                // Transitions into node k are stored at node k - 1.
+                let kb = q + 1 + z * nq - back;
+                let value = if kb < m {
+                    units(kb * PROFILE_NUM_TRANSITIONS + kind)
+                } else {
+                    i16::MIN
+                };
+                om.vit_units[j * lanes + z] = value;
+                if slot == TSC_BM && value > i16::MIN {
+                    min_begin = min_begin.min(value);
+                }
+            }
+            j += 1;
+        }
+    }
+    for q in 0..nq {
+        for z in 0..lanes {
+            let k = q + 1 + z * nq;
+            om.vit_units[j * lanes + z] = if k < m {
+                units(k * PROFILE_NUM_TRANSITIONS + PTsc::DeleteToDelete.idx())
+            } else {
+                i16::MIN
+            };
+        }
+        j += 1;
+    }
+    om.vit_min_begin_units = if min_begin == i16::MAX { 0 } else { min_begin };
 }
 
 // ---------- Log-space f32x4 (exact scores for MSV/Viterbi) ----------

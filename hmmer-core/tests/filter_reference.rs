@@ -8,7 +8,7 @@ use hmmer_core::{
     rng::XorShift64,
     simd::{
         f32_msv::msv_filter_f32, f32_viterbi::viterbi_filter_f32, forward_filter::forward_filter,
-        i16_msv::msv_upper_bound, oprofile::OptimizedProfile,
+        i16_msv::msv_upper_bound, i16_viterbi::viterbi_upper_bound, oprofile::OptimizedProfile,
     },
     test_helpers::{hmm_sample, random_digital_seq},
 };
@@ -139,15 +139,15 @@ fn filters_match_scalar_recurrences_across_stripe_boundaries() {
     }
 }
 
-/// The integer pre-filter may only reject what the exact MSV filter would
-/// reject, so its score must never fall below the exact one. It must also
-/// stay close to it, or it would let everything through.
+/// The integer pre-filters may only reject what the exact filters would
+/// reject, so their scores must never fall below the exact ones. They must
+/// also stay close to them, or they would let everything through.
 #[test]
-fn integer_msv_bound_is_never_below_the_exact_score_and_stays_tight() {
+fn integer_bounds_are_never_below_the_exact_scores_and_stay_tight() {
     let alphabet = Alphabet::amino();
     let background = BackgroundModel::new(&alphabet);
-    let mut compared = 0usize;
-    let mut total_excess = 0.0f64;
+    // (comparisons, summed excess in nats) for MSV and Viterbi.
+    let mut tightness = [(0usize, 0.0f64); 2];
     for seed in [0, 1, 17, 42, 1234] {
         let mut rng = XorShift64::new(seed);
         for m in [1, 2, 7, 8, 9, 16, 17, 64, 100, 257, 600] {
@@ -164,40 +164,69 @@ fn integer_msv_bound_is_never_below_the_exact_score_and_stays_tight() {
                 );
                 // Repeating the best residue of each model position gives
                 // long, high-scoring diagonals and exercises saturation.
+                let best_residue = |k: usize| {
+                    (0..alphabet.canonical_size)
+                        .max_by(|&left, &right| {
+                            profile.residue_scores_for(left)[k * 2]
+                                .total_cmp(&profile.residue_scores_for(right)[k * 2])
+                        })
+                        .unwrap() as u8
+                };
                 let consensus: Vec<u8> = (0..l)
-                    .map(|position| {
-                        let k = position % m + 1;
-                        (0..alphabet.canonical_size)
-                            .max_by(|&left, &right| {
-                                profile.residue_scores_for(left)[k * 2]
-                                    .total_cmp(&profile.residue_scores_for(right)[k * 2])
-                            })
-                            .unwrap() as u8
-                    })
+                    .map(|position| best_residue(position % m + 1))
                     .collect();
-                for (kind, seq) in [("random", &random), ("consensus", &consensus)] {
-                    let exact = msv_filter_f32(seq, l, &optimized);
-                    let bound = msv_upper_bound(seq, l, &optimized);
-                    assert!(
-                        bound >= exact,
-                        "{kind}: seed={seed}, M={m}, L={l}: bound {bound} < exact {exact}"
-                    );
-                    if bound.is_finite() && kind == "random" {
-                        compared += 1;
-                        total_excess += f64::from(bound - exact);
+                // A consensus stretch with residues dropped and inserted
+                // sends the best path through delete and insert states.
+                let mut gapped = random.clone();
+                let mut k = 1;
+                for (position, residue) in gapped.iter_mut().enumerate().skip(l / 4) {
+                    if k > m {
+                        break;
+                    }
+                    if position % 11 == 5 {
+                        continue; // keep the random residue: an insertion
+                    }
+                    *residue = best_residue(k);
+                    k += if position % 7 == 3 { 3 } else { 1 }; // skip nodes: deletions
+                }
+                for (kind, seq) in [
+                    ("random", &random),
+                    ("consensus", &consensus),
+                    ("gapped", &gapped),
+                ] {
+                    let checks = [
+                        (
+                            "MSV",
+                            msv_filter_f32(seq, l, &optimized),
+                            msv_upper_bound(seq, l, &optimized),
+                        ),
+                        (
+                            "Viterbi",
+                            viterbi_filter_f32(seq, l, &optimized),
+                            viterbi_upper_bound(seq, l, &optimized),
+                        ),
+                    ];
+                    for (index, (name, exact, bound)) in checks.into_iter().enumerate() {
                         assert!(
-                            bound - exact < 1.5,
-                            "{kind}: seed={seed}, M={m}, L={l}: bound {bound} far above {exact}"
+                            bound >= exact,
+                            "{name} {kind}: seed={seed}, M={m}, L={l}: bound {bound} < exact {exact}"
                         );
+                        if bound.is_finite() && kind == "random" {
+                            tightness[index].0 += 1;
+                            tightness[index].1 += f64::from(bound - exact);
+                            assert!(
+                                bound - exact < 1.5,
+                                "{name} {kind}: seed={seed}, M={m}, L={l}: bound {bound} far above {exact}"
+                            );
+                        }
                     }
                 }
             }
         }
     }
-    assert!(compared > 300);
-    assert!(
-        total_excess / (compared as f64) < 0.25,
-        "mean excess {} nats",
-        total_excess / compared as f64
-    );
+    for (name, (compared, total_excess)) in ["MSV", "Viterbi"].into_iter().zip(tightness) {
+        assert!(compared > 300, "{name}: only {compared} finite bounds");
+        let mean_excess = total_excess / compared as f64;
+        assert!(mean_excess < 0.3, "{name}: mean excess {mean_excess} nats");
+    }
 }

@@ -36,11 +36,11 @@ const XE_ACCUMULATORS: usize = 4;
 
 /// Added to the over-estimate, in nats, to cover the rounding of the exact
 /// filter's own single-precision arithmetic.
-const SAFETY_MARGIN: f64 = 0.05;
+pub(super) const SAFETY_MARGIN: f64 = 0.05;
 
 /// Guards `ceil` against a double-precision product landing just below the
 /// real value it approximates.
-const CEIL_GUARD: f64 = 1e-6;
+pub(super) const CEIL_GUARD: f64 = 1e-6;
 
 /// Number of i16x8 vectors for a model of `m` nodes.
 #[inline]
@@ -52,16 +52,18 @@ pub fn vector_count(m: usize) -> usize {
 ///
 /// Cells cover 65,535 units above the lowest score a path can enter with.
 /// That entry score is dominated by the begin transition, ln(2 / (m(m+1))),
-/// and passing scores sit a couple of dozen nats above it; a cell reaching
-/// the top is reported as "may pass".
+/// and the scores that pass the MSV and Viterbi thresholds sit within about
+/// thirty nats above it; a cell reaching the top is reported as "may pass".
+/// The MSV and Viterbi over-estimates share this scale and the emissions
+/// built with it.
 pub fn scale_for(m: usize) -> f64 {
     let begin_score = (2.0 / (m as f64 * (m as f64 + 1.0))).ln();
-    (65_535.0 / (26.0 - begin_score)).floor()
+    (65_535.0 / (32.0 - begin_score)).floor()
 }
 
 /// Round a score in nats up to integer units.
 #[inline]
-fn units_above(scale: f64, nats: f64) -> i64 {
+pub(super) fn units_above(scale: f64, nats: f64) -> i64 {
     (scale * nats + CEIL_GUARD).ceil() as i64
 }
 
@@ -114,8 +116,12 @@ pub fn msv_upper_bound(dsq: &[u8], l: usize, om: &OptimizedProfile) -> f32 {
         };
         let (rsc_vectors, _) = rsc.as_chunks::<LANES>();
 
-        let entry = (xb + tbmk_units - cumulative_delta(row) - base).clamp(0, 65_535);
-        let xb_v = I16x8::splat((entry - 32_768) as i16);
+        let entry = xb + tbmk_units - cumulative_delta(row) - base;
+        if entry > 65_535 {
+            // Clamping down would break the bound; report "may pass".
+            return f32::INFINITY;
+        }
+        let xb_v = I16x8::splat((entry.max(0) - 32_768) as i16);
 
         // Right-shift previous row by 1 lane (Farrar shift)
         let mut mpv = shift_right(m_row[q - 1]);

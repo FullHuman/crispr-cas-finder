@@ -13,6 +13,7 @@ use crate::hmmer_core::dynamic_programming::simd::f32_msv;
 use crate::hmmer_core::dynamic_programming::simd::f32_viterbi;
 use crate::hmmer_core::dynamic_programming::simd::forward_filter as simd_fwd;
 use crate::hmmer_core::dynamic_programming::simd::i16_msv;
+use crate::hmmer_core::dynamic_programming::simd::i16_viterbi;
 use crate::hmmer_core::dynamic_programming::simd::oprofile::OptimizedProfile;
 use crate::hmmer_core::errors::HmmerError;
 use crate::hmmer_core::evalues;
@@ -951,6 +952,17 @@ impl SearchEngine {
         null_score: f32,
     ) -> Option<f32> {
         let om = self.oprofile.as_ref().unwrap();
+        // Cheap over-estimate first: a sequence whose upper bound fails the
+        // Viterbi threshold fails the exact filter too.
+        if !self.do_max {
+            let bound = i16_viterbi::viterbi_upper_bound(digital_sequence, sequence_length, om);
+            if bound.is_finite() {
+                let p_bound = Self::viterbi_pvalue(profile, (bound - null_score) / LOG2);
+                if p_bound > self.viterbi_threshold {
+                    return None;
+                }
+            }
+        }
         let viterbi_raw_score =
             f32_viterbi::viterbi_filter_f32(digital_sequence, sequence_length, om);
 
