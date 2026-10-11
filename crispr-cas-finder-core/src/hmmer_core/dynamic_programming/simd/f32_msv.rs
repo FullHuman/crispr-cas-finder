@@ -10,6 +10,9 @@ use std::simd::prelude::*;
 
 type F32x4 = Simd<f32, 4>;
 
+/// Number of independent running maxima in the inner loop.
+const XE_ACCUMULATORS: usize = 4;
+
 /// Run the f32x4 MSV filter on a digitized sequence.
 ///
 /// `dsq` is 0-indexed: residues at dsq[0..l].
@@ -38,26 +41,39 @@ pub fn msv_filter_f32(dsq: &[u8], l: usize, om: &OptimizedProfile) -> f32 {
     for &residue in &dsq[..l] {
         let xi = residue as usize;
         let rsc = if xi < om.kp { &om.rlv[xi] } else { &om.rlv[0] };
+        // One [f32; 4] per striped vector; iterating in lockstep with the DP
+        // row lets the compiler drop every bounds check from the inner loop.
+        let (rsc_vectors, _) = rsc.as_chunks::<4>();
 
         let xb_tbmk_v = F32x4::splat(xb + tbmk);
-        let mut xe_v = neg_inf_v;
 
         // Right-shift previous M row by 1 lane (Farrar shift)
         let mut mpv = shr_f32x4(m_row[q - 1]);
 
-        for qi in 0..q {
-            let rsc_v = F32x4::from_slice(&rsc[qi * 4..qi * 4 + 4]);
-
-            // M(i,q) = max(M(i-1,q-1), xB+tBMk) + rsc
-            let mut sv = mpv.simd_max(xb_tbmk_v);
-            sv += rsc_v;
-
-            xe_v = xe_v.simd_max(sv);
-
-            // Save prev, overwrite
-            mpv = m_row[qi];
-            m_row[qi] = sv;
+        // The row maximum is the only value carried from one vector to the
+        // next. Keeping several independent running maxima stops that max
+        // from serialising the loop; max is exact, so the result is the same.
+        let mut xe_lanes = [neg_inf_v; XE_ACCUMULATORS];
+        let mut cells = m_row.chunks_exact_mut(XE_ACCUMULATORS);
+        let mut scores = rsc_vectors.chunks_exact(XE_ACCUMULATORS);
+        for (cell_group, rsc_group) in cells.by_ref().zip(scores.by_ref()) {
+            for index in 0..XE_ACCUMULATORS {
+                // M(i,q) = max(M(i-1,q-1), xB+tBMk) + rsc
+                let sv = mpv.simd_max(xb_tbmk_v) + F32x4::from_array(rsc_group[index]);
+                xe_lanes[index] = xe_lanes[index].simd_max(sv);
+                mpv = cell_group[index];
+                cell_group[index] = sv;
+            }
         }
+        for (cell, rsc_vector) in cells.into_remainder().iter_mut().zip(scores.remainder()) {
+            let sv = mpv.simd_max(xb_tbmk_v) + F32x4::from_array(*rsc_vector);
+            xe_lanes[0] = xe_lanes[0].simd_max(sv);
+            mpv = *cell;
+            *cell = sv;
+        }
+        let xe_v = xe_lanes
+            .into_iter()
+            .fold(neg_inf_v, |maximum, lane| maximum.simd_max(lane));
 
         // Special states (exact, matching generic MSV)
         let exit_score = xe_v.reduce_max();
