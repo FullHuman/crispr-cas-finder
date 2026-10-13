@@ -282,56 +282,6 @@ fn spacer_length_bounds(repeat_length: usize, params: &DetectionParams) -> (usiz
     )
 }
 
-/// Extract spacer sequences from a cluster of DR hits.
-pub fn extract_spacers(
-    hits: &[RepeatHit],
-    cluster: (usize, usize),
-    seq: &[u8],
-    params: &DetectionParams,
-) -> Vec<String> {
-    let mut repeat_hits_in_cluster: Vec<&RepeatHit> = hits
-        .iter()
-        .filter(|h| h.pos1 >= cluster.0 && h.pos1 <= cluster.1)
-        .collect();
-    if repeat_hits_in_cluster.len() < 2 {
-        return Vec::new();
-    }
-    repeat_hits_in_cluster.sort_by_key(|h| h.pos1);
-
-    let consensus_repeat_length = {
-        let mut length_frequency: std::collections::HashMap<usize, usize> =
-            std::collections::HashMap::new();
-        for h in &repeat_hits_in_cluster {
-            *length_frequency.entry(h.repeat_length).or_default() += 1;
-        }
-        length_frequency
-            .into_iter()
-            .max_by_key(|&(_, c)| c)
-            .map(|(l, _)| l)
-            .unwrap_or(params.min_repeat_length)
-    };
-    let (min_spacer_length, max_spacer_length) =
-        spacer_length_bounds(consensus_repeat_length, params);
-
-    let mut spacers = Vec::new();
-    for repeat_pair in repeat_hits_in_cluster.windows(2) {
-        let first_repeat = repeat_pair[0];
-        let second_repeat = repeat_pair[1];
-        let first_repeat_end = first_repeat.pos1 + first_repeat.repeat_length - 1;
-        let spacer_start = first_repeat_end + 1;
-        let spacer_end = second_repeat.pos1.saturating_sub(1);
-        if spacer_start > spacer_end || spacer_end > seq.len() {
-            continue;
-        }
-        let spacer_length = spacer_end - spacer_start + 1;
-        if spacer_length < min_spacer_length || spacer_length > max_spacer_length {
-            continue;
-        }
-        spacers.push(String::from_utf8_lossy(&seq[(spacer_start - 1)..spacer_end]).to_string());
-    }
-    spacers
-}
-
 /// The part of the sequence searched for copies of a cluster's repeat, as a
 /// 0-based range: the hits of the cluster and 500 bases on each side. A
 /// cluster whose hits all start at one position reaches 60 bases further.
@@ -455,11 +405,12 @@ pub struct SpacerSpan {
 /// long to be spacers and divide the locus into several arrays.
 ///
 /// `copies` are `(start, mismatches)` with 0-based starts, in order. A copy
-/// closer to the previous one than the shortest spacer is skipped. Spacers
-/// longer than the longest one are dropped from both ends, together with the
-/// copies beyond them, and flagged in between. Nothing is returned when the
-/// copies differ from the repeat by more than `repeat_mismatch_percent` on
-/// average.
+/// closer to the previous one than the shortest spacer is skipped; a spacer
+/// has at least one base, so a copy right after the previous one always is.
+/// Spacers longer than the longest one are dropped from both ends, together
+/// with the copies beyond them, and flagged in between. Nothing is returned
+/// when the copies differ from the repeat by more than
+/// `repeat_mismatch_percent` on average.
 ///
 /// This follows `definespacers` and `check_cris_div` of CRISPRCasFinder,
 /// including how mismatches are averaged: those of the first copy are left
@@ -469,7 +420,9 @@ pub fn define_spacers(
     repeat_length: usize,
     params: &DetectionParams,
 ) -> Vec<(SpacerSpan, bool)> {
-    let shortest = repeat_length as f64 * params.min_spacer_to_repeat_ratio;
+    // At least one base: with a ratio of 0, CRISPRCasFinder takes the empty
+    // stretch between two copies side by side for a spacer.
+    let shortest = (repeat_length as f64 * params.min_spacer_to_repeat_ratio).max(1.0);
     let longest = repeat_length as f64 * params.max_spacer_to_repeat_ratio;
 
     let mut spacers: Vec<SpacerSpan> = Vec::new();
@@ -1300,6 +1253,25 @@ mod tests {
         );
         // Overlapping copies.
         assert_eq!(spacers_of(&[(0, 0), (10, 0), (60, 0)]), [(29, 32, false)]);
+    }
+
+    #[test]
+    fn copy_right_after_the_previous_one_is_skipped_whatever_the_ratio() {
+        let params = DetectionParams {
+            min_spacer_to_repeat_ratio: 0.0,
+            ..default_params()
+        };
+        let spacers_of = |copies: &[(usize, usize)]| -> Vec<(usize, usize)> {
+            define_spacers(copies, 28, &params)
+                .into_iter()
+                .map(|(spacer, _)| (spacer.start, spacer.length))
+                .collect()
+        };
+        // One base between two copies is a spacer, none is not.
+        assert_eq!(spacers_of(&[(0, 0), (29, 0), (89, 0)]), [(29, 1), (58, 32)]);
+        assert_eq!(spacers_of(&[(0, 0), (28, 0), (88, 0)]), [(29, 60)]);
+        assert_eq!(spacers_of(&[(0, 0), (10, 0), (60, 0)]), [(29, 32)]);
+        assert!(spacers_of(&[(0, 0), (28, 0)]).is_empty());
     }
 
     #[test]

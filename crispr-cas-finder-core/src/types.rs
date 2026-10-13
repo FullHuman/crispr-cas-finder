@@ -103,6 +103,8 @@ pub struct DetectionParams {
     pub repeat_mismatch_percent: f64,
     pub truncated_repeat_mismatch_percent: f64,
     pub no_mismatch: bool,
+    /// Shortest spacer of an array, as a multiple of the length of its
+    /// repeat. A spacer has at least one base, also with a ratio of 0.
     pub min_spacer_to_repeat_ratio: f64,
     pub max_spacer_to_repeat_ratio: f64,
     pub spacer_similarity_threshold: f64,

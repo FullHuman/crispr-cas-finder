@@ -42,8 +42,7 @@ pub use types::{CasFinderConfig, CrisprArray, DetectionParams, Orientation, Repe
 use detect::{
     RepeatHit, SpacerSpan, allowed_copy_mismatches, candidate_score, check_short_crispr,
     cluster_region, cluster_repeats, define_spacers, extend_with_truncated_repeats,
-    extract_spacers, find_direct_repeats, infer_orientation, repeat_candidates, repeat_occurrences,
-    slide_search,
+    find_direct_repeats, infer_orientation, repeat_candidates, repeat_occurrences, slide_search,
 };
 
 /// Detect CRISPR arrays in a set of sequences.
@@ -181,22 +180,14 @@ fn detect_crisprs_for_sequence(
 /// `input` the case they have in `input`: they are reported as the input has
 /// them, as CRISPRCasFinder does.
 fn restore_input_case(array: &mut CrisprArray, input: &[u8]) {
-    // `start` and `end` are 1-based and inclusive. Only the case may change:
-    // a sequence that is not the one at its positions stays as it is.
-    let restore = |sequence: &mut String, start: usize, end: usize| {
-        if let Some(written) = input
-            .get(start - 1..end)
-            .and_then(|bases| std::str::from_utf8(bases).ok())
-            && written.eq_ignore_ascii_case(sequence)
-        {
-            *sequence = written.to_string();
-        }
-    };
+    // `start` and `end` are 1-based and inclusive.
+    let written =
+        |start: usize, end: usize| String::from_utf8_lossy(&input[start - 1..end]).to_string();
     for repeat in &mut array.repeats {
-        restore(&mut repeat.sequence, repeat.start, repeat.end);
+        repeat.sequence = written(repeat.start, repeat.end);
     }
     for spacer in &mut array.spacers {
-        restore(&mut spacer.sequence, spacer.start, spacer.end);
+        spacer.sequence = written(spacer.start, spacer.end);
     }
 }
 
@@ -313,6 +304,9 @@ fn process_cluster(
 }
 
 /// Evaluate one chain of repeats as a CRISPR array.
+///
+/// The repeats are in order and do not touch: the stretch between two
+/// neighbours is a spacer of the array.
 fn build_array(
     seq_id: &str,
     seq: &[u8],
@@ -323,47 +317,44 @@ fn build_array(
     if params.better_detect_truncated {
         extend_with_truncated_repeats(&best_consensus, &mut best_refined, seq, params);
     }
-    let span = (
-        best_refined.first().map_or(0, |hit| hit.pos1),
-        best_refined.last().map_or(0, |hit| hit.pos1),
-    );
-    let best_spacers = extract_spacers(&best_refined, span, seq, params);
+    // One spacer for each pair of neighbouring repeats, its sequence read at
+    // the positions reported for it.
+    let spacers: Vec<Spacer> = best_refined
+        .windows(2)
+        .map(|repeat_window| {
+            let start = repeat_window[0].pos1 + repeat_window[0].repeat_length;
+            let end = repeat_window[1].pos1 - 1;
+            Spacer {
+                start,
+                end,
+                sequence: String::from_utf8_lossy(&seq[start - 1..end]).to_string(),
+            }
+        })
+        .collect();
 
     let repeat_sequences: Vec<&str> = best_refined
         .iter()
         .map(|hit| hit.repeat_sequence.as_str())
         .collect();
-    let spacer_sequences: Vec<&str> = best_spacers.iter().map(String::as_str).collect();
+    let spacer_sequences: Vec<&str> = spacers
+        .iter()
+        .map(|spacer| spacer.sequence.as_str())
+        .collect();
     let statistics =
         conservation::array_statistics(&best_consensus, &repeat_sequences, &spacer_sequences);
 
-    let evidence_level = conservation::evidence_level(best_spacers.len(), &statistics);
+    let evidence_level = conservation::evidence_level(spacers.len(), &statistics);
 
     if evidence_level < params.min_evidence_level {
         return None;
     }
 
-    // Build the structured CrisprArray from the refined hits + extracted spacers
     let repeats: Vec<Repeat> = best_refined
         .iter()
         .map(|h| Repeat {
             start: h.pos1,
             end: h.pos1 + h.repeat_length - 1,
             sequence: h.repeat_sequence.clone(),
-        })
-        .collect();
-
-    let spacers: Vec<Spacer> = best_refined
-        .windows(2)
-        .zip(best_spacers.iter())
-        .map(|(repeat_window, spacer_sequence)| {
-            let spacer_start = repeat_window[0].pos1 + repeat_window[0].repeat_length;
-            let spacer_end = repeat_window[1].pos1 - 1;
-            Spacer {
-                start: spacer_start,
-                end: spacer_end,
-                sequence: spacer_sequence.clone(),
-            }
         })
         .collect();
 
@@ -548,6 +539,51 @@ mod tests {
         assert_eq!(
             arrays[0].spacers.last().unwrap().end + 1,
             arrays[0].repeats.last().unwrap().start
+        );
+    }
+
+    #[test]
+    fn copies_side_by_side_leave_no_spacer_between_them() {
+        // Two copies of the repeat follow the second spacer. With a ratio of
+        // 0 only the lack of room for a spacer rules the second one out.
+        let sequence = array_sequence(&[
+            SPACERS[0], SPACERS[1], "", SPACERS[2], SPACERS[3], SPACERS[4],
+        ]);
+        let params = DetectionParams {
+            min_spacer_to_repeat_ratio: 0.0,
+            ..DetectionParams::default()
+        };
+        let arrays = detect_crisprs(&[("a", sequence.as_bytes())], &params);
+        assert_eq!(arrays.len(), 1);
+        let array = &arrays[0];
+
+        // The second copy is part of the third spacer.
+        let third = format!("{DR}{}", SPACERS[2]);
+        let spacers: Vec<&str> = array
+            .spacers
+            .iter()
+            .map(|spacer| spacer.sequence.as_str())
+            .collect();
+        assert_eq!(
+            spacers,
+            [SPACERS[0], SPACERS[1], &third, SPACERS[3], SPACERS[4]]
+        );
+        assert_eq!(array.repeats.len(), array.spacers.len() + 1);
+        for (spacer, repeats) in array.spacers.iter().zip(array.repeats.windows(2)) {
+            assert_eq!(spacer.start, repeats[0].end + 1);
+            assert_eq!(spacer.end + 1, repeats[1].start);
+            assert_eq!(spacer.sequence, sequence[spacer.start - 1..spacer.end]);
+        }
+        // The default ratio rules it out as well.
+        assert_eq!(
+            arrays,
+            detect_crisprs(&[("a", sequence.as_bytes())], &DetectionParams::default())
+        );
+        assert_same_arrays_in_the_case_of_the_input(
+            &soft_masked(sequence.as_bytes(), |index| index % 2 == 0),
+            &params,
+            &arrays,
+            "every other base",
         );
     }
 
