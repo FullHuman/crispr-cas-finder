@@ -22,7 +22,7 @@ pub struct Repeat {
     /// 1-based end position on the sequence (inclusive).
     #[pyo3(get)]
     pub end: usize,
-    /// DNA sequence of the direct repeat.
+    /// DNA sequence of the direct repeat, in the case the input has it in.
     #[pyo3(get)]
     pub sequence: String,
 }
@@ -51,7 +51,7 @@ pub struct Spacer {
     /// 1-based end position on the sequence (inclusive).
     #[pyo3(get)]
     pub end: usize,
-    /// DNA sequence of the spacer.
+    /// DNA sequence of the spacer, in the case the input has it in.
     #[pyo3(get)]
     pub sequence: String,
 }
@@ -83,7 +83,7 @@ impl Spacer {
 /// end : int
 ///     1-based end position of the last direct repeat (inclusive).
 /// consensus_repeat : str
-///     Consensus direct repeat sequence for this array.
+///     Consensus direct repeat sequence for this array, in uppercase.
 /// repeats : list[Repeat]
 ///     All direct repeats in array order.
 /// spacers : list[Spacer]

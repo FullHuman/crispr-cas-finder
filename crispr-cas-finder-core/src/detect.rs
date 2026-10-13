@@ -148,7 +148,8 @@ pub fn is_hamming_distance_within(a: &[u8], b: &[u8], max_mismatches: usize) -> 
 /// overlapping occurrences included.
 ///
 /// Stands in for EMBOSS `fuzznuc`, which CRISPRCasFinder runs to find the
-/// copies of a candidate repeat around a locus.
+/// copies of a candidate repeat around a locus. Like `fuzznuc`, it ignores
+/// case.
 pub fn slide_search(text: &[u8], pattern: &[u8], max_mism: usize) -> Vec<(usize, usize)> {
     let pattern_len = pattern.len();
     let mut results = Vec::new();
@@ -161,7 +162,7 @@ pub fn slide_search(text: &[u8], pattern: &[u8], max_mism: usize) -> Vec<(usize,
             .iter()
             .zip(pattern.iter())
         {
-            if text_base != pattern_base {
+            if !text_base.eq_ignore_ascii_case(&pattern_base) {
                 mismatch_count += 1;
             }
             if mismatch_count > max_mism {
@@ -344,6 +345,9 @@ pub fn cluster_region(cluster: (usize, usize), sequence_length: usize) -> std::o
 }
 
 /// How often each hit sequence occurs among the hits of a sequence.
+///
+/// Hit sequences are compared as they are written, here and in
+/// [`repeat_candidates`]: the hits must come from a sequence in one case.
 pub fn repeat_occurrences(hits: &[RepeatHit]) -> HashMap<&str, usize> {
     let mut occurrences = HashMap::new();
     for hit in hits {
@@ -925,6 +929,14 @@ mod tests {
     fn slide_search_empty_pattern() {
         let hits = slide_search(b"ACGTACGT", b"", 0);
         assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn slide_search_ignores_case() {
+        assert_eq!(slide_search(b"nnnnacGTnnnn", b"ACGT", 0), [(4, 0)]);
+        assert_eq!(slide_search(b"NNNNACGTNNNN", b"acgt", 0), [(4, 0)]);
+        // A base in the other case is not a mismatch; another base is.
+        assert_eq!(slide_search(b"NNNNacgGNNNN", b"ACGT", 1), [(4, 1)]);
     }
 
     // ── cluster_repeats ───────────────────────────────────────────────────────

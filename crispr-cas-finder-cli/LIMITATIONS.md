@@ -40,6 +40,9 @@ and specificity against an independent truth set have not been measured.
   verdict on all 301 repeat and spacer pairs of the comparison.
 - Only A, C, G and T match between copies of a repeat. N and the other
   ambiguity codes match nothing, so a run of N is never a repeat.
+- Case is ignored: a sequence gives the same arrays in uppercase, in lowercase
+  and soft-masked. Repeats and spacers are reported in the case the input has
+  them in, as CRISPRCasFinder does; the consensus repeat is in uppercase.
 - Evidence levels follow the CRISPRCasFinder rules: level 1 for at most three
   spacers, level 2 when repeat conservation is below 70, level 3 when more than
   8% of aligned spacer columns are identical, and level 4 otherwise. Spacers are

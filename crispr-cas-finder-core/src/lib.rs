@@ -10,6 +10,7 @@ pub mod hmmer_io;
 use anyhow::Result;
 use log::info;
 use rayon::prelude::*;
+use std::borrow::Cow;
 use std::path::Path;
 
 pub mod annotation;
@@ -50,6 +51,10 @@ use detect::{
 /// This is the main programmatic entry point. It operates entirely in memory —
 /// no file I/O, no subprocess calls. The caller provides sequences directly
 /// and gets back structured results.
+///
+/// The case of a sequence does not change the arrays found. Repeats and
+/// spacers are returned in the case the sequence has them in, the consensus
+/// repeat in uppercase.
 ///
 /// # Arguments
 /// * `sequences` — slice of `(seq_id, sequence_bytes)` pairs
@@ -136,6 +141,14 @@ fn detect_crisprs_for_sequence(
         return Vec::new();
     }
 
+    // Vmatch and fuzznuc ignore case, and a masked stretch may end anywhere
+    // in an array. Arrays are searched in an uppercase copy, made only if
+    // the sequence holds lowercase letters, so that every comparison below
+    // ignores case and the consensus repeat is in uppercase.
+    let input = seq;
+    let uppercase = dna::uppercase(input);
+    let seq = &*uppercase;
+
     let hits = find_direct_repeats(seq, params);
     info!("  {} — {} DR candidates", seq_id, hits.len());
     let occurrences = repeat_occurrences(&hits);
@@ -156,7 +169,35 @@ fn detect_crisprs_for_sequence(
         ));
     }
 
+    if matches!(uppercase, Cow::Owned(_)) {
+        for array in &mut arrays {
+            restore_input_case(array, input);
+        }
+    }
     arrays
+}
+
+/// Give the repeats and spacers of an array found in an uppercase copy of
+/// `input` the case they have in `input`: they are reported as the input has
+/// them, as CRISPRCasFinder does.
+fn restore_input_case(array: &mut CrisprArray, input: &[u8]) {
+    // `start` and `end` are 1-based and inclusive. Only the case may change:
+    // a sequence that is not the one at its positions stays as it is.
+    let restore = |sequence: &mut String, start: usize, end: usize| {
+        if let Some(written) = input
+            .get(start - 1..end)
+            .and_then(|bases| std::str::from_utf8(bases).ok())
+            && written.eq_ignore_ascii_case(sequence)
+        {
+            *sequence = written.to_string();
+        }
+    };
+    for repeat in &mut array.repeats {
+        restore(&mut repeat.sequence, repeat.start, repeat.end);
+    }
+    for spacer in &mut array.spacers {
+        restore(&mut spacer.sequence, spacer.start, spacer.end);
+    }
 }
 
 /// The consensus repeat chosen for a cluster.
@@ -614,6 +655,123 @@ mod tests {
         for array in &arrays {
             assert_eq!(array.repeats.len(), array.spacers.len() + 1, "{}", array.id);
             assert_eq!(array.start, array.repeats[0].start, "{}", array.id);
+        }
+    }
+
+    /// `sequence` with the bases at the indices `masked` picks in lowercase.
+    fn soft_masked(sequence: &[u8], masked: impl Fn(usize) -> bool) -> Vec<u8> {
+        sequence
+            .iter()
+            .enumerate()
+            .map(|(index, base)| {
+                if masked(index) {
+                    base.to_ascii_lowercase()
+                } else {
+                    *base
+                }
+            })
+            .collect()
+    }
+
+    /// Check that `sequence` gives the arrays in `expected`, those of the
+    /// same sequence in uppercase, with its repeats and spacers as it has
+    /// them.
+    fn assert_same_arrays_in_the_case_of_the_input(
+        sequence: &[u8],
+        params: &DetectionParams,
+        expected: &[CrisprArray],
+        masking: &str,
+    ) {
+        let mut arrays = detect_crisprs(&[("a", sequence)], params);
+        for array in &mut arrays {
+            for (start, end, text) in array
+                .repeats
+                .iter_mut()
+                .map(|repeat| (repeat.start, repeat.end, &mut repeat.sequence))
+                .chain(
+                    array
+                        .spacers
+                        .iter_mut()
+                        .map(|spacer| (spacer.start, spacer.end, &mut spacer.sequence)),
+                )
+            {
+                assert_eq!(
+                    text.as_bytes(),
+                    &sequence[start - 1..end],
+                    "{masking}: {start}-{end}"
+                );
+                text.make_ascii_uppercase();
+            }
+        }
+        assert_eq!(arrays, expected, "{masking}");
+    }
+
+    #[test]
+    fn arrays_do_not_depend_on_the_case_of_the_sequence() {
+        let sequence = array_sequence(&SPACERS).into_bytes();
+        // The array starts after 240 bases; a repeat and its spacer take 60.
+        let within_array = sequence.len() / 2;
+        let maskings: [(&str, &dyn Fn(usize) -> bool); 6] = [
+            ("all", &|_| true),
+            ("every other line of 70", &|index| index / 70 % 2 == 0),
+            ("every other base", &|index| index % 2 == 0),
+            ("up to the middle of the array", &|index| {
+                index < within_array
+            }),
+            ("the repeats", &|index| {
+                index >= 240 && (index - 240) % 60 < DR.len()
+            }),
+            ("one repeat", &|index| {
+                (300..300 + DR.len()).contains(&index)
+            }),
+        ];
+        for params in [
+            DetectionParams::default(),
+            DetectionParams {
+                query_repeats: vec![DR.to_lowercase()],
+                ..DetectionParams::default()
+            },
+        ] {
+            let expected = detect_crisprs(&[("a", sequence.as_slice())], &params);
+            assert_eq!(expected.len(), 1);
+            assert_eq!(expected[0].consensus_repeat, DR);
+            assert_eq!(expected[0].spacers.len(), 5);
+            assert_eq!(expected[0].statistics.exact_repeat_count, 6);
+            for (masking, masked) in maskings {
+                assert_same_arrays_in_the_case_of_the_input(
+                    &soft_masked(&sequence, masked),
+                    &params,
+                    &expected,
+                    masking,
+                );
+            }
+        }
+    }
+
+    /// E. coli K-12 MG1655 in lowercase, and with every other line of its
+    /// FASTA file in lowercase: no array has two copies of its repeat in one
+    /// case throughout.
+    #[test]
+    fn ecoli_arrays_do_not_depend_on_the_case_of_the_sequence() {
+        let fasta = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../crispr-cas-finder-cli/data/ecoli.fasta");
+        let records = parse_fasta(std::fs::File::open(fasta).unwrap()).unwrap();
+        let sequence = records[0].sequence.as_slice();
+        let params = DetectionParams::default();
+        let expected = detect_crisprs(&[("a", sequence)], &params);
+        assert_eq!(expected.len(), 5);
+
+        let maskings: [(&str, &dyn Fn(usize) -> bool); 2] = [
+            ("all", &|_| true),
+            ("every other line of 70", &|index| index / 70 % 2 == 1),
+        ];
+        for (masking, masked) in maskings {
+            assert_same_arrays_in_the_case_of_the_input(
+                &soft_masked(sequence, masked),
+                &params,
+                &expected,
+                masking,
+            );
         }
     }
 

@@ -8,7 +8,7 @@ pub struct Repeat {
     pub start: usize,
     /// 1-based end position on the sequence (inclusive).
     pub end: usize,
-    /// DNA sequence of the repeat.
+    /// DNA sequence of the repeat, in the case the input has it in.
     pub sequence: String,
 }
 
@@ -19,7 +19,7 @@ pub struct Spacer {
     pub start: usize,
     /// 1-based end position on the sequence (inclusive).
     pub end: usize,
-    /// DNA sequence of the spacer.
+    /// DNA sequence of the spacer, in the case the input has it in.
     pub sequence: String,
 }
 
@@ -56,7 +56,7 @@ pub struct CrisprArray {
     pub start: usize,
     /// 1-based end position of the last repeat (inclusive).
     pub end: usize,
-    /// Consensus direct repeat sequence chosen for this array.
+    /// Consensus direct repeat sequence chosen for this array, in uppercase.
     pub consensus_repeat: String,
     /// Ordered list of direct repeats.
     pub repeats: Vec<Repeat>,

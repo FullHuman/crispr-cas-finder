@@ -81,7 +81,8 @@ pub struct RepeatMatch {
 /// Whether two aligned bases count as a match.
 ///
 /// Only A, C, G and T match. N and the other ambiguity codes are wildcards
-/// for Vmatch and match nothing, themselves included.
+/// for Vmatch and match nothing, themselves included. Case is not looked at
+/// here: [`find_repeats`] searches a sequence in one case.
 #[inline]
 fn bases_match(left: u8, right: u8) -> bool {
     left == right && matches!(left.to_ascii_uppercase(), b'A' | b'C' | b'G' | b'T')
@@ -519,8 +520,9 @@ fn remove_contained(repeats: &mut Vec<RepeatMatch>) {
 }
 
 /// Find the repeats of `seq` that Vmatch reports for `search`, sorted by
-/// position.
+/// position. Case is ignored, as Vmatch ignores it.
 pub fn find_repeats(seq: &[u8], search: &RepeatSearch) -> Vec<RepeatMatch> {
+    let seq = &*crate::dna::uppercase(seq);
     let seed_length = (search.min_length / (search.max_differences + 1)).max(1);
     let hashes = seed_hashes(seq, seed_length);
     if hashes.is_empty() || search.min_gap > search.max_gap || search.max_length < seed_length {
@@ -727,6 +729,37 @@ mod tests {
         ]
         .concat();
         assert!(find_repeats(runs.as_bytes(), &SEARCH).is_empty());
+    }
+
+    #[test]
+    fn case_is_ignored() {
+        let copy = filler(30, 2);
+        let different = with_mismatch(&copy, 15);
+        for (left, right) in [(&copy, &copy), (&copy, &different)] {
+            let sequence = pair(left, right, 35, 100);
+            let expected = find_repeats(&sequence, &SEARCH);
+            assert_eq!(expected.len(), 1);
+
+            assert_eq!(
+                find_repeats(&sequence.to_ascii_lowercase(), &SEARCH),
+                expected
+            );
+            // One copy in lowercase, as when a masked stretch ends between
+            // the two.
+            let mut one_copy_masked = sequence.clone();
+            one_copy_masked[..140].make_ascii_lowercase();
+            assert_eq!(find_repeats(&one_copy_masked, &SEARCH), expected);
+            // The case changes within the seeds.
+            let mut alternating = sequence.clone();
+            for base in alternating.iter_mut().step_by(2) {
+                base.make_ascii_lowercase();
+            }
+            assert_eq!(find_repeats(&alternating, &SEARCH), expected);
+        }
+
+        // An ambiguous base matches nothing in either case.
+        let ambiguous = [&copy[..10], "n", &copy[11..20], "N", &copy[21..]].concat();
+        assert!(find_repeats(&pair(&ambiguous, &ambiguous, 35, 100), &SEARCH).is_empty());
     }
 
     #[test]
