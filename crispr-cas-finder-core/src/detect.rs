@@ -136,11 +136,37 @@ pub fn cluster_repeats(hits: &[RepeatHit], max_gap: usize) -> Vec<(usize, usize)
 // Hashing helpers  (replaces mkvtree index building)
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Whether two aligned bases count as a match between repeat copies.
+///
+/// Only A, C, G and T match. N and the other ambiguity codes match nothing,
+/// themselves included, so a scaffold gap cannot pass for a repeat or
+/// lengthen one.
+#[inline]
+fn bases_match(left: u8, right: u8) -> bool {
+    left == right && matches!(left.to_ascii_uppercase(), b'A' | b'C' | b'G' | b'T')
+}
+
 /// Hash each seed-length window for the scan passes.
 fn build_seed_index(seq: &[u8], seed_len: usize) -> SeedIndex {
-    SeedIndex {
-        hashes: rolling_window_hashes(seq, seed_len),
+    let mut hashes = rolling_window_hashes(seq, seed_len);
+    // A window holding an ambiguous base gets a hash of its own. Runs of N
+    // would otherwise all be seeds for one another.
+    let is_ambiguous = |base: u8| !bases_match(base, base);
+    let mut ambiguous = seq
+        .iter()
+        .take(seed_len)
+        .filter(|&&base| is_ambiguous(base))
+        .count();
+    for start in 0..hashes.len() {
+        if start > 0 {
+            ambiguous -= usize::from(is_ambiguous(seq[start - 1]));
+            ambiguous += usize::from(is_ambiguous(seq[start + seed_len - 1]));
+        }
+        if ambiguous > 0 {
+            hashes[start] = u64::MAX - start as u64;
+        }
     }
+    SeedIndex { hashes }
 }
 
 /// Hash every fixed-length window in linear time using a wrapping polynomial.
@@ -273,7 +299,7 @@ fn match_extends_beyond(
         if left_probe_index >= sequence_length || right_probe_index >= sequence_length {
             break;
         }
-        if seq[left_probe_index] != seq[right_probe_index] {
+        if !bases_match(seq[left_probe_index], seq[right_probe_index]) {
             if right_extension_mismatches >= remaining_mismatch_budget {
                 break;
             }
@@ -290,7 +316,7 @@ fn match_extends_beyond(
         }
         let left_probe_index = left_start_index - left_extension_length - 1;
         let right_probe_index = right_start_index - left_extension_length - 1;
-        if seq[left_probe_index] != seq[right_probe_index] {
+        if !bases_match(seq[left_probe_index], seq[right_probe_index]) {
             if left_extension_mismatches >= remaining_mismatch_budget {
                 break;
             }
@@ -318,11 +344,11 @@ fn match_extends_beyond(
     let mut window_left = scan_start;
     let mut window_mismatches = 0usize;
     for window_right in scan_start..scan_end {
-        if seq[window_right] != seq[window_right + offset] {
+        if !bases_match(seq[window_right], seq[window_right + offset]) {
             window_mismatches += 1;
         }
         while window_mismatches > max_mismatch_count {
-            if seq[window_left] != seq[window_left + offset] {
+            if !bases_match(seq[window_left], seq[window_left + offset]) {
                 window_mismatches -= 1;
             }
             window_left += 1;
@@ -333,6 +359,74 @@ fn match_extends_beyond(
         }
     }
     false
+}
+
+/// Number of positions by which two copies can be extended from `left` and
+/// `right`, forwards or backwards, across at most `mismatch_budget`
+/// mismatches. The extension ends on a matching position.
+fn extension_length(
+    seq: &[u8],
+    left: usize,
+    right: usize,
+    forward: bool,
+    mismatch_budget: usize,
+) -> usize {
+    let mut extension = 0usize;
+    let mut mismatches = 0usize;
+    for step in 0.. {
+        let (left_probe, right_probe) = if forward {
+            (left + step, right + step)
+        } else {
+            match left.checked_sub(step + 1) {
+                Some(left_probe) => (left_probe, right - step - 1),
+                None => break,
+            }
+        };
+        if right_probe >= seq.len() {
+            break;
+        }
+        if bases_match(seq[left_probe], seq[right_probe]) {
+            extension = step + 1;
+        } else if mismatches == mismatch_budget {
+            break;
+        } else {
+            mismatches += 1;
+        }
+    }
+    extension
+}
+
+/// Length the match of `repeat_length` at `(left_start_index,
+/// right_start_index)` reaches once extended on both sides with the
+/// mismatches it has left, taking the split of those mismatches between the
+/// two sides that extends it least. A mismatch closing the match is not
+/// counted.
+fn extended_match_length(
+    seq: &[u8],
+    left_start_index: usize,
+    right_start_index: usize,
+    repeat_length: usize,
+    remaining_mismatch_budget: usize,
+) -> usize {
+    let closing_mismatch = !bases_match(
+        seq[left_start_index + repeat_length - 1],
+        seq[right_start_index + repeat_length - 1],
+    );
+    let matched_length = repeat_length - usize::from(closing_mismatch);
+    (0..=remaining_mismatch_budget)
+        .map(|left_budget| {
+            matched_length
+                + extension_length(seq, left_start_index, right_start_index, false, left_budget)
+                + extension_length(
+                    seq,
+                    left_start_index + repeat_length,
+                    right_start_index + repeat_length,
+                    true,
+                    remaining_mismatch_budget - left_budget,
+                )
+        })
+        .min()
+        .unwrap_or(matched_length)
 }
 
 /// Scan `index` for valid DR pairs ahead of each position `i`.
@@ -416,7 +510,10 @@ fn find_pairs_at_position(
         let mut core_mismatch_count = 0usize;
         let mut accepted_repeat_length = max_candidate_repeat_length;
         for offset in 0..max_candidate_repeat_length {
-            if seq[left_repeat_start + offset] != seq[right_repeat_start + offset] {
+            if !bases_match(
+                seq[left_repeat_start + offset],
+                seq[right_repeat_start + offset],
+            ) {
                 if core_mismatch_count == max_mism {
                     accepted_repeat_length = offset;
                     break;
@@ -438,6 +535,21 @@ fn find_pairs_at_position(
                 max_mism,
                 max_repeat_length,
             )
+        {
+            continue;
+        }
+        // vmatch applies the spacer limits to the match it reports, which
+        // runs as far as the copies agree. A pair that only leaves room for
+        // the shortest spacer because it was cut short here is not a repeat
+        // for vmatch; without this, tandem repeats seed arrays whose spacers
+        // are shorter than `min_spacer_length`.
+        if extended_match_length(
+            seq,
+            left_repeat_start,
+            right_repeat_start,
+            accepted_repeat_length,
+            max_mism - core_mismatch_count,
+        ) > repeat_distance - min_spacer_length
         {
             continue;
         }
@@ -823,6 +935,18 @@ pub fn find_query_repeats(
     hits
 }
 
+/// Shortest and longest spacer allowed beside a repeat of `repeat_length`.
+///
+/// CRISPRCasFinder compares the spacer length with the unrounded products of
+/// the repeat length and the two ratios, so the bounds are rounded inwards.
+fn spacer_length_bounds(repeat_length: usize, params: &DetectionParams) -> (usize, usize) {
+    let repeat_length = repeat_length as f64;
+    (
+        (repeat_length * params.min_spacer_to_repeat_ratio).ceil() as usize,
+        (repeat_length * params.max_spacer_to_repeat_ratio).floor() as usize,
+    )
+}
+
 /// Extract spacer sequences from a cluster of DR hits.
 pub fn extract_spacers(
     hits: &[RepeatHit],
@@ -851,10 +975,8 @@ pub fn extract_spacers(
             .map(|(l, _)| l)
             .unwrap_or(params.min_repeat_length)
     };
-    let min_spacer_length =
-        (consensus_repeat_length as f64 * params.min_spacer_to_repeat_ratio).floor() as usize;
-    let max_spacer_length =
-        (consensus_repeat_length as f64 * params.max_spacer_to_repeat_ratio).ceil() as usize;
+    let (min_spacer_length, max_spacer_length) =
+        spacer_length_bounds(consensus_repeat_length, params);
 
     let mut spacers = Vec::new();
     for repeat_pair in repeat_hits_in_cluster.windows(2) {
@@ -875,13 +997,23 @@ pub fn extract_spacers(
     spacers
 }
 
-/// Refine a cluster using a consensus DR sequence.
+/// Find the copies of a consensus repeat around a seed cluster and chain them
+/// into arrays.
+///
+/// The cluster and 500 bp on each side are scanned for copies with up to
+/// `truncated_repeat_mismatch_percent` mismatches. A copy closer to the
+/// previous one than the shortest spacer is dropped. A gap longer than the
+/// longest spacer ends the current chain and starts a new one, which is how
+/// CRISPRCasFinder divides a locus at an over-long spacer. It also keeps a
+/// stray copy near an array from standing in for the array.
+///
+/// Chains are returned in sequence order and can hold a single repeat.
 pub fn refine_cluster_with_consensus(
     consensus: &str,
     cluster: (usize, usize),
     seq: &[u8],
     params: &DetectionParams,
-) -> Vec<RepeatHit> {
+) -> Vec<Vec<RepeatHit>> {
     if consensus.is_empty() || seq.is_empty() {
         return Vec::new();
     }
@@ -892,10 +1024,8 @@ pub fn refine_cluster_with_consensus(
         / 100.0)
         .floor() as usize)
         .max(1);
-    let min_allowed_spacer_length =
-        (consensus_repeat_length as f64 * params.min_spacer_to_repeat_ratio).floor() as usize;
-    let max_allowed_spacer_length =
-        (consensus_repeat_length as f64 * params.max_spacer_to_repeat_ratio).ceil() as usize;
+    let (min_allowed_spacer_length, max_allowed_spacer_length) =
+        spacer_length_bounds(consensus_repeat_length, params);
 
     let region_start = cluster.0.saturating_sub(501);
     let region_end = (cluster.1 + consensus_repeat_length + 500).min(seq.len());
@@ -921,24 +1051,21 @@ pub fn refine_cluster_with_consensus(
     }
 
     refined.sort_by_key(|h| h.pos1);
-    let mut kept: Vec<RepeatHit> = Vec::new();
+    let mut chains: Vec<Vec<RepeatHit>> = Vec::new();
     for hit in refined {
-        if let Some(previous_hit) = kept.last() {
+        if let Some(previous_hit) = chains.last().and_then(|chain| chain.last()) {
             let spacer_start = previous_hit.pos1 + previous_hit.repeat_length;
-            let spacer_end = hit.pos1.saturating_sub(1);
-            if spacer_end < spacer_start {
+            if hit.pos1 < spacer_start + min_allowed_spacer_length.max(1) {
                 continue;
             }
-            let spacer_length = spacer_end - spacer_start + 1;
-            if spacer_length < min_allowed_spacer_length
-                || spacer_length > max_allowed_spacer_length
-            {
+            if hit.pos1 - spacer_start <= max_allowed_spacer_length {
+                chains.last_mut().unwrap().push(hit);
                 continue;
             }
         }
-        kept.push(hit);
+        chains.push(vec![hit]);
     }
-    kept
+    chains
 }
 
 /// Count how many fostered properties the repeat instances of a candidate
@@ -982,10 +1109,8 @@ pub fn extend_with_truncated_repeats(
     }
     let allowed_mismatches =
         ((half_length as f64 * params.truncated_mismatch_percent / 100.0).floor() as usize).max(1);
-    let min_spacer_length =
-        ((repeat_length as f64 * params.min_spacer_to_repeat_ratio).floor() as usize).max(1);
-    let max_spacer_length =
-        (repeat_length as f64 * params.max_spacer_to_repeat_ratio).ceil() as usize;
+    let (min_spacer_length, max_spacer_length) = spacer_length_bounds(repeat_length, params);
+    let min_spacer_length = min_spacer_length.max(1);
     let spacer_lengths: Vec<usize> = repeats
         .windows(2)
         .map(|pair| {
@@ -1263,15 +1388,20 @@ pub fn check_short_crispr(dr: &str, spacer: &str) -> bool {
     gap_frac > 0.5
 }
 
-/// Trim poorly-conserved positions from the edges of a consensus DR.
+/// Positions of a consensus DR left after trimming its poorly-conserved edges.
 ///
 /// Given a set of refined repeat hits and the current consensus, computes
 /// per-position conservation and trims positions from left and right where
 /// fewer than `threshold` fraction of instances match the consensus base.
-/// This corrects for over-extension in the initial pair-finding step.
-pub fn trim_consensus(consensus: &str, refined: &[RepeatHit], min_len: usize) -> String {
+/// This corrects for over-extension in the initial pair-finding step. The
+/// whole consensus is returned when nothing, or too much, would be trimmed.
+pub fn conserved_consensus_range(
+    consensus: &str,
+    refined: &[RepeatHit],
+    min_len: usize,
+) -> std::ops::Range<usize> {
     if refined.len() < 2 || consensus.is_empty() {
-        return consensus.to_string();
+        return 0..consensus.len();
     }
     let cons_bytes = consensus.as_bytes();
     let dr_len = cons_bytes.len();
@@ -1304,14 +1434,10 @@ pub fn trim_consensus(consensus: &str, refined: &[RepeatHit], min_len: usize) ->
     }
 
     if left_trim + right_trim >= dr_len || dr_len - left_trim - right_trim < min_len {
-        return consensus.to_string(); // trimming would be too aggressive
+        return 0..dr_len; // trimming would be too aggressive
     }
 
-    if left_trim == 0 && right_trim == 0 {
-        return consensus.to_string();
-    }
-
-    consensus[left_trim..dr_len - right_trim].to_string()
+    left_trim..dr_len - right_trim
 }
 
 /// Choose the best DR consensus for a CRISPR cluster.
@@ -1377,6 +1503,7 @@ pub fn get_repeat_candidates(hits: &[RepeatHit], cluster: (usize, usize)) -> Vec
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::filler;
 
     fn default_params() -> DetectionParams {
         DetectionParams::default()
@@ -1803,6 +1930,100 @@ mod tests {
                               GCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTA"
             .to_vec();
         let _ = find_direct_repeats(&seq, &params);
+    }
+
+    #[test]
+    fn spacer_bounds_are_rounded_inwards() {
+        // 23 x 0.6 = 13.8 and 23 x 2.5 = 57.5: a 13-bp or a 58-bp spacer is
+        // outside the range CRISPRCasFinder accepts.
+        let params = default_params();
+        assert_eq!(spacer_length_bounds(23, &params), (14, 57));
+        assert_eq!(spacer_length_bounds(25, &params), (15, 62));
+        assert_eq!(spacer_length_bounds(30, &params), (18, 75));
+    }
+
+    #[test]
+    fn copies_farther_apart_than_a_spacer_form_separate_chains() {
+        // Two arrays 300 bp apart, and one more copy 200 bp before the first.
+        let spacers: [&[u8]; 3] = [
+            b"CAGTTTCAGCGATACGATCGATCGATCGTTTT",
+            b"AAAACCCCGGGGTTTTACGATCGATCGATCGA",
+            b"TTGACCATGGCATTACGGATCCAATGCCGTAA",
+        ];
+        let between = vec![b'A'; 300];
+        let mut seq = vec![b'C'; 100];
+        seq.extend_from_slice(DR);
+        seq.extend(vec![b'T'; 200]);
+        let first = seq.len() + 1;
+        seq.extend(build_crispr_seq(&[DR, DR, DR], &spacers[..2], 0));
+        seq.extend(&between);
+        let second = seq.len() + 1;
+        seq.extend(build_crispr_seq(&[DR, DR], &spacers[2..], 0));
+        seq.extend(vec![b'C'; 100]);
+
+        let consensus = std::str::from_utf8(DR).unwrap();
+        let chains =
+            refine_cluster_with_consensus(consensus, (first, second), &seq, &default_params());
+        let starts: Vec<Vec<usize>> = chains
+            .iter()
+            .map(|chain| chain.iter().map(|hit| hit.pos1).collect())
+            .collect();
+        assert_eq!(
+            starts,
+            [
+                vec![101],
+                vec![first, first + 60, first + 120],
+                vec![second, second + 60],
+            ]
+        );
+    }
+
+    #[test]
+    fn scaffold_gaps_are_not_repeats() {
+        // Runs of N spaced like the repeats of an array.
+        let gap = "N".repeat(30);
+        let seq = [
+            filler(100, 5),
+            gap.clone(),
+            "CAGTTTCAGCGATACGATCGATCGATCGTTTT".into(),
+            gap.clone(),
+            "AAAACCCCGGGGTTTTACGATCGATCGATCGA".into(),
+            gap.clone(),
+            "TTGACCATGGCATTACGGATCCAATGCCGTAA".into(),
+            gap,
+            filler(100, 6),
+        ]
+        .concat();
+        assert!(find_direct_repeats(seq.as_bytes(), &default_params()).is_empty());
+    }
+
+    #[test]
+    fn repeat_fitting_the_shortest_spacer_only_when_cut_short_is_not_a_seed() {
+        // Two copies of a 23-bp unit start 48 bp apart, which leaves exactly
+        // the shortest spacer between them. When the copies agree for two
+        // more bases, the repeat vmatch would report is 25 bp long and its
+        // spacer too short.
+        let unit = "GCAGCAGCGGCTTTTTCAGCGGC";
+        let locus = |after_second: &str| {
+            [
+                &filler(99, 7),
+                "T",
+                unit,
+                "ACCTTTCTCTGCCGCTGCCTTCTCG",
+                unit,
+                after_second,
+                &filler(100, 8),
+            ]
+            .concat()
+        };
+        let params = default_params();
+
+        let starts: Vec<usize> = find_direct_repeats(locus("GT").as_bytes(), &params)
+            .iter()
+            .map(|hit| hit.pos1)
+            .collect();
+        assert_eq!(starts, [101, 149]);
+        assert!(find_direct_repeats(locus("AC").as_bytes(), &params).is_empty());
     }
 
     // ── E. coli comparison against CRISPRCasFinder v4.2.30 reference ─────────

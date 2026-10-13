@@ -38,9 +38,9 @@ pub use report::{
 pub use types::{CasFinderConfig, CrisprArray, DetectionParams, Orientation, Repeat, Spacer};
 
 use detect::{
-    RepeatHit, check_short_crispr, cluster_repeats, extend_with_truncated_repeats, extract_spacers,
-    find_direct_repeats, foster_score, get_repeat_candidates, infer_orientation,
-    refine_cluster_with_consensus, trim_consensus,
+    RepeatHit, check_short_crispr, cluster_repeats, conserved_consensus_range,
+    extend_with_truncated_repeats, extract_spacers, find_direct_repeats, foster_score,
+    get_repeat_candidates, infer_orientation, refine_cluster_with_consensus,
 };
 
 /// Detect CRISPR arrays in a set of sequences.
@@ -151,10 +151,14 @@ fn detect_crisprs_for_sequence(
 
     let mut arrays = Vec::new();
     for cluster in filtered_clusters {
-        if let Some(array) = process_cluster(seq_id, seq, &hits, cluster, params, min_repeat_count)
-        {
-            arrays.push(array);
-        }
+        arrays.extend(process_cluster(
+            seq_id,
+            seq,
+            &hits,
+            cluster,
+            params,
+            min_repeat_count,
+        ));
     }
 
     arrays
@@ -168,7 +172,92 @@ fn repeat_span(repeats: &[RepeatHit]) -> (usize, usize) {
     )
 }
 
-/// Process a single cluster of DR hits into a CrisprArray (if valid).
+/// Percentage of positions at which a repeat differs from the consensus.
+fn mismatch_percent(consensus: &str, repeat: &RepeatHit) -> f64 {
+    let mismatches = repeat
+        .repeat_sequence
+        .bytes()
+        .zip(consensus.bytes())
+        .filter(|(a, b)| a != b)
+        .count();
+    mismatches as f64 * 100.0 / consensus.len() as f64
+}
+
+/// Whether the repeats differ from the consensus by more than
+/// `repeat_mismatch_percent` on average.
+fn exceeds_repeat_mismatches(
+    consensus: &str,
+    repeats: &[RepeatHit],
+    params: &DetectionParams,
+) -> bool {
+    let total: f64 = repeats
+        .iter()
+        .map(|repeat| mismatch_percent(consensus, repeat))
+        .sum();
+    total / repeats.len() as f64 > params.repeat_mismatch_percent
+}
+
+/// A chain of repeats settled on the consensus it is reported with.
+struct SettledChain {
+    consensus: String,
+    repeats: Vec<RepeatHit>,
+    /// Spacers the chain explains inside the seed cluster, used to rank
+    /// candidate consensus repeats.
+    seed_spacers: usize,
+}
+
+/// Trim the poorly conserved edges of a consensus and rescan with the result.
+///
+/// Returns `None` when too few repeats are left.
+fn settle_chain(
+    consensus: &str,
+    repeats: Vec<RepeatHit>,
+    cluster: (usize, usize),
+    seq: &[u8],
+    params: &DetectionParams,
+    min_repeat_count: usize,
+) -> Option<SettledChain> {
+    let seed_spacers = extract_spacers(&repeats, cluster, seq, params).len();
+    let kept = conserved_consensus_range(consensus, &repeats, params.min_repeat_length);
+    if kept.len() == consensus.len() {
+        return Some(SettledChain {
+            consensus: consensus.to_string(),
+            repeats,
+            seed_spacers,
+        });
+    }
+    let trimmed = &consensus[kept];
+    // The rescan reaches neighbouring arrays again; keep the chain that holds
+    // the repeats of this one. Trimming moves their starts to the right.
+    let span = repeat_span(&repeats);
+    let starts = span.0..=span.1 + consensus.len();
+    let repeats = refine_cluster_with_consensus(trimmed, span, seq, params)
+        .into_iter()
+        .map(|chain| {
+            let shared = chain
+                .iter()
+                .filter(|hit| starts.contains(&hit.pos1))
+                .count();
+            (shared, chain)
+        })
+        .filter(|(shared, _)| *shared > 0)
+        .max_by_key(|(shared, _)| *shared)
+        .map(|(_, chain)| chain)?;
+    (repeats.len() >= min_repeat_count).then(|| SettledChain {
+        consensus: trimmed.to_string(),
+        // A degenerate copy beside an array can match the untrimmed
+        // candidate only. The spacer it adds is not in the reported array
+        // and must not help the candidate win.
+        seed_spacers: seed_spacers.min(repeats.len() - 1),
+        repeats,
+    })
+}
+
+/// Turn a cluster of DR hits into the arrays it holds.
+///
+/// One consensus repeat is chosen for the cluster. Each chain of its copies
+/// is then evaluated as an array of its own, so two arrays closer than the
+/// clustering distance are both reported.
 fn process_cluster(
     seq_id: &str,
     seq: &[u8],
@@ -176,101 +265,76 @@ fn process_cluster(
     cluster: (usize, usize),
     params: &DetectionParams,
     min_repeat_count: usize,
-) -> Option<CrisprArray> {
+) -> Vec<CrisprArray> {
     let repeat_candidates = get_repeat_candidates(hits, cluster);
-    if repeat_candidates.is_empty() {
-        return None;
-    }
 
-    let mut best_consensus = String::new();
-    let mut best_refined: Vec<RepeatHit> = Vec::new();
-    let mut best_spacers: Vec<String> = Vec::new();
+    let mut best_chains: Vec<SettledChain> = Vec::new();
+    let mut best_length = 0usize;
+    let mut best_spacer_count = 0usize;
     let mut best_foster_score = 0usize;
 
     for consensus in &repeat_candidates {
-        let refined = refine_cluster_with_consensus(consensus, cluster, seq, params);
-        if refined.len() < min_repeat_count {
-            continue;
-        }
-
-        // DR error rate filter
-        let repeat_length = consensus.len();
-        let consensus_bytes = consensus.as_bytes();
-        let total_mism_frac: f64 = refined
-            .iter()
-            .map(|h| {
-                let mismatches = h
-                    .repeat_sequence
-                    .as_bytes()
-                    .iter()
-                    .zip(consensus_bytes.iter())
-                    .filter(|(a, b)| a != b)
-                    .count();
-                mismatches as f64 / repeat_length as f64
-            })
-            .sum();
-        let avg_mism_frac = total_mism_frac / refined.len() as f64;
-        if avg_mism_frac * 100.0 > params.repeat_mismatch_percent {
-            continue;
-        }
+        let chains: Vec<SettledChain> =
+            refine_cluster_with_consensus(consensus, cluster, seq, params)
+                .into_iter()
+                .filter(|chain| {
+                    chain.len() >= min_repeat_count
+                        && !exceeds_repeat_mismatches(consensus, chain, params)
+                })
+                .filter_map(|chain| {
+                    settle_chain(consensus, chain, cluster, seq, params, min_repeat_count)
+                })
+                .collect();
 
         // Candidates are ranked by the spacers they explain inside the seed
         // cluster, which favours the consensus the seed hits agree on.
-        let spacers = extract_spacers(&refined, cluster, seq, params);
+        let spacer_count: usize = chains.iter().map(|chain| chain.seed_spacers).sum();
 
         // Pick the candidate that produces the most spacers.
         // Tie-break: prefer longer DR (vmatch finds maximal repeats).
         // With `force_detection`, fostered repeat properties come first.
-        let candidate_foster_score = if params.force_detection {
-            foster_score(&refined, params)
+        let candidate_foster_score: usize = if params.force_detection {
+            chains
+                .iter()
+                .map(|chain| foster_score(&chain.repeats, params))
+                .sum()
         } else {
             0
         };
-        let more_spacers = spacers.len() > best_spacers.len()
-            || (spacers.len() == best_spacers.len()
-                && !best_spacers.is_empty()
-                && consensus.len() > best_consensus.len());
+        let more_spacers = spacer_count > best_spacer_count
+            || (spacer_count == best_spacer_count
+                && best_spacer_count > 0
+                && consensus.len() > best_length);
         if candidate_foster_score > best_foster_score
             || (candidate_foster_score == best_foster_score && more_spacers)
         {
             best_foster_score = candidate_foster_score;
-            best_consensus = consensus.clone();
-            best_refined = refined;
-            best_spacers = spacers;
+            best_length = consensus.len();
+            best_chains = chains;
+            best_spacer_count = spacer_count;
         }
     }
 
-    if best_consensus.is_empty() {
-        return None;
-    }
+    best_chains
+        .into_iter()
+        .filter_map(|chain| build_array(seq_id, seq, chain.consensus, chain.repeats, params))
+        .collect()
+}
 
+/// Evaluate one chain of repeats as a CRISPR array.
+fn build_array(
+    seq_id: &str,
+    seq: &[u8],
+    best_consensus: String,
+    mut best_refined: Vec<RepeatHit>,
+    params: &DetectionParams,
+) -> Option<CrisprArray> {
+    if params.better_detect_truncated {
+        extend_with_truncated_repeats(&best_consensus, &mut best_refined, seq, params);
+    }
     // Refinement rescans beyond the seed cluster, so the reported spacers
     // cover the span of the refined repeats, not of the seed hits.
-    let mut cluster = repeat_span(&best_refined);
-    best_spacers = extract_spacers(&best_refined, cluster, seq, params);
-
-    // Trim poorly-conserved edges from the consensus, re-refine if trimmed
-    let trimmed = trim_consensus(&best_consensus, &best_refined, params.min_repeat_length);
-    if trimmed != best_consensus {
-        best_consensus = trimmed;
-        best_refined = refine_cluster_with_consensus(&best_consensus, cluster, seq, params);
-        if best_refined.len() < min_repeat_count {
-            return None;
-        }
-        // Update cluster bounds to cover all refined hits (positions may have shifted)
-        if let (Some(first), Some(last)) = (best_refined.first(), best_refined.last()) {
-            cluster = (first.pos1, last.pos1);
-        }
-        best_spacers = extract_spacers(&best_refined, cluster, seq, params);
-    }
-
-    if params.better_detect_truncated
-        && extend_with_truncated_repeats(&best_consensus, &mut best_refined, seq, params) > 0
-        && let (Some(first), Some(last)) = (best_refined.first(), best_refined.last())
-    {
-        cluster = (first.pos1, last.pos1);
-        best_spacers = extract_spacers(&best_refined, cluster, seq, params);
-    }
+    let best_spacers = extract_spacers(&best_refined, repeat_span(&best_refined), seq, params);
 
     let repeat_sequences: Vec<&str> = best_refined
         .iter()
@@ -402,7 +466,25 @@ pub fn detect_crisprs_in_fasta_path(
 }
 
 #[cfg(test)]
+pub(crate) mod test_support {
+    /// Deterministic sequence without repeats, to keep parts of a test locus
+    /// apart.
+    pub(crate) fn filler(length: usize, seed: u64) -> String {
+        let mut state = seed;
+        (0..length)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                b"ACGT"[(state >> 62) as usize] as char
+            })
+            .collect()
+    }
+}
+
+#[cfg(test)]
 mod tests {
+    use super::test_support::filler;
     use super::*;
 
     const DR: &str = "GTTCACTGCCGTATAGGCAGCTAAGAAA";
@@ -481,6 +563,50 @@ mod tests {
         assert_eq!(
             arrays[0].spacers.last().unwrap().end + 1,
             arrays[0].repeats.last().unwrap().start
+        );
+    }
+
+    #[test]
+    fn neighbouring_arrays_are_reported_separately() {
+        // 1,080 bp between the arrays: one cluster of seed hits holds both.
+        let sequence = format!(
+            "{}{}{}",
+            array_sequence(&SPACERS[..3]),
+            filler(600, 1),
+            array_sequence(&SPACERS[3..])
+        );
+        let arrays = detect_crisprs(&[("a", sequence.as_bytes())], &DetectionParams::default());
+        let spacer_counts: Vec<usize> = arrays.iter().map(|array| array.spacers.len()).collect();
+        assert_eq!(spacer_counts, [3, 2]);
+        assert_eq!(arrays[0].consensus_repeat, DR);
+        assert_eq!(arrays[1].consensus_repeat, DR);
+        assert_eq!(
+            arrays[1].start,
+            sequence.rfind(SPACERS[3]).unwrap() + 1 - DR.len()
+        );
+    }
+
+    #[test]
+    fn degenerate_copy_before_an_array_does_not_hide_it() {
+        // A copy with six mismatches lies 400 bp before the array: inside the
+        // window rescanned for repeats, too far to be the first repeat.
+        let mut weak = DR.as_bytes().to_vec();
+        for index in [1, 5, 9, 13, 17, 21] {
+            weak[index] = if weak[index] == b'A' { b'C' } else { b'A' };
+        }
+        let sequence = format!(
+            "{}{}{}{}",
+            filler(300, 2),
+            String::from_utf8(weak).unwrap(),
+            filler(160, 3),
+            array_sequence(&SPACERS)
+        );
+        let arrays = detect_crisprs(&[("a", sequence.as_bytes())], &DetectionParams::default());
+        assert_eq!(arrays.len(), 1);
+        assert_eq!(arrays[0].spacers.len(), 5);
+        assert_eq!(
+            arrays[0].start,
+            sequence.find(SPACERS[0]).unwrap() + 1 - DR.len()
         );
     }
 
