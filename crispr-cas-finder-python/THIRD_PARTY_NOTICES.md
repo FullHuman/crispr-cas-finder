@@ -65,6 +65,42 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <http://www.gnu.org/licenses/>.
 ```
 
+## Vmatch portions
+
+The module crispr-cas-finder-core/src/vmatch.rs is a Rust port of the parts of
+Vmatch that CRISPRCasFinder's repeat search goes through: the extension of
+exact seeds by greedy unit edit distance alignment (kurtz/extendED.c,
+kurtz/frontSEP.c, kurtz/front.gen), the E-values of repeats (kurtz/evalues.c),
+the seed length (Vmatch/matchlenparm.c), the acceptance of a repeat
+(Vmatch/mokay.c, Vmatch/procfinal.c, Vmatch/SELECT/sel392.c) and the removal of
+contained repeats (kurtz/smcontain.c). The enumeration of
+maximal exact repeats is written anew and does not use Vmatch's index.
+
+Source: https://github.com/genometools/vstree
+Reference revision: 533c8bb9a5dc981bd3f4d1c44adbfcdd68336b89 (Vmatch 2.3.1)
+License: ISC.
+
+```text
+Copyright (c) 2000-2006 Stefan Kurtz <kurtz@zbh.uni-hamburg.de>
+
+Permission to use, copy, modify, and distribute this software for any
+purpose with or without fee is hereby granted, provided that the above
+copyright notice and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+```
+
+The alignment that tells a tandem repeat from an array
+(crispr-cas-finder-core/src/conservation.rs, `align_shifted_copies`) uses the
+substitution scores and gap penalties MUSCLE 3.8 applies to nucleotides, which
+are the BLASTZ defaults. No MUSCLE or EMBOSS code is included.
+
 ## HMMER and Easel portions
 
 The internal modules src/hmmer_core and src/hmmer_io include Rust ports of

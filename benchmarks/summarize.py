@@ -196,12 +196,15 @@ def array_section(rows):
     identical = sum(int(r["identical_spacers"]) for r in rows if r["identical_spacers"])
     overlapping = sum(int(r["overlapping_spacers"]) for r in rows if r["overlapping_spacers"])
     rust_spacers = sum(int(r["rust_spacers"]) for r in rows if r["rust_spacers"])
-    lines += ["", f"Spacers: {up_spacers} in the original output, {rust_spacers} in the Rust "
-                  f"output. Of the original's, {overlapping} "
-                  f"({100 * overlapping / up_spacers:.1f}%) are reported by Rust at the same "
-                  f"place, {identical} ({100 * identical / up_spacers:.1f}%) with the identical "
-                  "sequence; the rest of the shared ones differ by a base or two at an edge "
-                  "because the repeat boundary is placed differently.", ""]
+    sentence = (f"Spacers: {up_spacers} in the original output, {rust_spacers} in the Rust "
+                f"output. Of the original's, {overlapping} "
+                f"({100 * overlapping / up_spacers:.1f}%) are reported by Rust at the same "
+                f"place, {identical} ({100 * identical / up_spacers:.1f}%) with the identical "
+                "sequence")
+    if identical < overlapping:
+        sentence += ("; the rest of the shared ones differ by a base or two at an edge "
+                     "because the repeat boundary is placed differently")
+    lines += ["", sentence + ".", ""]
     return "\n".join(lines)
 
 

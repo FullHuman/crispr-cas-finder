@@ -13,16 +13,31 @@ and specificity against an independent truth set have not been measured.
   tracked E. coli genome, predicted genes and proteins are identical to Prodigal
   2.6.3 for codes 11, 4 and 25. Codes other than 11 have not been checked on an
   organism that actually uses them.
-- Repeats are discovered with the settings CRISPRCasFinder gives Vmatch (23 to
-  55 bp, at most one mismatch, 25 to 60 bp apart) by an internal seed search.
-  It does not reproduce every Vmatch match. Arrays of evidence level 3 and 4
-  are found either way; small and poorly conserved ones (levels 1 and 2) differ
-  more, and repeat-rich genomes get more of them here than from
-  CRISPRCasFinder. See the comparison below.
-- A locus is divided into arrays wherever two neighbouring repeats are farther
-  apart than the longest spacer the repeat allows, as CRISPRCasFinder does.
-  Repeats within 1.5 kb of each other form one locus and are searched with one
+- Repeats are discovered by a Rust port of the Vmatch search CRISPRCasFinder
+  runs (23 to 55 bp, at most one difference, 25 to 60 bp apart). On the 72
+  inputs of the comparison below it reports the same 5,922 repeats as Vmatch
+  2.3.1, with none missing and none added; `benchmarks/vmatch_oracle.py` runs
+  that check. Vmatch's limit of a million repeats per sequence is not applied.
+- The steps from those repeats to arrays follow CRISPRCasFinder: the consensus
+  repeat of a locus is one of the repeats found there, chosen the same way and
+  reported as it is; its copies within 500 bp of the locus give the spacers;
+  the locus is dropped when its spacers are too alike or its only spacer is too
+  much like the repeat; and it is divided into arrays at spacers longer than
+  the repeat allows. Three things are deliberately not followed:
+  CRISPRCasFinder divides a locus only once the sequence has given an array of
+  three spacers or more, it loses arrays when one side of a division has no
+  spacer, and it reports the first part of a divided locus one base too long.
+- Repeats within 1.5 kb of each other form one locus and are searched with one
   consensus repeat, so of two unrelated arrays that close only one is reported.
+  This is also what CRISPRCasFinder does.
+- Whether the spacers of a locus are too alike is decided on an alignment made
+  with the scores MUSCLE gives nucleotides, counting only bases that face each
+  other, as BioPerl does for CRISPRCasFinder. For a locus of two spacers the
+  result is that of MUSCLE 3.8, on all 144 such loci of the comparison. With
+  more spacers the alignment is a center-star alignment, not MUSCLE's
+  progressive one: of the 509 such loci, 8 fall on the other side of the 60%
+  limit. The test for a single spacer replaces EMBOSS `needle` and gave its
+  verdict on all 301 repeat and spacer pairs of the comparison.
 - Only A, C, G and T match between copies of a repeat. N and the other
   ambiguity codes match nothing, so a run of N is never a repeat.
 - Evidence levels follow the CRISPRCasFinder rules: level 1 for at most three
@@ -33,9 +48,6 @@ and specificity against an independent truth set have not been measured.
   a threshold can therefore differ from upstream: unrelated spacers that MUSCLE
   lines up by chance leave an array at level 4 here and level 3 there, and a
   repeat carrying an insertion or deletion lowers repeat conservation more here.
-  An array is rejected when its aligned spacers are on average at least
-  `--spacer-similarity-threshold` percent identical; a residue facing a gap
-  counts as a mismatch.
 - `--force-detection` and `--better-detect-truncated` are reimplemented rather
   than copied: fostered start/end patterns are IUPAC codes (`.` = any base), and
   truncated detection adds at most one terminal repeat per side.
@@ -90,11 +102,12 @@ and specificity against an independent truth set have not been measured.
 
 | Case | Source and options | What is checked | Boundary of the claim |
 | --- | --- | --- | --- |
-| E. coli NC_000913.3 CRISPRdb coordinates | Tracked `crispr-cas-finder-cli/data/ecoli.fasta`; default detection options; the four arrays listed for NC_000913 in CRISPRCasFinder's `CRISPR_crisprdb.csv` | Exact start, end and spacer count of each of the four arrays | One genome; a fifth, level-1 array reported here is not in CRISPRdb |
-| E. coli NC_000913.3 array comparison | Tracked `crispr-cas-finder-cli/data/ecoli.fasta`; default detection options; reference positions attributed to CRISPRCasFinder 4.2.30 in the existing regression | Five reference regions; repeat positions within 10 bp, cluster overlap within 200 bp; high-evidence spacer count within 2 | Uses the existing frozen expectations, not a fresh upstream run or a false-positive benchmark |
+| E. coli NC_000913.3 arrays | Tracked `crispr-cas-finder-cli/data/ecoli.fasta`; default detection options; the five arrays CRISPRCasFinder 4.2.30 reports, four of which CRISPRCasFinder's `CRISPR_crisprdb.csv` lists for NC_000913 with the same coordinates | Exact consensus repeat, evidence level, end and start of every repeat of each array, and that nothing else is reported | One genome; frozen expectations, not a fresh upstream run |
+| Repeat search versus Vmatch 2.3.1 | The 72 inputs of the comparison below; `benchmarks/vmatch_oracle.py` | Every repeat of every sequence: same two copies, none missing, none added (5,922 repeats) | Run locally, not in CI, where Vmatch is not available. Unit tests freeze Vmatch's output for small synthetic cases |
+| Spacer tests versus MUSCLE and EMBOSS | Spacer sets and repeat and spacer pairs taken from the genomes of the comparison | Spacer identity as MUSCLE 3.8 and BioPerl give it for three loci; share of gaps as EMBOSS `needle` 6.6 gives it for four pairs | Frozen values in unit tests. The wider agreement was measured locally: the same identity for all 144 loci of two spacers, the same side of the limit for 501 of 509 loci with three spacers or more, and the same verdict for 301 of 301 single-spacer pairs |
 | E. coli native/browser comparison | Same FASTA; genetic code 11; circular topology; SubTyping definitions; bundled CasFinder 2.0.3 | Report equality across CLI, Chromium, WebKit, threaded and sequential search, with a 1e-4 relative tolerance on floating-point values between native and browser; baseline five arrays and one type I-E system | Agreement among builds of this implementation on one genome |
 | CasFinder 3.1.0 versus MacSyFinder 2.1.6 | Eight bacterial genomes (E. coli K-12, three Erwinia amylovora, four other Enterobacterales, up to six sequences each); proteins predicted by this project; MacSyFinder run with the options CRISPRCasFinder passes | Identical systems: model, proteins, matched profiles, score and wholeness. HMM hits identical except one domain boundary | Run locally, not in CI, because the models cannot be redistributed. One genus-level clade; six systems of type I-E or I and two genomes without a system. An opt-in test (`CASFINDER3_DIR`) repeats the E. coli case |
-| Comparison with CRISPRCasFinder 4.3.2 | 51 enterobacterial inputs of 1 to 376 contigs and 21 reference genomes of bacteria and archaea (`benchmarks/panel.tsv`); both tools with CasFinder 3.1.0; scripts and method in `benchmarks/` | Arrays and Cas systems of the two outputs, paired by overlap | Run locally on 2026-10-13, not in CI, the original with MacSyFinder 2.1.6 and HMMER 3.4. All 161 level-4 arrays of the original are reported, 159 of them within 5 bp, as are its 8 level-3 arrays (at level 4 here), 4 of its 7 level-2 and 222 of its 272 level-1 arrays. Reported here only: 91 arrays of level 1, 32 of level 2 and 3 of level 3, most of them in M. tuberculosis, S. coelicolor and C. difficile. Of the 48 Cas systems in the original's report, 47 are reported with the same subtype, 46 with the same genes; a type I-B system of T. kodakarensis is missed because of the domain difference described above |
+| Comparison with CRISPRCasFinder 4.3.2 | 51 enterobacterial inputs of 1 to 376 contigs and 21 reference genomes of bacteria and archaea (`benchmarks/panel.tsv`); both tools with CasFinder 3.1.0; scripts and method in `benchmarks/` | Arrays and Cas systems of the two outputs, paired by overlap | Run locally on 2026-10-13, not in CI, the original with MacSyFinder 2.1.6 and HMMER 3.4. Of the original's 448 arrays, 439 are reported, each with the same start and the same number of spacers: all 161 of level 4, all 8 of level 3, all 7 of level 2 and 263 of 272 of level 1. For 421 the end is the same too; the other 18 are first parts of a divided locus, which the original reports one base too long. Nine level-1 arrays of the original are not reported and three level-2 arrays are reported here only; all twelve are loci of three spacers or more on the other side of the spacer similarity limit. The level differs for nine arrays: eight of level 3 are level 4 here and one of level 4 is level 2. Of the 48 Cas systems in the original's report, 47 are reported with the same subtype, 46 with the same genes; a type I-B system of T. kodakarensis is missed because of the domain difference described above |
 | HMMER Cas5 oracle | HMMER 3.4 `hmmsearch` frozen output; TIGR01868/Cas5_0_IE versus CP014688.1_298 | Sequence/domain scores, coordinates, bias, and alignment accuracy | One independently generated HMM/sequence oracle |
 | HMM filter references | Synthetic profiles and sequences in `hmmer-core/tests/filter_reference.rs` | SIMD filters compared with independent scalar calculations | Algorithmic regression cases, not biological prevalence or accuracy |
 | Python API | Synthetic repeat array and invalid inputs | Installed-wheel file/string API agreement and errors | Binding behavior, not additional biological validation |

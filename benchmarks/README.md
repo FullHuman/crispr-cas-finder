@@ -10,6 +10,7 @@ genomes, on the same machine, and compare run time, memory and results.
 | `compare.py` | Pairs the arrays and Cas systems of the two outputs |
 | `summarize.py` | Writes `summary.md` from the CSV files |
 | `browser_timing.cjs` | Times the WebAssembly build in a headless browser |
+| `vmatch_oracle.py` | Checks the repeats this project finds against those Vmatch reports |
 
 ## What is compared
 
@@ -86,9 +87,10 @@ set) and `results/panel/summary.md` (panel).
   of `panel.tsv` (`fetch_panel.py` downloads them from NCBI): bacteria of
   seven phyla and five archaea, twelve Cas subtypes, four genomes without a
   CRISPR-Cas system.
-- `results/before-fix/`: the Rust results at `26d60c7`, before the array
-  detection fixes that this comparison led to. The measurements of the
-  original are the same in both.
+- `results/before-fix/` and `results/at-b7fb24d/`: the Rust results at
+  `26d60c7`, before the array detection fixes that this comparison led to, and
+  at `b7fb24d`, before the repeat search became a port of Vmatch's. The
+  measurements of the original are the same throughout.
 
 Things to state next to any number taken from here:
 
@@ -100,6 +102,14 @@ Things to state next to any number taken from here:
   3.3.2 it documents. The Cas systems it loses (see `compare.py`) were checked
   against MacSyFinder's own output for two genomes with these versions only.
 - Most timings are single runs on one machine.
+
+## Checking the repeat search against Vmatch
+
+`vmatch_oracle.py genomes/*.fasta` builds a Vmatch index of every sequence,
+runs Vmatch with the arguments CRISPRCasFinder passes and compares its repeats
+with those of `cargo run --release -p crispr-cas-finder-core --example
+repeat_matches`. It prints, for each input, how many repeats both report and
+how many only one of them does.
 
 ## Reproducing
 
