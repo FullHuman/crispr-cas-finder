@@ -66,7 +66,7 @@ async function ensureThreadPool(id) {
     return false;
   }
 
-  progress(id, `Initializing WebAssembly thread pool (${requestedThreads} threads)...`, 0, 1);
+  progress(id, `Initializing WebAssembly thread pool (${requestedThreads} threads)…`, 0, 1);
 
   try {
     await withTimeout(
@@ -89,16 +89,16 @@ function progress(id, message, current, total) {
 
 async function loadCasModels(id) {
   if (casModelsData) return casModelsData;
-  progress(id, "Downloading CAS models...", 0, 1);
+  progress(id, "Downloading the Cas models…", 0, 1);
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 120000);
   try {
     const resp = await fetch("cas-models.json", { signal: controller.signal });
-    if (!resp.ok) throw new Error(`Failed to fetch CAS models: HTTP ${resp.status}`);
+    if (!resp.ok) throw new Error(`Failed to fetch the Cas models: HTTP ${resp.status}`);
     const data = await resp.json();
     if (!Array.isArray(data.models) || !data.models.length ||
         !Array.isArray(data.profiles) || !data.profiles.length) {
-      throw new Error("CAS model bundle is empty or invalid. Run bundle_cas_models.py.");
+      throw new Error("Cas model bundle is empty or invalid. Run bundle_cas_models.py.");
     }
     casModelsData = data;
   } finally {
@@ -137,11 +137,11 @@ self.onmessage = async (e) => {
       const data = await loadCasModels(id);
 
       // 2. CRISPR detection
-      progress(id, "Detecting CRISPR arrays...", 0, 0);
+      progress(id, "Detecting CRISPR arrays…", 0, 0);
       const crisprs = find_repeats(payload.fasta, payload.options);
 
       // 3. Gene prediction + model setup
-      progress(id, "Predicting genes...", 0, 0);
+      progress(id, "Predicting genes…", 0, 0);
       const prepInfo = cas_prepare(
         payload.fasta,
         data.models,
@@ -156,24 +156,24 @@ self.onmessage = async (e) => {
         (profile) => neededProfileNames.has(profile.name)
       );
       const totalProfiles = profilesToSearch.length;
-      progress(id, `Predicted ${prepInfo.gene_count} genes. Searching ${totalProfiles} HMM profiles...`, 0, totalProfiles);
+      progress(id, `Predicted ${prepInfo.gene_count} genes. Searching ${totalProfiles} HMM profiles…`, 0, totalProfiles);
 
       // 4. Search all needed profiles, using rayon when the browser can start the thread pool.
       let totalHits = 0;
       if (threadPoolEnabled) {
-        progress(id, `Searching ${totalProfiles} HMM profiles in parallel...`, 0, totalProfiles);
+        progress(id, `Searching ${totalProfiles} HMM profiles in parallel…`, 0, totalProfiles);
         totalHits = cas_search_all_profiles(profilesToSearch);
       } else {
         for (let index = 0; index < totalProfiles; index += 1) {
           const profile = profilesToSearch[index];
-          progress(id, `Searching HMM profiles sequentially (${index + 1}/${totalProfiles})...`, index, totalProfiles);
+          progress(id, `Searching HMM profiles sequentially (${index + 1}/${totalProfiles})…`, index, totalProfiles);
           totalHits += cas_search_profile(profile.name, profile.data);
         }
       }
       progress(id, `HMM search complete. ${totalHits} total hits.`, totalProfiles, totalProfiles);
 
       // 5. Finalize — clustering + system evaluation
-      progress(id, "Evaluating CAS systems...", totalProfiles, totalProfiles);
+      progress(id, "Evaluating Cas systems…", totalProfiles, totalProfiles);
       const casClusters = cas_finalize();
 
       // 6. Same report structure as the command-line tool's report.json

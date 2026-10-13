@@ -6,8 +6,9 @@
         <title>CRISPR-Cas Finder</title>
         <meta
             name="description"
-            content="Run CRISPR repeat and CAS system detection directly in your browser using Rust + WebAssembly."
+            content="Run CRISPR repeat and Cas system detection directly in your browser using Rust + WebAssembly."
         />
+        <link rel="icon" type="image/png" href="full-human-logo.png" />
         <link
             rel="preconnect"
             href="https://fonts.googleapis.com"
@@ -15,165 +16,338 @@
         />
         <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
         <link
-            href="https://fonts.googleapis.com/css2?family=Geist:wght@200;300;400;500;600&family=Geist+Mono:wght@400;500&display=swap"
+            href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@200..800&family=IBM+Plex+Mono:wght@400;500&family=Raleway:wght@100..900&display=swap"
             rel="stylesheet"
             crossorigin
         />
         <link rel="stylesheet" href="style.css" />
     </head>
     <body>
-        <header class="site-header">
-            <div class="header-inner">
-                <span class="wordmark">CRISPR-CAS FINDER</span>
-            </div>
+        <header class="lr-header lr-header-app">
+            <nav aria-label="Main navigation">
+                <a class="lr-brand" href="./">
+                    <img
+                        src="full-human-logo.png"
+                        alt=""
+                        width="28"
+                        height="28"
+                    />
+                    <span class="lr-wordmark"
+                        >CRISPR-Cas <span>Finder</span></span
+                    >
+                </a>
+                <div class="lr-header-actions">
+                    <a
+                        class="header-link header-link-wide"
+                        href="https://github.com/FullHuman/crispr-cas-finder/blob/main/LIMITATIONS.md"
+                        target="_blank"
+                        rel="noopener"
+                        >Limitations</a
+                    >
+                    <a
+                        class="header-link"
+                        href="https://github.com/FullHuman/crispr-cas-finder"
+                        target="_blank"
+                        rel="noopener"
+                        >Source code</a
+                    >
+                </div>
+            </nav>
         </header>
 
-        <div class="info-notice">
-            <div class="info-notice-inner">
+        <main class="lr-container page">
+            <div class="page-head">
+                <h1>Find CRISPR arrays and Cas systems in a genome</h1>
                 <p>
-                    An experimental, independent Rust implementation inspired by
-                    <a href="https://github.com/dcouvin/CRISPRCasFinder" target="_blank" rel="noopener">CRISPRCasFinder</a>.
-                    Your genome sequence is processed locally and is not uploaded.
-                    Cas detection here uses genetic code 11; the command-line tool supports other codes.
-                    Evidence levels and Cas-model evaluation differ from the original;
-                    broader biological validation is ongoing.
-                    <a href="https://github.com/FullHuman/crispr-cas-finder/blob/main/LIMITATIONS.md" target="_blank" rel="noopener">Limitations and validation</a>.
+                    Add a FASTA file and run. Detection happens in this tab; the
+                    sequence is never uploaded.
                 </p>
             </div>
-        </div>
 
-        <main class="layout">
-            <section class="hero">
-                <h1>Run CRISPR-Cas detection in your browser</h1>
-                <p class="hero-sub">
-                    Full CRISPR repeat and CAS system detection, entirely
-                    client-side. No uploads, no servers, no waiting.
-                </p>
-            </section>
+            <div class="run-layout">
+                <section class="card tool-card">
+                    <h2>Sequence</h2>
 
-            <section class="panel input-panel">
-                <div class="panel-head">
-                    <h2 class="detail">Input</h2>
-                </div>
-
-                <label class="block-label" for="fasta-input"
-                    >FASTA content</label
-                >
-                <textarea
-                    id="fasta-input"
-                    class="fasta"
-                    spellcheck="false"
-                    placeholder=">seq1&#10;ATGCGTAGCTAGCTAGCTAG..."
-                ></textarea>
-
-                <div class="file-row">
-                    <label class="btn-secondary file-label" for="fasta-file"
-                        >Upload FASTA</label
-                    >
-                    <input
-                        id="fasta-file"
-                        type="file"
-                        accept=".fa,.fasta,.fna,.txt"
-                    />
-                    <span id="file-name" class="file-name"
-                        >No file selected</span
-                    >
-                </div>
-            </section>
-
-            <section class="panel options-panel">
-                <h2 class="detail">CRISPR options</h2>
-                <div class="grid">
-                    <label>
-                        <span>Min DR</span>
-                        <input id="min-dr" type="number" min="1" value="23" />
-                    </label>
-                    <label>
-                        <span>Max DR</span>
-                        <input id="max-dr" type="number" min="1" value="55" />
-                    </label>
-                    <label>
-                        <span>Min spacer</span>
-                        <input id="min-sp" type="number" min="1" value="25" />
-                    </label>
-                    <label>
-                        <span>Max spacer</span>
-                        <input id="max-sp" type="number" min="1" value="60" />
-                    </label>
-                    <label>
-                        <span>Level min</span>
+                    <div id="fasta-zone" class="tool-block">
                         <input
-                            id="level-min"
-                            type="number"
-                            min="1"
-                            max="4"
-                            value="1"
+                            id="fasta-file"
+                            type="file"
+                            accept=".fa,.fasta,.fna,.txt"
+                            hidden
                         />
-                    </label>
-                    <label>
-                        <span>Min spacer count</span>
-                        <input
-                            id="min-nb-spacers"
-                            type="number"
-                            min="1"
-                            value="1"
-                        />
-                    </label>
-                    <label class="checkbox">
-                        <input id="no-mism" type="checkbox" />
-                        <span>No mismatches</span>
-                    </label>
-                </div>
+                        <button
+                            id="fasta-drop"
+                            class="lr-drop"
+                            type="button"
+                        >
+                            <b>Drop a FASTA file here, or choose a file</b>
+                            <small
+                                >.fa, .fasta, .fna or .txt · read
+                                locally</small
+                            >
+                        </button>
+                        <div id="fasta-accepted" class="lr-file" hidden>
+                            <svg
+                                viewBox="0 0 24 24"
+                                fill="none"
+                                stroke="currentColor"
+                                stroke-width="1.8"
+                                aria-hidden="true"
+                            >
+                                <path
+                                    d="M14 3H6a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8z"
+                                />
+                                <path d="M14 3v5h5M9 14l2 2 4-4" />
+                            </svg>
+                            <div>
+                                <p id="file-name" class="lr-file-name"></p>
+                                <small id="file-detail"></small>
+                            </div>
+                            <button
+                                id="fasta-remove"
+                                class="btn btn-secondary lr-btn-sm"
+                                type="button"
+                            >
+                                Remove
+                            </button>
+                        </div>
+                        <div
+                            id="fasta-rejected"
+                            class="lr-file-bad"
+                            role="alert"
+                            hidden
+                        >
+                            <p id="rejected-name" class="lr-file-name"></p>
+                            <b>This doesn't look like a FASTA file.</b>
+                            <p>
+                                The first line must start with ">", followed
+                                by the sequence on the next lines.
+                            </p>
+                            <div>
+                                <button
+                                    id="fasta-retry"
+                                    class="btn btn-secondary lr-btn-sm"
+                                    type="button"
+                                >
+                                    Choose another file
+                                </button>
+                            </div>
+                        </div>
+                    </div>
 
-                <h2 class="detail section-heading">CAS detection</h2>
-                <div class="grid">
-                    <label class="checkbox">
-                        <input id="enable-cas" type="checkbox" checked />
-                        <span>Enable CAS detection</span>
-                    </label>
-                    <label class="checkbox">
-                        <input id="metagenome" type="checkbox" />
-                        <span>Metagenome mode</span>
-                    </label>
-                </div>
+                    <div class="tool-block">
+                        <label class="lr-label" for="fasta-input"
+                            >Or paste FASTA</label
+                        >
+                        <textarea
+                            id="fasta-input"
+                            class="field fasta"
+                            spellcheck="false"
+                            placeholder=">seq1&#10;ATGCGTAGCTAGCTAGCTAG…"
+                        ></textarea>
+                    </div>
+                </section>
 
-                <div class="actions">
-                    <button id="analyze-btn" class="btn-primary" type="button">
-                        Analyze
-                    </button>
+                <aside class="run-side">
+                    <section class="card tool-card">
+                        <h2>Run</h2>
+                        <button
+                            id="analyze-btn"
+                            class="btn btn-lg btn-primary"
+                            type="button"
+                            disabled
+                        >
+                            Add a sequence to continue
+                        </button>
+                        <div id="status-panel" aria-live="polite"></div>
+                    </section>
+
+                    <div class="lr-callout is-warning">
+                        <strong>Experimental.</strong> An independent Rust
+                        implementation inspired by
+                        <a
+                            href="https://github.com/dcouvin/CRISPRCasFinder"
+                            target="_blank"
+                            rel="noopener"
+                            >CRISPRCasFinder</a
+                        >. Evidence levels and Cas-model evaluation differ from
+                        the original; broader biological validation is ongoing.
+                        <a
+                            href="https://github.com/FullHuman/crispr-cas-finder/blob/main/LIMITATIONS.md"
+                            target="_blank"
+                            rel="noopener"
+                            >Limitations and validation →</a
+                        >
+                    </div>
+                </aside>
+
+                <section class="card tool-card">
+                    <h2>Options</h2>
+
+                    <fieldset class="tool-block">
+                        <legend class="eyebrow text-muted">
+                            CRISPR arrays
+                        </legend>
+                        <div class="options-grid">
+                            <div>
+                                <label class="lr-label" for="min-dr"
+                                    >Minimum repeat length</label
+                                >
+                                <input
+                                    id="min-dr"
+                                    class="field"
+                                    type="number"
+                                    min="1"
+                                    value="23"
+                                />
+                            </div>
+                            <div>
+                                <label class="lr-label" for="max-dr"
+                                    >Maximum repeat length</label
+                                >
+                                <input
+                                    id="max-dr"
+                                    class="field"
+                                    type="number"
+                                    min="1"
+                                    value="55"
+                                />
+                            </div>
+                            <div>
+                                <label class="lr-label" for="min-sp"
+                                    >Minimum spacer length</label
+                                >
+                                <input
+                                    id="min-sp"
+                                    class="field"
+                                    type="number"
+                                    min="1"
+                                    value="25"
+                                />
+                            </div>
+                            <div>
+                                <label class="lr-label" for="max-sp"
+                                    >Maximum spacer length</label
+                                >
+                                <input
+                                    id="max-sp"
+                                    class="field"
+                                    type="number"
+                                    min="1"
+                                    value="60"
+                                />
+                            </div>
+                            <div>
+                                <label class="lr-label" for="min-nb-spacers"
+                                    >Minimum spacer count</label
+                                >
+                                <input
+                                    id="min-nb-spacers"
+                                    class="field"
+                                    type="number"
+                                    min="1"
+                                    value="1"
+                                />
+                            </div>
+                            <div>
+                                <label class="lr-label" for="level-min"
+                                    >Minimum evidence level (1–4)</label
+                                >
+                                <input
+                                    id="level-min"
+                                    class="field"
+                                    type="number"
+                                    min="1"
+                                    max="4"
+                                    value="1"
+                                />
+                            </div>
+                        </div>
+                        <div class="lr-choices">
+                            <label class="lr-choice">
+                                <input id="no-mism" type="checkbox" />
+                                <span>
+                                    <b>No mismatches</b>
+                                    <small
+                                        >Repeats must match each other
+                                        exactly.</small
+                                    >
+                                </span>
+                            </label>
+                        </div>
+                    </fieldset>
+
+                    <fieldset class="tool-block tool-block-ruled">
+                        <legend class="eyebrow text-muted">
+                            Cas systems
+                        </legend>
+                        <div class="lr-choices">
+                            <label class="lr-choice">
+                                <input
+                                    id="enable-cas"
+                                    type="checkbox"
+                                    checked
+                                />
+                                <span>
+                                    <b>Detect Cas systems</b>
+                                    <small
+                                        >Genetic code 11. The command-line
+                                        tool supports other codes.</small
+                                    >
+                                </span>
+                            </label>
+                            <label class="lr-choice">
+                                <input id="metagenome" type="checkbox" />
+                                <span>
+                                    <b>Metagenome mode</b>
+                                    <small
+                                        >Metagenomic gene prediction for
+                                        every sequence.</small
+                                    >
+                                </span>
+                            </label>
+                        </div>
+                    </fieldset>
+                </section>
+            </div>
+
+            <section id="results" class="results">
+                <div class="results-head">
+                    <div>
+                        <h2>Results</h2>
+                        <p
+                            id="result-summary"
+                            class="label-mono text-muted"
+                            hidden
+                        ></p>
+                    </div>
                     <button
                         id="download-btn"
-                        class="btn-outline"
+                        class="btn btn-secondary"
                         type="button"
                         disabled
                     >
                         Download JSON
                     </button>
                 </div>
-            </section>
 
-            <section
-                id="status-panel"
-                class="panel status-panel hidden"
-                aria-live="polite"
-            ></section>
-
-            <section id="results-panel" class="panel results-panel hidden">
-                <div class="panel-head">
-                    <h2 class="detail">Results</h2>
-                    <p id="result-summary" class="summary"></p>
+                <div id="results-empty" class="lr-empty">
+                    <b>No results yet</b>
+                    <small
+                        >CRISPR arrays and Cas systems will be listed
+                        here.</small
+                    >
                 </div>
-
-                <div id="results-list" class="results-list"></div>
+                <ul id="results-list" class="results-list" hidden></ul>
             </section>
 
-            <section class="panel references-panel">
-                <h2 class="detail">References</h2>
-                <p class="references-intro">
+            <section class="references">
+                <h2 class="eyebrow text-muted">References</h2>
+                <p>
                     If you use this tool or the underlying algorithms, please
                     cite:
                 </p>
-                <ol class="references-list">
+                <ol>
                     <li>
                         Couvin D, Bernheim A, Toffano-Nioche C, Touchon M,
                         Michalik J, N&eacute;ron B, Rocha EPC, Vergnaud G,
@@ -244,12 +418,14 @@
             </section>
         </main>
 
-        <footer class="site-footer">
-            <p>
-                CRISPR-Cas Finder &mdash; open source, client-side genomic
-                analysis &middot; <a href="LICENSE">License</a>
-                &middot; <a href="THIRD_PARTY_NOTICES.md">Upstream notices</a>
-            </p>
+        <footer class="lr-footer">
+            <div class="lr-footer-bar">
+                <p class="label-mono">CRISPR-Cas Finder · GPL-3.0-or-later</p>
+                <div class="footer-links">
+                    <a href="LICENSE">License</a>
+                    <a href="THIRD_PARTY_NOTICES.md">Upstream notices</a>
+                </div>
+            </div>
         </footer>
 
         <script type="module" src="app.js"></script>
