@@ -64,6 +64,20 @@ and specificity against an independent truth set have not been measured.
   exactly on a threshold, and the second can change which of two related
   profiles is a protein's best match, which in turn can change the systems
   found around it.
+- By default the HMM search decides its MSV and bias filters with an 8-bit
+  lower bound on the MSV score (within about half a nat of it), its Viterbi
+  filter with a 16-bit upper bound on the Viterbi score, and decodes posterior
+  probabilities in probability space, as HMMER itself does. A sequence whose
+  exact MSV score sits within half a nat of the filter threshold can be
+  dropped that HMMER's own filter would also round away, and bit scores can
+  move by a few tenths of a percent through the composition correction.
+  `--exact-filters` restores the exact single-precision filter scores and the
+  log-space decoder of earlier versions: identical hits on the 28 genomes
+  checked, at about 1.8 times the search time. On the E. coli K-12 proteome
+  (4318 proteins) and the 535 CasFinder 3.1 profiles, one thread of an M1 Max
+  searches in 7.9 s against 9.8 s for `hmmsearch` 3.4 and 13.9 s with
+  `--exact-filters`; with every core, 1.6 s of wall time against 5.3 s for
+  `hmmsearch --cpu 10`.
 - Two generations of Cas models are supported. The bundled default is CasFinder
   2.0.3. CasFinder 3 packages (MacSyFinder 2 format) are loaded from a directory
   given with `--cas-models-dir`; they are licensed CC BY-NC-SA 4.0 and are not
