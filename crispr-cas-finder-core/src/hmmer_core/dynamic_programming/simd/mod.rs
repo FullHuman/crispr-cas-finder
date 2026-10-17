@@ -4,4 +4,6 @@ pub mod forward_filter;
 pub mod fwd_bck;
 pub mod i16_msv;
 pub mod i16_viterbi;
+pub mod i8_msv;
+pub mod int_msv;
 pub mod oprofile;

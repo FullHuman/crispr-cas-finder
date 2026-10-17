@@ -45,6 +45,7 @@ pub fn legacy_hit_filtering() -> HitFiltering {
         i_evalue_sel: MAX_DOMAIN_INCLUSION_EVALUE,
         coverage_profile: MIN_PROFILE_COVERAGE,
         cut_ga: false,
+        exact_filters: false,
     }
 }
 
@@ -109,7 +110,7 @@ fn load_model_set(config: &CasFinderConfig) -> Result<ModelSet> {
             definitions_dir.display()
         );
     }
-    let (filtering, weights) = if macsyfinder2 > 0 {
+    let (mut filtering, weights) = if macsyfinder2 > 0 {
         for model in &models {
             macsy::check_supported(model).map_err(anyhow::Error::msg)?;
         }
@@ -126,6 +127,7 @@ fn load_model_set(config: &CasFinderConfig) -> Result<ModelSet> {
     } else {
         (legacy_hit_filtering(), HitWeights::default())
     };
+    filtering.exact_filters = config.exact_filters;
 
     let profiles_dir = match &config.cas_profiles_dir {
         Some(directory) => directory.clone(),
@@ -465,6 +467,15 @@ fn run_hmm_search(
     let mut all_hits: HashMap<String, Vec<HmmerHit>> = HashMap::new();
     let mut profile_names: Vec<String> = needed_profiles.iter().cloned().collect();
     profile_names.sort_unstable();
+    // A profile's search time grows with its length, and its file size with
+    // it. Starting the longest profiles first and handing them out one at a
+    // time keeps every thread busy until the end.
+    let profile_size = |name: &str| {
+        fs::metadata(profiles_dir.join(format!("{name}.hmm")))
+            .map(|metadata| metadata.len())
+            .unwrap_or(0)
+    };
+    profile_names.sort_by_cached_key(|name| std::cmp::Reverse(profile_size(name)));
 
     let pool = build_hmm_search_pool(workers)?;
     info!(
@@ -476,6 +487,7 @@ fn run_hmm_search(
     let search_results = pool.install(|| {
         profile_names
             .par_iter()
+            .with_max_len(1)
             .map(|profile_name| {
                 search_profile_hits(
                     profiles_dir,
@@ -582,7 +594,10 @@ pub fn search_hmm_profile(
     let query = SearchQuery::from_configured_profile(configured_profile, background_model.clone())
         .map_err(|e| anyhow::anyhow!("Query config failed for {}: {}", profile_name, e))?;
     let plan = SearchPlan::builder(query)
-        .filters(FilterPolicy::default())
+        .filters(FilterPolicy {
+            exact: filtering.exact_filters,
+            ..FilterPolicy::default()
+        })
         .build()
         .map_err(|e| anyhow::anyhow!("Search plan config failed for {}: {}", profile_name, e))?;
     let mut worker = plan
@@ -657,6 +672,17 @@ pub fn search_hmm_profile(
             }
         }
     }
+
+    let stats = worker.into_metrics().stats;
+    log::debug!(
+        "{profile_name}: {} sequences, {} past MSV, {} past bias, {} past Viterbi, {} past Forward, {} hits",
+        stats.num_sequences,
+        stats.sequences_past_msv,
+        stats.sequences_past_bias,
+        stats.sequences_past_viterbi,
+        stats.sequences_past_forward,
+        stats.sequences_output
+    );
 
     profile_hits.sort_by_key(|(sequence_index, _)| *sequence_index);
     Ok(profile_hits.into_iter().map(|(_, hit)| hit).collect())

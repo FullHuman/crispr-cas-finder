@@ -8,7 +8,7 @@ use hmmer_core::{
     rng::XorShift64,
     simd::{
         f32_msv::msv_filter_f32, f32_viterbi::viterbi_filter_f32, forward_filter::forward_filter,
-        i16_msv::msv_upper_bound, i16_viterbi::viterbi_upper_bound, oprofile::OptimizedProfile,
+        i8_msv, i16_msv, i16_viterbi::viterbi_upper_bound, int_msv, oprofile::OptimizedProfile,
     },
     test_helpers::{hmm_sample, random_digital_seq},
 };
@@ -146,8 +146,14 @@ fn filters_match_scalar_recurrences_across_stripe_boundaries() {
 fn integer_bounds_are_never_below_the_exact_scores_and_stay_tight() {
     let alphabet = Alphabet::amino();
     let background = BackgroundModel::new(&alphabet);
-    // (comparisons, summed excess in nats) for MSV and Viterbi.
-    let mut tightness = [(0usize, 0.0f64); 2];
+    // (comparisons, summed excess in nats) for MSV, Viterbi and the coarse
+    // eight-bit MSV bound.
+    let mut tightness = [(0usize, 0.0f64); 3];
+    // The eight-bit bound rounds each emission up by up to a twelfth of a
+    // nat, so it may sit a few nats above the exact score on long diagonals.
+    let max_excess = [1.5f32, 1.5, 6.0];
+    let max_mean_excess = [0.3f64, 0.3, 2.0];
+    let mut lower_bounds = 0usize;
     for seed in [0, 1, 17, 42, 1234] {
         let mut rng = XorShift64::new(seed);
         for m in [1, 2, 7, 8, 9, 16, 17, 64, 100, 257, 600] {
@@ -198,14 +204,106 @@ fn integer_bounds_are_never_below_the_exact_scores_and_stay_tight() {
                         (
                             "MSV",
                             msv_filter_f32(seq, l, &optimized),
-                            msv_upper_bound(seq, l, &optimized),
+                            i16_msv::msv_upper_bound(seq, l, &optimized),
                         ),
                         (
                             "Viterbi",
                             viterbi_filter_f32(seq, l, &optimized),
                             viterbi_upper_bound(seq, l, &optimized),
                         ),
+                        (
+                            "MSV (8-bit)",
+                            msv_filter_f32(seq, l, &optimized),
+                            i8_msv::msv_upper_bound(seq, l, &optimized),
+                        ),
                     ];
+                    // The 16-bit bound restricted to any one block, started
+                    // from the 8-bit pass's recorded row, must still bound the
+                    // exact score from above.
+                    let mut blocks = int_msv::Blocks::default();
+                    let coarse = i8_msv::msv_upper_bound_with(
+                        seq,
+                        l,
+                        &optimized,
+                        &mut Vec::new(),
+                        Some(&mut blocks),
+                    );
+                    assert_eq!(blocks.bounds.len(), l.div_ceil(int_msv::BLOCK_ROWS));
+                    assert_eq!(
+                        blocks
+                            .bounds
+                            .iter()
+                            .copied()
+                            .fold(f32::NEG_INFINITY, f32::max),
+                        coarse,
+                        "block bounds do not combine to the whole bound: seed={seed}, M={m}, L={l}"
+                    );
+                    if !blocks.saturated {
+                        let exact = msv_filter_f32(seq, l, &optimized);
+                        for block in 0..blocks.bounds.len() {
+                            let within = i16_msv::msv_upper_bound_within(
+                                seq,
+                                l,
+                                &optimized,
+                                &mut Vec::new(),
+                                &blocks,
+                                1 << block,
+                            );
+                            assert!(
+                                within >= exact,
+                                "MSV within block {block} {kind}: seed={seed}, M={m}, L={l}: bound {within} < exact {exact}"
+                            );
+                        }
+                    }
+                    // The lower bounds must never exceed the exact score, and
+                    // the 16-bit one must settle most decisions, so it stays
+                    // close as well. An infinite lower bound reports saturation:
+                    // the best segment then stands at least as high above the
+                    // begin state as the cells can count.
+                    let exact = msv_filter_f32(seq, l, &optimized);
+                    let lf = l as f64;
+                    let (tloop, tmove) = ((lf / (lf + 3.0)).ln(), (3.0 / (lf + 3.0)).ln());
+                    let segment_costs = (2.0 / (m as f64 * (m as f64 + 1.0))).ln()
+                        + 0.5f64.ln()
+                        + 2.0 * tmove
+                        + lf * tloop;
+                    for (name, lower, slack, cells) in [
+                        (
+                            "MSV lower",
+                            i16_msv::msv_lower_bound(seq, l, &optimized),
+                            1.5f32,
+                            65534.0 / i16_msv::SCALE,
+                        ),
+                        (
+                            "MSV lower (8-bit)",
+                            i8_msv::msv_lower_bound(seq, l, &optimized),
+                            6.0,
+                            254.0 / optimized.msv_scale8,
+                        ),
+                    ] {
+                        let Some(lower) = lower else { continue };
+                        if lower.is_infinite() {
+                            let at_saturation = (cells + segment_costs - 0.1) as f32;
+                            assert!(
+                                exact >= at_saturation,
+                                "{name} {kind}: seed={seed}, M={m}, L={l}: saturated at exact {exact}, below {at_saturation}"
+                            );
+                            continue;
+                        }
+                        assert!(
+                            lower <= exact,
+                            "{name} {kind}: seed={seed}, M={m}, L={l}: bound {lower} > exact {exact}"
+                        );
+                        if kind == "random" {
+                            assert!(
+                                exact - lower < slack,
+                                "{name} {kind}: seed={seed}, M={m}, L={l}: bound {lower} far below {exact}"
+                            );
+                            if slack < 2.0 {
+                                lower_bounds += 1;
+                            }
+                        }
+                    }
                     for (index, (name, exact, bound)) in checks.into_iter().enumerate() {
                         assert!(
                             bound >= exact,
@@ -215,7 +313,7 @@ fn integer_bounds_are_never_below_the_exact_scores_and_stay_tight() {
                             tightness[index].0 += 1;
                             tightness[index].1 += f64::from(bound - exact);
                             assert!(
-                                bound - exact < 1.5,
+                                bound - exact < max_excess[index],
                                 "{name} {kind}: seed={seed}, M={m}, L={l}: bound {bound} far above {exact}"
                             );
                         }
@@ -224,9 +322,21 @@ fn integer_bounds_are_never_below_the_exact_scores_and_stay_tight() {
             }
         }
     }
-    for (name, (compared, total_excess)) in ["MSV", "Viterbi"].into_iter().zip(tightness) {
+    assert!(
+        lower_bounds > 200,
+        "only {lower_bounds} finite MSV lower bounds"
+    );
+    for (index, (name, (compared, total_excess))) in ["MSV", "Viterbi", "MSV (8-bit)"]
+        .into_iter()
+        .zip(tightness)
+        .enumerate()
+    {
         assert!(compared > 300, "{name}: only {compared} finite bounds");
         let mean_excess = total_excess / compared as f64;
-        assert!(mean_excess < 0.3, "{name}: mean excess {mean_excess} nats");
+        eprintln!("{name}: mean excess {mean_excess:.3} nats over {compared} bounds");
+        assert!(
+            mean_excess < max_mean_excess[index],
+            "{name}: mean excess {mean_excess} nats"
+        );
     }
 }

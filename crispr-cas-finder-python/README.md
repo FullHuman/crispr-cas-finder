@@ -114,7 +114,7 @@ The interpreter lock is released while the analysis runs.
 | `seq_id` | `str` | Source sequence ID |
 | `start` | `int` | 1-based array start |
 | `end` | `int` | 1-based array end (inclusive) |
-| `consensus_repeat` | `str` | Consensus direct repeat sequence |
+| `consensus_repeat` | `str` | Consensus direct repeat sequence, in uppercase |
 | `repeats` | `list[Repeat]` | All direct repeats |
 | `spacers` | `list[Spacer]` | All spacers |
 | `evidence_level` | `int` | 1 (at most 3 spacers) to 4 (conserved repeats, dissimilar spacers) |

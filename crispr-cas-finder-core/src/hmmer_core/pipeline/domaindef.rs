@@ -3,6 +3,7 @@
 // Port of src/p7_domaindef.c
 
 use crate::hmmer_core::domain::Domain;
+use crate::hmmer_core::dynamic_programming::odds_decode::OddsTables;
 use crate::hmmer_core::dynamic_programming::optimal_accuracy::OaDecoder;
 use crate::hmmer_core::dynamic_programming::simd::oprofile::OptimizedProfile;
 use crate::hmmer_core::profile::Profile;
@@ -38,6 +39,9 @@ pub struct DomainConfig {
     pub min_posterior: f32,
     pub min_endpointp: f32,
     pub do_reseeding: bool,
+    /// Decode posteriors with the log-space reference decoder rather than in
+    /// probability space (see `odds_decode`).
+    pub exact_decode: bool,
 }
 
 impl Default for DomainConfig {
@@ -53,6 +57,7 @@ impl Default for DomainConfig {
             min_posterior: 0.25,
             min_endpointp: 0.02,
             do_reseeding: true,
+            exact_decode: false,
         }
     }
 }
@@ -103,6 +108,7 @@ impl DomainWorkspace {
     /// reconfigures them per-envelope (save/restore). No inner function
     /// receives mutable profile or OM references.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     pub fn by_posterior_heuristics(
         &mut self,
         config: &DomainConfig,
@@ -111,6 +117,7 @@ impl DomainWorkspace {
         profile: &mut Profile,
         buf: &mut RescoringBuffers,
         om: &mut OptimizedProfile,
+        odds: &OddsTables,
     ) -> DomainResult {
         self.null2_scores.fill(0.0);
 
@@ -142,8 +149,18 @@ impl DomainWorkspace {
             om.reconfig_unihit(save_l);
 
             // Inner functions receive &Profile and &OptimizedProfile (immutable)
-            let domain =
-                rescore_isolated_domain(digital_sequence, profile, region_i, region_j, buf, om);
+            let domain = rescore_isolated_domain(
+                digital_sequence,
+                profile,
+                region_i,
+                region_j,
+                buf,
+                om,
+                config
+                    .exact_decode
+                    .then_some(())
+                    .map_or(Some(odds), |()| None),
+            );
 
             // Restore profile + OM state
             if save_nj > 0.0 {
@@ -268,6 +285,7 @@ fn rescore_isolated_domain(
     j: usize,
     buf: &mut RescoringBuffers,
     om: &OptimizedProfile,
+    odds: Option<&OddsTables>,
 ) -> Result<(Domain, Vec<f32>), DomainRescoreFailure> {
     use crate::hmmer_core::dynamic_programming::simd::forward_filter;
 
@@ -276,13 +294,23 @@ fn rescore_isolated_domain(
 
     let forward_score = forward_filter::forward_filter(dsq_sub, domain_length, om).score;
 
-    crate::hmmer_core::forward_backward::backward_decode_log_space(
-        dsq_sub,
-        profile,
-        forward_score,
-        &mut buf.posterior_matrix,
-        None,
-    )
+    match odds {
+        Some(odds) => crate::hmmer_core::dynamic_programming::odds_decode::decode_odds_space(
+            dsq_sub,
+            profile,
+            odds,
+            forward_score,
+            &mut buf.posterior_matrix,
+            None,
+        ),
+        None => crate::hmmer_core::forward_backward::backward_decode_log_space(
+            dsq_sub,
+            profile,
+            forward_score,
+            &mut buf.posterior_matrix,
+            None,
+        ),
+    }
     .map_err(|_| DomainRescoreFailure::Backward)?;
 
     finish_domain_scoring(

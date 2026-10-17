@@ -8,7 +8,7 @@ pub struct Repeat {
     pub start: usize,
     /// 1-based end position on the sequence (inclusive).
     pub end: usize,
-    /// DNA sequence of the repeat.
+    /// DNA sequence of the repeat, in the case the input has it in.
     pub sequence: String,
 }
 
@@ -19,7 +19,7 @@ pub struct Spacer {
     pub start: usize,
     /// 1-based end position on the sequence (inclusive).
     pub end: usize,
-    /// DNA sequence of the spacer.
+    /// DNA sequence of the spacer, in the case the input has it in.
     pub sequence: String,
 }
 
@@ -56,7 +56,7 @@ pub struct CrisprArray {
     pub start: usize,
     /// 1-based end position of the last repeat (inclusive).
     pub end: usize,
-    /// Consensus direct repeat sequence chosen for this array.
+    /// Consensus direct repeat sequence chosen for this array, in uppercase.
     pub consensus_repeat: String,
     /// Ordered list of direct repeats.
     pub repeats: Vec<Repeat>,
@@ -103,6 +103,8 @@ pub struct DetectionParams {
     pub repeat_mismatch_percent: f64,
     pub truncated_repeat_mismatch_percent: f64,
     pub no_mismatch: bool,
+    /// Shortest spacer of an array, as a multiple of the length of its
+    /// repeat. A spacer has at least one base, also with a ratio of 0.
     pub min_spacer_to_repeat_ratio: f64,
     pub max_spacer_to_repeat_ratio: f64,
     pub spacer_similarity_threshold: f64,
@@ -275,6 +277,10 @@ pub struct CasFinderConfig {
     pub cas_models_dir: Option<std::path::PathBuf>,
     /// Directory containing CAS HMM profile files.
     pub cas_profiles_dir: Option<std::path::PathBuf>,
+    /// Decide the HMM filters with exact single-precision scores instead of
+    /// integer bounds, and decode posteriors in log space; slower, and the
+    /// behaviour of versions before the fast pipeline.
+    pub exact_filters: bool,
 }
 
 impl Default for CasFinderConfig {
@@ -292,6 +298,7 @@ impl Default for CasFinderConfig {
             min_best_hit_score: 25.0,
             cas_models_dir: None,
             cas_profiles_dir: None,
+            exact_filters: false,
         }
     }
 }
