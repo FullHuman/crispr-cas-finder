@@ -210,6 +210,11 @@ pub struct Cli {
     topology: TopologyArgument,
     #[arg(long = "min-cas-score", value_name = "FLOAT", default_value_t = 25.0)]
     min_cas_score: f64,
+    #[arg(
+        long,
+        help = "Decide the HMM filters with exact scores and decode in log space, as before the fast pipeline (slower)"
+    )]
+    exact_filters: bool,
     #[arg(long = "cas-models-dir", value_name = "DIR")]
     #[arg(
         help = "Directory of Cas model definitions, or a MacSyFinder model package such as CasFinder 3"
@@ -346,6 +351,7 @@ impl Cli {
                 min_best_hit_score: self.min_cas_score,
                 cas_models_dir: Some(cas_models_dir),
                 cas_profiles_dir: Some(cas_profiles_dir),
+                exact_filters: self.exact_filters,
             },
             _bundled_data: bundled_data,
         })

@@ -20,6 +20,7 @@ pub struct ForwardResult {
 /// Run the Forward filter (parser mode) on a digitized sequence.
 ///
 /// `dsq` is 0-indexed: residues at dsq[0..l].
+#[inline(never)]
 pub fn forward_filter(dsq: &[u8], l: usize, om: &OptimizedProfile) -> ForwardResult {
     let q = om.q4;
     let zero_v = f32x4::splat(0.0);

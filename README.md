@@ -103,6 +103,9 @@ crispr-cas-finder -i genome.fasta --cas --locus-distance 20000
 
 # Metagenomic mode for every sequence
 crispr-cas-finder -i metagenome.fasta --metagenome --cas
+
+# Decide the HMM filters with exact scores (slower; see LIMITATIONS.md)
+crispr-cas-finder -i genome.fasta --cas --exact-filters
 ```
 
 Run `crispr-cas-finder --help` for every option. Most CRISPRCasFinder option

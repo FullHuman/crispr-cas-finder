@@ -277,6 +277,10 @@ pub struct CasFinderConfig {
     pub cas_models_dir: Option<std::path::PathBuf>,
     /// Directory containing CAS HMM profile files.
     pub cas_profiles_dir: Option<std::path::PathBuf>,
+    /// Decide the HMM filters with exact single-precision scores instead of
+    /// integer bounds, and decode posteriors in log space; slower, and the
+    /// behaviour of versions before the fast pipeline.
+    pub exact_filters: bool,
 }
 
 impl Default for CasFinderConfig {
@@ -294,6 +298,7 @@ impl Default for CasFinderConfig {
             min_best_hit_score: 25.0,
             cas_models_dir: None,
             cas_profiles_dir: None,
+            exact_filters: false,
         }
     }
 }

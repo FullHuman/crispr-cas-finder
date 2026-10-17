@@ -53,6 +53,9 @@ pub struct HitFiltering {
     pub coverage_profile: f64,
     /// Use the profile's gathering (GA) bit-score cutoffs when it has them.
     pub cut_ga: bool,
+    /// Decide the MSV and Viterbi filters with their exact single-precision
+    /// scores rather than with integer bounds (see `FilterPolicy::exact`).
+    pub exact_filters: bool,
 }
 
 impl Default for HitFiltering {
@@ -63,6 +66,7 @@ impl Default for HitFiltering {
             i_evalue_sel: 0.001,
             coverage_profile: 0.5,
             cut_ga: true,
+            exact_filters: false,
         }
     }
 }

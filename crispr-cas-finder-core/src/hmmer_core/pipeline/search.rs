@@ -9,11 +9,14 @@ use crate::hmmer_core::constants::pipeline::search::{
     MIN_PVALUE_CLAMP, SCORE_LENGTH_PRIOR_OFFSET,
 };
 use crate::hmmer_core::domaindef::{DomainConfig, DomainWorkspace, RescoringBuffers};
+use crate::hmmer_core::dynamic_programming::odds_decode::{self, OddsTables};
 use crate::hmmer_core::dynamic_programming::simd::f32_msv;
 use crate::hmmer_core::dynamic_programming::simd::f32_viterbi;
 use crate::hmmer_core::dynamic_programming::simd::forward_filter as simd_fwd;
+use crate::hmmer_core::dynamic_programming::simd::i8_msv;
 use crate::hmmer_core::dynamic_programming::simd::i16_msv;
 use crate::hmmer_core::dynamic_programming::simd::i16_viterbi;
+use crate::hmmer_core::dynamic_programming::simd::int_msv;
 use crate::hmmer_core::dynamic_programming::simd::oprofile::OptimizedProfile;
 use crate::hmmer_core::errors::HmmerError;
 use crate::hmmer_core::evalues;
@@ -133,6 +136,13 @@ pub struct FilterPolicy {
     pub msv_threshold: f64,
     pub viterbi_threshold: f64,
     pub forward_threshold: f64,
+    /// Decide the MSV and bias filters with the exact single-precision MSV
+    /// score and the Viterbi filter with the exact Viterbi score. Otherwise
+    /// the MSV filters use an 8-bit lower bound on the MSV score, within
+    /// about half a nat of it, and the Viterbi filter its 16-bit upper
+    /// bound: a little less sensitive at the MSV stage, a little more at the
+    /// Viterbi stage, and much faster.
+    pub exact: bool,
 }
 
 impl Default for FilterPolicy {
@@ -140,6 +150,7 @@ impl Default for FilterPolicy {
         Self {
             max_mode: false,
             bias_filter: true,
+            exact: false,
             msv_threshold: DEFAULT_MSV_THRESHOLD,
             viterbi_threshold: DEFAULT_VITERBI_THRESHOLD,
             forward_threshold: DEFAULT_FORWARD_THRESHOLD,
@@ -336,12 +347,16 @@ pub struct SearchTrace {
     pub sequence_length: usize,
     pub null_score: Option<f32>,
     pub bias_filter_score: Option<f32>,
-    /// Exact MSV score. `None` when the integer pre-filter already showed
-    /// that the sequence cannot pass; see `msv_score_bound`.
+    /// Exact MSV score. `None` when the integer bounds alone settled the
+    /// MSV and bias filters; see `msv_score_bound` and `msv_score_lower_bound`.
     pub msv_raw_score: Option<f32>,
-    /// Upper bound on the MSV score from the integer pre-filter, set when
-    /// that bound alone rejected the sequence.
+    /// Upper bound on the MSV score from the integer pre-filters, when they
+    /// ran: infinite when they could not bound it.
     pub msv_score_bound: Option<f32>,
+    /// Lower bound on the MSV score from the integer pre-filters, when known.
+    pub msv_score_lower_bound: Option<f32>,
+    /// Viterbi filter score: exact with `FilterPolicy::exact`, otherwise the
+    /// 16-bit upper bound that decided the filter.
     pub viterbi_raw_score: Option<f32>,
     pub forward_raw_score: Option<f32>,
     pub domain_count: usize,
@@ -409,12 +424,15 @@ impl SearchWorker {
         let mut engine =
             SearchEngine::new(plan.query.profile_template.num_nodes, hints.target_length);
         engine.do_max = plan.filters.max_mode;
+        engine.exact = plan.filters.exact;
         engine.do_biasfilter = plan.filters.bias_filter && !plan.filters.max_mode;
         engine.msv_threshold = plan.filters.msv_threshold;
         engine.viterbi_threshold = plan.filters.viterbi_threshold;
         engine.forward_threshold = plan.filters.forward_threshold;
         engine.thresholds.by_e = false;
         engine.domain_config = plan.domain_config.clone();
+        engine.domain_config.exact_decode = plan.filters.exact;
+        engine.odds_tables = OddsTables::new(&plan.query.profile_template);
         engine.oprofile = Some(plan.query.optimized_template.clone());
 
         let mut profile = plan.query.profile_template.clone();
@@ -529,31 +547,57 @@ impl<'w, 's> TargetRun<'w, 's, Prepared> {
         })
     }
 
-    fn run_filters(mut self) -> ControlFlow<SearchReport, TargetRun<'w, 's, PassedFilters>> {
-        let om = self.worker.engine.oprofile.as_ref().unwrap();
+    /// The P-value of an MSV score `raw`, in nats, against `reference`: the
+    /// null score for the MSV filter, the bias score for the bias filter.
+    fn msv_pvalue_of(&self, raw: f32, reference: f32) -> f64 {
+        SearchEngine::msv_pvalue(&self.worker.state.profile, (raw - reference) / LOG2)
+    }
 
-        // Cheap over-estimate first: a sequence whose upper bound fails the
-        // MSV threshold fails the exact filter too.
-        if !self.worker.engine.do_max {
-            let bound = i16_msv::msv_upper_bound(&self.sequence.residues, self.sequence_length, om);
-            if bound.is_finite() {
-                let seq_score_bound = (bound - self.null_score) / LOG2;
-                let p_bound = SearchEngine::msv_pvalue(&self.worker.state.profile, seq_score_bound);
-                if p_bound > self.worker.engine.msv_threshold {
-                    self.trace.msv_score_bound = Some(bound);
-                    return ControlFlow::Break(self.trace.into_filtered_report(FilterReason::Msv));
-                }
-            }
+    /// Whether an upper bound on the MSV score already misses the MSV
+    /// threshold. An infinite bound means no bound is known.
+    fn msv_bound_fails(&self, bound: f32) -> bool {
+        bound.is_finite()
+            && self.msv_pvalue_of(bound, self.null_score) > self.worker.engine.msv_threshold
+    }
+
+    /// The exact MSV score, computed on first use.
+    fn exact_msv_score(&mut self) -> f32 {
+        if let Some(score) = self.trace.msv_raw_score {
+            return score;
         }
+        let om = self.worker.engine.oprofile.as_ref().unwrap();
+        let score = f32_msv::msv_filter_f32_with(
+            &self.sequence.residues,
+            self.sequence_length,
+            om,
+            &mut self.worker.engine.msv_row,
+        );
+        self.trace.msv_raw_score = Some(score);
+        score
+    }
 
-        let msv_raw_score =
-            f32_msv::msv_filter_f32(&self.sequence.residues, self.sequence_length, om);
-
-        self.trace.msv_raw_score = Some(msv_raw_score);
-
-        let seq_score_msv = (msv_raw_score - self.null_score) / LOG2;
-        let p_msv = SearchEngine::msv_pvalue(&self.worker.state.profile, seq_score_msv);
-        if !self.worker.engine.do_max && p_msv > self.worker.engine.msv_threshold {
+    /// The MSV and bias filters decided by the 8-bit lower bound on the MSV
+    /// score, which stands in for the score itself: a sequence passes when
+    /// the bound passes. Then the Viterbi and forward filters as usual.
+    fn run_fast_msv_filters(
+        mut self,
+    ) -> ControlFlow<SearchReport, TargetRun<'w, 's, PassedFilters>> {
+        let msv_threshold = self.worker.engine.msv_threshold;
+        let om = self.worker.engine.oprofile.as_ref().unwrap();
+        let lower_bound = i8_msv::msv_lower_bound_with(
+            &self.sequence.residues,
+            self.sequence_length,
+            om,
+            &mut self.worker.engine.msv_bound_row8,
+        );
+        self.trace.msv_score_lower_bound = lower_bound;
+        let Some(msv_score) = lower_bound else {
+            // No cell rose above the begin state: far below any threshold.
+            return ControlFlow::Break(self.trace.into_filtered_report(FilterReason::Msv));
+        };
+        // A saturated score passes both filters, as in HMMER: the sequence
+        // scores higher than the cells can count.
+        if msv_score.is_finite() && self.msv_pvalue_of(msv_score, self.null_score) > msv_threshold {
             return ControlFlow::Break(self.trace.into_filtered_report(FilterReason::Msv));
         }
         self.worker.engine.stats.sequences_past_msv += 1;
@@ -566,10 +610,7 @@ impl<'w, 's> TargetRun<'w, 's, Prepared> {
                 .background
                 .filter_score(&self.sequence.residues, self.sequence_length);
             self.trace.bias_filter_score = Some(score);
-
-            let seq_score_bias = (msv_raw_score - score) / LOG2;
-            let p_bias = SearchEngine::msv_pvalue(&self.worker.state.profile, seq_score_bias);
-            if p_bias > self.worker.engine.msv_threshold {
+            if msv_score.is_finite() && self.msv_pvalue_of(msv_score, score) > msv_threshold {
                 return ControlFlow::Break(self.trace.into_filtered_report(FilterReason::Bias));
             }
             score
@@ -581,7 +622,14 @@ impl<'w, 's> TargetRun<'w, 's, Prepared> {
         }
         self.worker.engine.stats.sequences_past_bias += 1;
         self.worker.engine.stats.residues_past_bias += self.sequence_length as u64;
+        self.run_late_filters(filter_score)
+    }
 
+    /// The Viterbi and forward filters.
+    fn run_late_filters(
+        mut self,
+        filter_score: f32,
+    ) -> ControlFlow<SearchReport, TargetRun<'w, 's, PassedFilters>> {
         let Some(viterbi_raw_score) = self.worker.engine.run_viterbi_filter(
             &self.worker.state.profile,
             &self.sequence.residues,
@@ -613,6 +661,142 @@ impl<'w, 's> TargetRun<'w, 's, Prepared> {
             trace: self.trace,
             _phase: PhantomData,
         })
+    }
+
+    fn run_filters(mut self) -> ControlFlow<SearchReport, TargetRun<'w, 's, PassedFilters>> {
+        let do_max = self.worker.engine.do_max;
+        let msv_threshold = self.worker.engine.msv_threshold;
+
+        // Cheap bounds first, the coarsest one leading: a sequence whose upper
+        // bound fails the MSV threshold fails the exact filter too, and one
+        // whose lower bound passes it passes the exact filter too. The exact
+        // score is only computed when the bounds leave a decision open.
+        let mut lower_bound = None;
+        let mut upper_bound = f32::INFINITY;
+        // A windowed upper bound carries the coarse bounds of the blocks it
+        // skipped; the whole-sequence bound is tighter when it matters.
+        let mut upper_bound_is_windowed = false;
+        if !do_max && !self.worker.engine.exact {
+            return self.run_fast_msv_filters();
+        }
+        if !do_max {
+            let om = self.worker.engine.oprofile.as_ref().unwrap();
+            let bound = i8_msv::msv_upper_bound_with(
+                &self.sequence.residues,
+                self.sequence_length,
+                om,
+                &mut self.worker.engine.msv_bound_row8,
+                Some(&mut self.worker.engine.msv_blocks8),
+            );
+            if self.msv_bound_fails(bound) {
+                self.trace.msv_score_bound = Some(bound);
+                return ControlFlow::Break(self.trace.into_filtered_report(FilterReason::Msv));
+            }
+            // The finer bound only needs the blocks whose coarse bound passes,
+            // unless the coarse pass saturated or the sequence has more blocks
+            // than the selection can name.
+            let blocks = &self.worker.engine.msv_blocks8;
+            let mut selected = 0u64;
+            if !blocks.saturated && blocks.bounds.len() <= u64::BITS as usize {
+                for (block, &block_bound) in blocks.bounds.iter().enumerate() {
+                    if !self.msv_bound_fails(block_bound) {
+                        selected |= 1 << block;
+                    }
+                }
+            }
+            let bound = if selected == 0 {
+                i16_msv::msv_upper_bound_with(
+                    &self.sequence.residues,
+                    self.sequence_length,
+                    om,
+                    &mut self.worker.engine.msv_bound_row16,
+                )
+            } else {
+                upper_bound_is_windowed = true;
+                i16_msv::msv_upper_bound_within(
+                    &self.sequence.residues,
+                    self.sequence_length,
+                    om,
+                    &mut self.worker.engine.msv_bound_row16,
+                    &self.worker.engine.msv_blocks8,
+                    selected,
+                )
+            };
+            if self.msv_bound_fails(bound) {
+                self.trace.msv_score_bound = Some(bound);
+                return ControlFlow::Break(self.trace.into_filtered_report(FilterReason::Msv));
+            }
+            upper_bound = bound;
+            // A saturated lower bound says nothing exact; the exact score then
+            // decides.
+            lower_bound = i16_msv::msv_lower_bound_with(
+                &self.sequence.residues,
+                self.sequence_length,
+                om,
+                &mut self.worker.engine.msv_bound_row16,
+            )
+            .filter(|bound| bound.is_finite());
+            self.trace.msv_score_bound = Some(upper_bound);
+            self.trace.msv_score_lower_bound = lower_bound;
+        }
+
+        let null_score = self.null_score;
+        let passes_msv = !do_max
+            && lower_bound
+                .is_some_and(|lower| self.msv_pvalue_of(lower, null_score) <= msv_threshold);
+        if !passes_msv {
+            let msv_raw_score = self.exact_msv_score();
+            let p_msv = self.msv_pvalue_of(msv_raw_score, null_score);
+            if !do_max && p_msv > msv_threshold {
+                return ControlFlow::Break(self.trace.into_filtered_report(FilterReason::Msv));
+            }
+        }
+        self.worker.engine.stats.sequences_past_msv += 1;
+        self.worker.engine.stats.residues_past_msv += self.sequence_length as u64;
+
+        let filter_score = if self.worker.engine.do_biasfilter {
+            let score = self
+                .worker
+                .state
+                .background
+                .filter_score(&self.sequence.residues, self.sequence_length);
+            self.trace.bias_filter_score = Some(score);
+
+            let passes_bias =
+                lower_bound.is_some_and(|lower| self.msv_pvalue_of(lower, score) <= msv_threshold);
+            if !passes_bias {
+                let mut fails_bias = upper_bound.is_finite()
+                    && self.msv_pvalue_of(upper_bound, score) > msv_threshold;
+                if !fails_bias && upper_bound_is_windowed {
+                    let om = self.worker.engine.oprofile.as_ref().unwrap();
+                    upper_bound = i16_msv::msv_upper_bound_with(
+                        &self.sequence.residues,
+                        self.sequence_length,
+                        om,
+                        &mut self.worker.engine.msv_bound_row16,
+                    );
+                    self.trace.msv_score_bound = Some(upper_bound);
+                    fails_bias = upper_bound.is_finite()
+                        && self.msv_pvalue_of(upper_bound, score) > msv_threshold;
+                }
+                if fails_bias {
+                    return ControlFlow::Break(self.trace.into_filtered_report(FilterReason::Bias));
+                }
+                let msv_raw_score = self.exact_msv_score();
+                if self.msv_pvalue_of(msv_raw_score, score) > msv_threshold {
+                    return ControlFlow::Break(self.trace.into_filtered_report(FilterReason::Bias));
+                }
+            }
+            score
+        } else {
+            self.null_score
+        };
+        if !filter_score.is_finite() {
+            return ControlFlow::Break(self.trace.into_filtered_report(FilterReason::Bias));
+        }
+        self.worker.engine.stats.sequences_past_bias += 1;
+        self.worker.engine.stats.residues_past_bias += self.sequence_length as u64;
+        self.run_late_filters(filter_score)
     }
 }
 
@@ -721,6 +905,7 @@ struct SearchEngine {
 
     // Filter thresholds
     do_max: bool,
+    exact: bool,
     do_biasfilter: bool,
     msv_threshold: f64,     // MSV filter threshold (default 0.02)
     viterbi_threshold: f64, // Viterbi filter threshold (default 1e-3)
@@ -743,6 +928,19 @@ struct SearchEngine {
 
     // SIMD-optimized profile (built lazily from the generic profile)
     oprofile: Option<OptimizedProfile>,
+
+    // Emission and transition odds for probability-space decoding
+    odds_tables: OddsTables,
+
+    // DP rows of the integer over-estimates, reused across sequences
+    msv_bound_row8: Vec<i8_msv::I8x16>,
+    msv_blocks8: int_msv::Blocks<i8, { i8_msv::LANES }>,
+    msv_bound_row16: Vec<i16_msv::I16x8>,
+    viterbi_bound_rows: i16_viterbi::Rows,
+
+    // DP rows of the exact MSV and Viterbi filters, reused across sequences
+    msv_row: Vec<f32_msv::F32x4>,
+    viterbi_rows: f32_viterbi::Rows,
 }
 
 impl SearchEngine {
@@ -752,6 +950,7 @@ impl SearchEngine {
             thresholds: Thresholds::default(),
             search_space: 0.0,
             do_max: false,
+            exact: true,
             do_biasfilter: true,
             msv_threshold: DEFAULT_MSV_THRESHOLD,
             viterbi_threshold: DEFAULT_VITERBI_THRESHOLD,
@@ -762,6 +961,13 @@ impl SearchEngine {
             domain_config: DomainConfig::default(),
             domain_workspace: DomainWorkspace::new(),
             oprofile: None,
+            odds_tables: OddsTables::default(),
+            msv_bound_row8: Vec::new(),
+            msv_blocks8: int_msv::Blocks::default(),
+            msv_bound_row16: Vec::new(),
+            viterbi_bound_rows: i16_viterbi::Rows::default(),
+            msv_row: Vec::new(),
+            viterbi_rows: f32_viterbi::Rows::default(),
         }
     }
 
@@ -931,15 +1137,22 @@ impl SearchEngine {
         digital_sequence: &[u8],
         sequence_length: usize,
     ) -> f32 {
-        // Set the target length model on both background and profile.
+        // Set the target length model on both background and profile. Targets
+        // come sorted by length, so consecutive ones often share it; domain
+        // rescoring restores the multihit length model it found, so a profile
+        // configured for this length stays configured.
         background.set_length(sequence_length);
-        crate::hmmer_core::modelconfig::reconfigure_length(profile, sequence_length);
+        if profile.target_length != sequence_length {
+            crate::hmmer_core::modelconfig::reconfigure_length(profile, sequence_length);
+        }
 
         // Build or update the SIMD-optimized profile (lazy, reused across sequences).
         let om = self
             .oprofile
             .get_or_insert_with(|| OptimizedProfile::from_profile(profile));
-        om.reconfigure_length(sequence_length);
+        if om.l != sequence_length {
+            om.reconfigure_length(sequence_length);
+        }
 
         background.null_one(digital_sequence, sequence_length)
     }
@@ -955,16 +1168,31 @@ impl SearchEngine {
         // Cheap over-estimate first: a sequence whose upper bound fails the
         // Viterbi threshold fails the exact filter too.
         if !self.do_max {
-            let bound = i16_viterbi::viterbi_upper_bound(digital_sequence, sequence_length, om);
+            let bound = i16_viterbi::viterbi_upper_bound_with(
+                digital_sequence,
+                sequence_length,
+                om,
+                &mut self.viterbi_bound_rows,
+            );
             if bound.is_finite() {
                 let p_bound = Self::viterbi_pvalue(profile, (bound - null_score) / LOG2);
                 if p_bound > self.viterbi_threshold {
                     return None;
                 }
+                if !self.exact {
+                    // The bound stands in for the score: the sequence passes.
+                    self.stats.sequences_past_viterbi += 1;
+                    self.stats.residues_past_viterbi += sequence_length as u64;
+                    return Some(bound);
+                }
             }
         }
-        let viterbi_raw_score =
-            f32_viterbi::viterbi_filter_f32(digital_sequence, sequence_length, om);
+        let viterbi_raw_score = f32_viterbi::viterbi_filter_f32_with(
+            digital_sequence,
+            sequence_length,
+            om,
+            &mut self.viterbi_rows,
+        );
 
         let seq_score_vit = (viterbi_raw_score - null_score) / LOG2;
         let p_vit = Self::viterbi_pvalue(profile, seq_score_vit);
@@ -1010,15 +1238,25 @@ impl SearchEngine {
 
         self.posterior_matrix
             .resize(profile.num_nodes, sequence_length)?;
-        if forward_backward::backward_decode_log_space(
-            digital_sequence,
-            profile,
-            forward_raw_score,
-            &mut self.posterior_matrix,
-            Some(&mut self.domain_workspace),
-        )
-        .is_err()
-        {
+        let decoded = if self.domain_config.exact_decode {
+            forward_backward::backward_decode_log_space(
+                digital_sequence,
+                profile,
+                forward_raw_score,
+                &mut self.posterior_matrix,
+                Some(&mut self.domain_workspace),
+            )
+        } else {
+            odds_decode::decode_odds_space(
+                digital_sequence,
+                profile,
+                &self.odds_tables,
+                forward_raw_score,
+                &mut self.posterior_matrix,
+                Some(&mut self.domain_workspace),
+            )
+        };
+        if decoded.is_err() {
             return Ok(None);
         }
 
@@ -1030,6 +1268,7 @@ impl SearchEngine {
             profile,
             &mut self.rescore_buf,
             &mut om,
+            &self.odds_tables,
         );
         self.oprofile = Some(om);
 
@@ -1199,7 +1438,12 @@ mod tests {
         let report = worker.search(&sequence).unwrap();
         assert_eq!(report.trace.sequence_length, 32);
         assert!(report.trace.null_score.is_some());
-        assert!(report.trace.msv_raw_score.is_some() || report.trace.msv_score_bound.is_some());
+        assert!(
+            report.trace.msv_raw_score.is_some()
+                || report.trace.msv_score_bound.is_some()
+                || report.trace.msv_score_lower_bound.is_some()
+                || report.trace.filter_reason == Some(FilterReason::Msv)
+        );
         match report.outcome {
             SearchOutcome::Filtered(_) | SearchOutcome::Hit(_) => {}
         }

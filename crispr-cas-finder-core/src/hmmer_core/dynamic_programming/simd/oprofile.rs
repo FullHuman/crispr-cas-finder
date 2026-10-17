@@ -9,7 +9,8 @@
 //   Forward: f32  in 4-lane vectors  (Q4  = max(2, ceil((M-1)/4)  + 1)) — odds space
 //   Log:     f32  in 4-lane vectors  (Q4)  — log-space for MSV/Viterbi filters
 
-use super::{i16_msv, i16_viterbi};
+use super::int_msv::Rounding;
+use super::{i8_msv, i16_msv, i16_viterbi, int_msv};
 use crate::hmmer_core::config::*;
 use crate::hmmer_core::profile::Profile;
 
@@ -62,10 +63,22 @@ pub struct OptimizedProfile {
     pub rlv: Vec<Vec<f32>>, // [kp][q4 * 4] — match emission log-scores
     pub tlv: Vec<f32>,      // [(7*q4 + q4) * 4] — transition log-scores
 
+    // --- i8x16 MSV over-estimate (see i8_msv.rs) ---
+    pub q16: usize,
+    pub msv_scale8: f64,                   // integer units per nat
+    pub msv_units8: Vec<i8>,               // [kp * q16 * 16] — match emissions, rounded up
+    pub msv_units8_plus_one: Vec<i8>,      // the same, one unit higher
+    pub msv_units8_down: Vec<i8>,          // match emissions rounded down, for the lower bound
+    pub msv_units8_down_plus_one: Vec<i8>, // the same, one unit higher
+
     // --- i16x8 MSV over-estimate (see i16_msv.rs) ---
     pub q8: usize,
+    pub ssv_units: Vec<i16>, // [kp * q8 * 8] — match emissions at i16_msv::SCALE, rounded up
+    pub ssv_units_down: Vec<i16>, // the same, rounded down, for the lower bound
+
+    // --- i16x8 Viterbi over-estimate (see i16_viterbi.rs) ---
     pub msv_scale: f64,           // integer units per nat
-    pub msv_units: Vec<Vec<i16>>, // [kp][q8 * 8] — match emissions, rounded up
+    pub msv_units: Vec<i16>,      // [kp * q8 * 8] — match emissions, rounded up
     pub vit_units: Vec<i16>,      // [(7*q8 + q8) * 8] — transitions, rounded up
     pub vit_min_begin_units: i16, // smallest finite begin transition
 
@@ -91,9 +104,17 @@ impl OptimizedProfile {
             xf: [[0.0f32; 2]; NUM_XSTATES],
             rlv: vec![vec![f32::NEG_INFINITY; q4 * 4]; kp],
             tlv: vec![f32::NEG_INFINITY; (NTSC_PER_Q * q4 + q4) * 4],
+            q16: i8_msv::vector_count(m),
+            msv_scale8: i8_msv::SCALE,
+            msv_units8: Vec::new(),
+            msv_units8_plus_one: Vec::new(),
+            msv_units8_down: Vec::new(),
+            msv_units8_down_plus_one: Vec::new(),
             q8: i16_msv::vector_count(m),
+            ssv_units: Vec::new(),
+            ssv_units_down: Vec::new(),
             msv_scale: i16_msv::scale_for(m),
-            msv_units: vec![vec![i16::MIN; i16_msv::vector_count(m) * i16_msv::LANES]; kp],
+            msv_units: vec![i16::MIN; kp * i16_msv::vector_count(m) * i16_msv::LANES],
             vit_units: vec![i16::MIN; (NTSC_PER_Q + 1) * i16_msv::vector_count(m) * i16_msv::LANES],
             vit_min_begin_units: 0,
             ev_params: [EV_PARAM_UNSET; NUM_EV_PARAMS],
@@ -118,6 +139,15 @@ impl OptimizedProfile {
         vit_units_conversion(gm, &mut om);
 
         om
+    }
+
+    /// Striped 16-bit match emissions of `residue` (see i16_msv.rs).
+    #[inline]
+    pub fn msv_units_row(&self, residue: u8) -> &[i16] {
+        let xi = residue as usize;
+        let xi = if xi < self.kp { xi } else { 0 };
+        let width = self.q8 * i16_msv::LANES;
+        &self.msv_units[xi * width..][..width]
     }
 
     /// Reconfigure length model for target length L.
@@ -273,17 +303,29 @@ fn msv_units_conversion(gm: &Profile, om: &mut OptimizedProfile) {
     let nq = om.q8;
     for x in 0..om.kp {
         let rsc = gm.residue_scores_for(x);
+        let row = &mut om.msv_units[x * nq * i16_msv::LANES..][..nq * i16_msv::LANES];
         for q in 0..nq {
             for z in 0..i16_msv::LANES {
                 let k = q + 1 + z * nq;
                 let score_idx = k * PROFILE_NUM_EMISSIONS + PRsc::MatchScore as usize;
                 if k <= m && score_idx < rsc.len() {
-                    om.msv_units[x][q * i16_msv::LANES + z] =
+                    row[q * i16_msv::LANES + z] =
                         i16_msv::emission_units(om.msv_scale, rsc[score_idx]);
                 }
             }
         }
     }
+    let (q8, q16, kp) = (om.q8, om.q16, om.kp);
+    om.ssv_units =
+        int_msv::emission_table(gm, kp, q8, i16_msv::LANES, i16_msv::SCALE, Rounding::Up);
+    om.ssv_units_down =
+        int_msv::emission_table(gm, kp, q8, i16_msv::LANES, i16_msv::SCALE, Rounding::Down);
+    om.msv_units8 =
+        int_msv::emission_table(gm, kp, q16, i8_msv::LANES, om.msv_scale8, Rounding::Up);
+    om.msv_units8_plus_one = int_msv::one_unit_higher(&om.msv_units8);
+    om.msv_units8_down =
+        int_msv::emission_table(gm, kp, q16, i8_msv::LANES, om.msv_scale8, Rounding::Down);
+    om.msv_units8_down_plus_one = int_msv::one_unit_higher(&om.msv_units8_down);
 }
 
 // ---------- i16x8 transitions for the Viterbi over-estimate ----------

@@ -8,13 +8,34 @@
 use super::oprofile::*;
 use std::simd::prelude::*;
 
-type F32x4 = Simd<f32, 4>;
+/// Four single-precision lanes.
+pub type F32x4 = Simd<f32, 4>;
+
+/// DP rows of the Viterbi filter, kept by a worker across sequences.
+#[derive(Debug, Default)]
+pub struct Rows {
+    mmx: Vec<F32x4>,
+    imx: Vec<F32x4>,
+    dmx: Vec<F32x4>,
+}
 
 /// Run the f32x4 Viterbi filter on a digitized sequence.
 ///
 /// `dsq` is 0-indexed: residues at dsq[0..l].
 /// Returns the Viterbi score in nats (same as generic Viterbi).
 pub fn viterbi_filter_f32(dsq: &[u8], l: usize, om: &OptimizedProfile) -> f32 {
+    viterbi_filter_f32_with(dsq, l, om, &mut Rows::default())
+}
+
+/// [`viterbi_filter_f32`] with caller-owned DP rows, so that a worker
+/// searching many sequences does not allocate them per call.
+#[inline(never)]
+pub fn viterbi_filter_f32_with(
+    dsq: &[u8],
+    l: usize,
+    om: &OptimizedProfile,
+    rows: &mut Rows,
+) -> f32 {
     let q = om.q4;
     let neg_inf = f32::NEG_INFINITY;
     let neg_inf_v = F32x4::splat(neg_inf);
@@ -22,9 +43,10 @@ pub fn viterbi_filter_f32(dsq: &[u8], l: usize, om: &OptimizedProfile) -> f32 {
     let ss = &om.xf; // We'll use the profile's special_scores directly below
 
     // Single DP row: M, I, D states
-    let mut mmx = vec![neg_inf_v; q];
-    let mut imx = vec![neg_inf_v; q];
-    let mut dmx = vec![neg_inf_v; q];
+    for row in [&mut rows.mmx, &mut rows.imx, &mut rows.dmx] {
+        row.clear();
+        row.resize(q, neg_inf_v);
+    }
 
     // Special states (exact f32, matching generic Viterbi)
     let mut xn: f32 = 0.0;
@@ -44,105 +66,29 @@ pub fn viterbi_filter_f32(dsq: &[u8], l: usize, om: &OptimizedProfile) -> f32 {
 
     xb = n_move_f; // B(0) = N(0) + n_move = 0 + n_move
 
-    // DD transitions have a fixed position in the profile.
-    let dd_base = NTSC_PER_Q * q;
-
-    for &residue in &dsq[..l] {
-        let xi = residue as usize;
-        let rsc = if xi < om.kp { &om.rlv[xi] } else { &om.rlv[0] };
-
-        let mut dcv = neg_inf_v;
-        let mut xe_v = neg_inf_v;
-        let xb_v = F32x4::splat(xb);
-
-        // Right-shift previous row by 1 lane (Farrar shift)
-        let mut mpv = shr_f32x4(mmx[q - 1]);
-        let mut dpv = shr_f32x4(dmx[q - 1]);
-        let mut ipv = shr_f32x4(imx[q - 1]);
-
-        let mut tsc_idx = 0usize;
-
-        for qi in 0..q {
-            let rsc_v = F32x4::from_slice(&rsc[qi * 4..qi * 4 + 4]);
-
-            // Transitions (log-space)
-            let tbm_v = F32x4::from_slice(&om.tlv[tsc_idx * 4..tsc_idx * 4 + 4]);
-            tsc_idx += 1;
-            let tmm_v = F32x4::from_slice(&om.tlv[tsc_idx * 4..tsc_idx * 4 + 4]);
-            tsc_idx += 1;
-            let tim_v = F32x4::from_slice(&om.tlv[tsc_idx * 4..tsc_idx * 4 + 4]);
-            tsc_idx += 1;
-            let tdm_v = F32x4::from_slice(&om.tlv[tsc_idx * 4..tsc_idx * 4 + 4]);
-            tsc_idx += 1;
-
-            // M(i,q) = max(B+tBM, M(i-1,q-1)+tMM, I(i-1,q-1)+tIM, D(i-1,q-1)+tDM) + rsc
-            let mut sv = (xb_v + tbm_v).simd_max(mpv + tmm_v);
-            sv = sv.simd_max(ipv + tim_v);
-            sv = sv.simd_max(dpv + tdm_v);
-            sv += rsc_v;
-
-            // Update E from M-states (local mode: all M positions exit to E)
-            xe_v = xe_v.simd_max(sv);
-
-            // Save prev, overwrite
-            mpv = mmx[qi];
-            dpv = dmx[qi];
-            ipv = imx[qi];
-
-            mmx[qi] = sv;
-            dmx[qi] = dcv;
-
-            // D carry: M(i,k) + tMD
-            let tmd_v = F32x4::from_slice(&om.tlv[tsc_idx * 4..tsc_idx * 4 + 4]);
-            tsc_idx += 1;
-            dcv = sv + tmd_v;
-
-            // I(i,q) = max(M(i-1,q)+tMI, I(i-1,q)+tII)
-            let tmi_v = F32x4::from_slice(&om.tlv[tsc_idx * 4..tsc_idx * 4 + 4]);
-            tsc_idx += 1;
-            let tii_v = F32x4::from_slice(&om.tlv[tsc_idx * 4..tsc_idx * 4 + 4]);
-            tsc_idx += 1;
-            imx[qi] = (mpv + tmi_v).simd_max(ipv + tii_v);
+    // B(i) = max(N(i) + n_move, J(i) + j_move). Until a hit lifts the second
+    // term above the first, B depends on the row index alone; computing it
+    // that way, and only checking the second term, lets the processor start
+    // a row before the previous one has finished. When the check fires, B is
+    // the maximum of the two terms, exactly as below, and the row-by-row
+    // recurrence takes over. The scores are the same either way.
+    let mut row = 0;
+    while row < l {
+        let exit_score = viterbi_row(rows, om, dsq[row], xb);
+        xj = f32::max(xj + j_loop_f, exit_score + e_loop);
+        xc = f32::max(xc + c_loop_f, exit_score + e_move_f);
+        xn += n_loop_f;
+        let from_n = xn + n_move_f;
+        let from_j = xj + j_move_f;
+        xb = from_n;
+        row += 1;
+        if from_j > from_n {
+            xb = from_j;
+            break;
         }
-
-        // DD propagation: shift dcv and propagate D->D across stripes
-        dcv = shr_f32x4(dcv);
-        dmx[0] = neg_inf_v; // D(i, k=1) = -inf always
-
-        for (qi, dmx_qi) in dmx.iter_mut().enumerate() {
-            let dd_v = F32x4::from_slice(&om.tlv[(dd_base + qi) * 4..(dd_base + qi) * 4 + 4]);
-            *dmx_qi = (*dmx_qi).simd_max(dcv);
-            xe_v = xe_v.simd_max(*dmx_qi);
-            dcv = *dmx_qi + dd_v;
-        }
-
-        // Additional DD passes for cross-stripe propagation. As in HMMER's
-        // lazy-F evaluation, a pass stops at the first vector the carry does
-        // not improve: from there on it would only recompute what the
-        // previous pass already propagated, so the fixed point is unchanged.
-        for _pass in 1..4 {
-            dcv = shr_f32x4(dcv);
-            let mut reached_end = true;
-            for (qi, dmx_qi) in dmx.iter_mut().enumerate() {
-                let old = *dmx_qi;
-                if !dcv.simd_gt(old).any() {
-                    reached_end = false;
-                    break;
-                }
-                let dd_v = F32x4::from_slice(&om.tlv[(dd_base + qi) * 4..(dd_base + qi) * 4 + 4]);
-                let new_val = old.simd_max(dcv);
-                *dmx_qi = new_val;
-                xe_v = xe_v.simd_max(new_val);
-                dcv = new_val + dd_v;
-            }
-            if !reached_end {
-                break;
-            }
-        }
-
-        let exit_score = xe_v.reduce_max();
-
-        // Special states (exact f32, matching generic)
+    }
+    for &residue in &dsq[row..l] {
+        let exit_score = viterbi_row(rows, om, residue, xb);
         xj = f32::max(xj + j_loop_f, exit_score + e_loop);
         xc = f32::max(xc + c_loop_f, exit_score + e_move_f);
         xn += n_loop_f;
@@ -150,6 +96,111 @@ pub fn viterbi_filter_f32(dsq: &[u8], l: usize, om: &OptimizedProfile) -> f32 {
     }
 
     xc + c_move_f
+}
+
+/// One row of the recurrence: updates the rows in place and returns the
+/// maximum over the new match and delete cells.
+#[inline(always)]
+fn viterbi_row(rows: &mut Rows, om: &OptimizedProfile, residue: u8, xb: f32) -> f32 {
+    let Rows { mmx, imx, dmx } = rows;
+    let q = mmx.len();
+    let neg_inf_v = F32x4::splat(f32::NEG_INFINITY);
+    let xi = residue as usize;
+    let rsc = if xi < om.kp { &om.rlv[xi] } else { &om.rlv[0] };
+
+    // DD transitions have a fixed position in the profile.
+    let dd_base = NTSC_PER_Q * q;
+
+    let mut dcv = neg_inf_v;
+    let mut xe_v = neg_inf_v;
+    let xb_v = F32x4::splat(xb);
+
+    // Right-shift previous row by 1 lane (Farrar shift)
+    let mut mpv = shr_f32x4(mmx[q - 1]);
+    let mut dpv = shr_f32x4(dmx[q - 1]);
+    let mut ipv = shr_f32x4(imx[q - 1]);
+
+    let mut tsc_idx = 0usize;
+
+    for qi in 0..q {
+        let rsc_v = F32x4::from_slice(&rsc[qi * 4..qi * 4 + 4]);
+
+        // Transitions (log-space)
+        let tbm_v = F32x4::from_slice(&om.tlv[tsc_idx * 4..tsc_idx * 4 + 4]);
+        tsc_idx += 1;
+        let tmm_v = F32x4::from_slice(&om.tlv[tsc_idx * 4..tsc_idx * 4 + 4]);
+        tsc_idx += 1;
+        let tim_v = F32x4::from_slice(&om.tlv[tsc_idx * 4..tsc_idx * 4 + 4]);
+        tsc_idx += 1;
+        let tdm_v = F32x4::from_slice(&om.tlv[tsc_idx * 4..tsc_idx * 4 + 4]);
+        tsc_idx += 1;
+
+        // M(i,q) = max(B+tBM, M(i-1,q-1)+tMM, I(i-1,q-1)+tIM, D(i-1,q-1)+tDM) + rsc
+        let mut sv = (xb_v + tbm_v).simd_max(mpv + tmm_v);
+        sv = sv.simd_max(ipv + tim_v);
+        sv = sv.simd_max(dpv + tdm_v);
+        sv += rsc_v;
+
+        // Update E from M-states (local mode: all M positions exit to E)
+        xe_v = xe_v.simd_max(sv);
+
+        // Save prev, overwrite
+        mpv = mmx[qi];
+        dpv = dmx[qi];
+        ipv = imx[qi];
+
+        mmx[qi] = sv;
+        dmx[qi] = dcv;
+
+        // D carry: M(i,k) + tMD
+        let tmd_v = F32x4::from_slice(&om.tlv[tsc_idx * 4..tsc_idx * 4 + 4]);
+        tsc_idx += 1;
+        dcv = sv + tmd_v;
+
+        // I(i,q) = max(M(i-1,q)+tMI, I(i-1,q)+tII)
+        let tmi_v = F32x4::from_slice(&om.tlv[tsc_idx * 4..tsc_idx * 4 + 4]);
+        tsc_idx += 1;
+        let tii_v = F32x4::from_slice(&om.tlv[tsc_idx * 4..tsc_idx * 4 + 4]);
+        tsc_idx += 1;
+        imx[qi] = (mpv + tmi_v).simd_max(ipv + tii_v);
+    }
+
+    // DD propagation: shift dcv and propagate D->D across stripes
+    dcv = shr_f32x4(dcv);
+    dmx[0] = neg_inf_v; // D(i, k=1) = -inf always
+
+    for (qi, dmx_qi) in dmx.iter_mut().enumerate() {
+        let dd_v = F32x4::from_slice(&om.tlv[(dd_base + qi) * 4..(dd_base + qi) * 4 + 4]);
+        *dmx_qi = (*dmx_qi).simd_max(dcv);
+        xe_v = xe_v.simd_max(*dmx_qi);
+        dcv = *dmx_qi + dd_v;
+    }
+
+    // Additional DD passes for cross-stripe propagation. As in HMMER's
+    // lazy-F evaluation, a pass stops at the first vector the carry does
+    // not improve: from there on it would only recompute what the
+    // previous pass already propagated, so the fixed point is unchanged.
+    for _pass in 1..4 {
+        dcv = shr_f32x4(dcv);
+        let mut reached_end = true;
+        for (qi, dmx_qi) in dmx.iter_mut().enumerate() {
+            let old = *dmx_qi;
+            if !dcv.simd_gt(old).any() {
+                reached_end = false;
+                break;
+            }
+            let dd_v = F32x4::from_slice(&om.tlv[(dd_base + qi) * 4..(dd_base + qi) * 4 + 4]);
+            let new_val = old.simd_max(dcv);
+            *dmx_qi = new_val;
+            xe_v = xe_v.simd_max(new_val);
+            dcv = new_val + dd_v;
+        }
+        if !reached_end {
+            break;
+        }
+    }
+
+    xe_v.reduce_max()
 }
 
 /// Right-shift a f32x4 by 1 lane: `[NEG_INF, v[0], v[1], v[2]]`.
