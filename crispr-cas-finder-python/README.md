@@ -69,8 +69,8 @@ Scan a FASTA string for CRISPR arrays.
 | `fasta_content` | `str` | — | Multi-sequence FASTA text |
 | `min_repeat_length` | `int` | `23` | Minimum direct repeat length (bp) |
 | `max_repeat_length` | `int` | `55` | Maximum direct repeat length (bp) |
-| `min_spacer_length` | `int` | `25` | Minimum spacer length (bp) |
-| `max_spacer_length` | `int` | `60` | Maximum spacer length (bp) |
+| `min_spacer_length` | `int` | `25` | Shortest distance (bp) between the two copies of a repeat that can seed an array; the spacers of an array may be as short as 0.6 times the repeat length |
+| `max_spacer_length` | `int` | `60` | Longest distance (bp) between the two copies of a repeat that can seed an array; spacers up to 2.5 times the repeat length are kept |
 | `no_mismatch` | `bool` | `False` | Require identical repeats |
 | `min_spacer_count` | `int` | `1` | Minimum spacers per array |
 | `min_evidence_level` | `int` | `1` | Minimum evidence level (1–4) |
@@ -104,7 +104,10 @@ for system in report["cas_clusters"]:
 Other keyword arguments: `gff` and `faa` (use an existing annotation),
 `metagenome`, `auto_metagenome_below`, `linear`, `cas_only_with_crispr`,
 `vicinity`, `workers`, and the detection settings of `find_crispr_arrays`.
-The interpreter lock is released while the analysis runs.
+Cas detection from Python runs with genetic code 11, the `SubTyping`
+definitions of CasFinder 2 and the default HMM filters; the CLI's
+`--genetic-code`, `--definition`, `--min-cas-score` and `--exact-filters` have
+no Python equivalent. The interpreter lock is released while the analysis runs.
 
 ### `CrisprArray`
 
