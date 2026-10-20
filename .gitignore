@@ -41,3 +41,12 @@ openevolve/
 *.pyd
 dist/
 node_modules/
+
+# Benchmark outputs: kept locally, not tracked (see benchmarks/README.md)
+benchmarks/results/
+
+# Coverage reports
+*.lcov
+
+# Git worktrees the Claude desktop app creates for sessions on this repository
+.claude/worktrees/
