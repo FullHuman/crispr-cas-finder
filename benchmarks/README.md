@@ -81,7 +81,7 @@ set) and `results/panel/summary.md` (panel).
   `cas_systems.csv` and `genomes.csv` come from `compare.py`.
 - `results/timing/`: sequential runs on the local set. Arrays and Cas systems
   on 19 inputs, three repetitions for four of them and one for the rest;
-  arrays only on all 51; thread counts 1 to 10 on E. coli; the browser build
+  arrays only on all 51; 1, 2, 4, 8 and 10 threads on E. coli; the browser build
   on E. coli.
 - `results/panel/`: sequential runs of both tools on the 21 reference genomes
   of `panel.tsv` (`fetch_panel.py` downloads them from NCBI): bacteria of
@@ -102,6 +102,10 @@ Things to state next to any number taken from here:
   3.3.2 it documents. The Cas systems it loses (see `compare.py`) were checked
   against MacSyFinder's own output for two genomes with these versions only.
 - Most timings are single runs on one machine.
+- The Rust runs with Cas detection are of the build at `8fa28f5`. The HMM
+  search was made more than three times as fast on 2026-10-17 (`7b763f2`)
+  without changing the hits, so those timings overstate the current run time;
+  `LIMITATIONS.md` gives the current E. coli figures.
 
 ## Checking the repeat search against Vmatch
 
@@ -123,5 +127,23 @@ python3 benchmarks/compare.py benchmarks/results/timing
 python3 benchmarks/summarize.py benchmarks/results/timing
 ```
 
-`summarize.py --outputs DIR` reads the comparison from another results
-directory, as done here.
+The panel is downloaded with `fetch_panel.py` and run the same way:
+
+```sh
+python3 benchmarks/fetch_panel.py vendor/panel
+python3 benchmarks/bench.py vendor/panel/*.fasta \
+    --configs upstream,upstream-cpuM,rust-t1,rust-all \
+    --out benchmarks/results/panel --work /tmp/ccf-panel
+python3 benchmarks/compare.py benchmarks/results/panel
+python3 benchmarks/summarize.py benchmarks/results/panel
+```
+
+`summarize.py --outputs DIR [DIR ...]` reads the comparison from other results
+directories and combines them when given several. The array and Cas figures
+quoted in `LIMITATIONS.md` are those of the local set and the panel together:
+
+```sh
+python3 benchmarks/summarize.py benchmarks/results/timing \
+    --outputs benchmarks/results/outputs benchmarks/results/panel \
+    --out benchmarks/results/combined.md
+```
