@@ -70,9 +70,14 @@ stating next to any number taken from here:
 ## Results of 2026-10-13
 
 The runs used a MacBook Pro (M1 Max, 8 performance and 2 efficiency cores,
-32 GB, macOS 27.0.1) and `nightly-2026-07-29`. Their outputs are kept under
-`results/`, which is not tracked; the tables are `results/summary.md` (local
-set) and `results/panel/summary.md` (panel).
+32 GB, macOS 27.0.1) and `nightly-2026-07-29`. The Rust runs with Cas
+detection (`rust-t1`, `rust-tN` and `rust-all` in `results/timing/` and
+`results/panel/`) were repeated on 2026-10-21 with the build at `eba5168`,
+after the HMM search had been made faster; every other row is of 2026-10-13,
+the Rust ones at `8fa28f5`. The outputs are kept under `results/`, which is
+not tracked; the tables are `results/summary.md` (local set, written with
+`summarize.py results/timing --outputs results/outputs --out
+results/summary.md`) and `results/panel/summary.md` (panel).
 
 - `results/outputs/`: both tools on the local set of 51 inputs: E. coli K-12
   MG1655, the Acetobacter plasmid of the upstream install test, and 49
@@ -87,9 +92,10 @@ set) and `results/panel/summary.md` (panel).
   of `panel.tsv` (`fetch_panel.py` downloads them from NCBI): bacteria of
   seven phyla and five archaea, twelve Cas subtypes, four genomes without a
   CRISPR-Cas system.
-- `results/before-fix/` and `results/at-b7fb24d/`: the Rust results at
-  `26d60c7`, before the array detection fixes that this comparison led to, and
-  at `b7fb24d`, before the repeat search became a port of Vmatch's. The
+- `results/before-fix/`, `results/at-b7fb24d/` and `results/at-8fa28f5/`: the
+  Rust results at `26d60c7`, before the array detection fixes that this
+  comparison led to; at `b7fb24d`, before the repeat search became a port of
+  Vmatch's; and at `8fa28f5`, before the HMM search was made faster. The
   measurements of the original are the same throughout.
 
 Things to state next to any number taken from here:
@@ -102,10 +108,11 @@ Things to state next to any number taken from here:
   3.3.2 it documents. The Cas systems it loses (see `compare.py`) were checked
   against MacSyFinder's own output for two genomes with these versions only.
 - Most timings are single runs on one machine.
-- The Rust runs with Cas detection are of the build at `8fa28f5`. The HMM
-  search was made more than three times as fast on 2026-10-17 (`7b763f2`)
-  without changing the hits, so those timings overstate the current run time;
-  `LIMITATIONS.md` gives the current E. coli figures.
+- The Rust rows with Cas detection are of the build at `eba5168`
+  (2026-10-21), which has the HMM search made more than three times as fast on
+  2026-10-17 (`7b763f2`) without changing the hits. The browser table, its
+  native rows included, is of 2026-10-13 at `8fa28f5`, so its Cas timings
+  overstate the current run time.
 
 ## Checking the repeat search against Vmatch
 
