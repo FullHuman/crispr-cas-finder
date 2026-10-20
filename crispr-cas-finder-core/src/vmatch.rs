@@ -520,12 +520,17 @@ fn remove_contained(repeats: &mut Vec<RepeatMatch>) {
 }
 
 /// Find the repeats of `seq` that Vmatch reports for `search`, sorted by
-/// position. Case is ignored, as Vmatch ignores it.
+/// position. Case is ignored, as Vmatch ignores it. A search allowing more
+/// than 20 differences, beyond Vmatch's E-value tables, reports nothing.
 pub fn find_repeats(seq: &[u8], search: &RepeatSearch) -> Vec<RepeatMatch> {
     let seq = &*crate::dna::uppercase(seq);
     let seed_length = (search.min_length / (search.max_differences + 1)).max(1);
     let hashes = seed_hashes(seq, seed_length);
-    if hashes.is_empty() || search.min_gap > search.max_gap || search.max_length < seed_length {
+    if hashes.is_empty()
+        || search.min_gap > search.max_gap
+        || search.max_length < seed_length
+        || search.max_differences >= EDIT_DISTANCE_QUOTIENT.len()
+    {
         return Vec::new();
     }
     let evalues = Evalues::new(search.max_differences);

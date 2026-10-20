@@ -1,11 +1,17 @@
-// simd/int_msv.rs — integer over-estimates of the MSV score
+// simd/int_msv.rs — integer bounds on the MSV score
 //
-// The exact MSV filter (f32_msv.rs) decides which sequences continue down
-// the pipeline. This kernel bounds its score from above on integer cells,
-// eight 16-bit or sixteen 8-bit lanes per vector, with every rounding and
-// every clamp going upward. A sequence whose bound fails the MSV threshold
-// would fail the exact filter too and is dropped without computing it.
-// Everything else is rescored exactly, which keeps search results identical.
+// This kernel bounds the score of the exact MSV filter (f32_msv.rs) on
+// integer cells, eight 16-bit or sixteen 8-bit lanes per vector. With every
+// rounding and every clamp going upward the result is an upper bound: a
+// sequence whose bound fails the MSV threshold would fail the exact filter
+// too. With them going downward it is a lower bound: a sequence whose bound
+// passes would pass the exact filter too. The search pipeline
+// (pipeline/search.rs) uses the bounds two ways. By default the 8-bit lower
+// bound stands in for the score and decides the MSV and bias filters, as
+// HMMER's own rounded filter does, and the exact filter never runs. With
+// `FilterPolicy::exact` the bounds settle only the sequences they can, and
+// the exact filter scores the rest, so the decisions are those of the exact
+// score.
 //
 // Single segments. An MSV path visits the model in one or more segments,
 // diagonal runs of match states. With tloop the N/C/J self-loop score,
@@ -23,8 +29,9 @@
 //   U(i,k) = max(U(i-1,k-1), 0) + rsc(x_i,k) + delta,   delta = -tloop,
 //
 // whose maximum cell is emis* - len*·tloop, gives the MSV score without the
-// J state. When S* > 0 the sequence is a strong candidate anyway and no
-// bound is returned; the exact filter then scores it.
+// J state. When S* > 0 the sequence is a strong candidate anyway and the
+// bound saturates: it passes the MSV filters, or, with exact filters, the
+// exact filter scores it.
 //
 // Units. delta is not a whole number of units, so it is not added to each
 // cell as such: D(i), the rounded-up cumulative delta, grows by a whole

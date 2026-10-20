@@ -108,7 +108,6 @@ impl DomainWorkspace {
     /// reconfigures them per-envelope (save/restore). No inner function
     /// receives mutable profile or OM references.
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
     pub fn by_posterior_heuristics(
         &mut self,
         config: &DomainConfig,
@@ -156,10 +155,7 @@ impl DomainWorkspace {
                 region_j,
                 buf,
                 om,
-                config
-                    .exact_decode
-                    .then_some(())
-                    .map_or(Some(odds), |()| None),
+                (!config.exact_decode).then_some(odds),
             );
 
             // Restore profile + OM state

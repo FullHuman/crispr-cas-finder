@@ -356,7 +356,8 @@ pub struct SearchTrace {
     /// Lower bound on the MSV score from the integer pre-filters, when known.
     pub msv_score_lower_bound: Option<f32>,
     /// Viterbi filter score: exact with `FilterPolicy::exact`, otherwise the
-    /// 16-bit upper bound that decided the filter.
+    /// 16-bit upper bound that decided the filter, or the exact score when
+    /// that bound saturated and could not decide.
     pub viterbi_raw_score: Option<f32>,
     pub forward_raw_score: Option<f32>,
     pub domain_count: usize,
@@ -950,7 +951,7 @@ impl SearchEngine {
             thresholds: Thresholds::default(),
             search_space: 0.0,
             do_max: false,
-            exact: true,
+            exact: false,
             do_biasfilter: true,
             msv_threshold: DEFAULT_MSV_THRESHOLD,
             viterbi_threshold: DEFAULT_VITERBI_THRESHOLD,
