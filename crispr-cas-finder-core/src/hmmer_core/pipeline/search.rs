@@ -1281,11 +1281,82 @@ impl SearchEngine {
 mod tests {
     use super::*;
     use crate::hmmer_core::alphabet::Alphabet;
+    use crate::hmmer_core::hmm::Hmm;
     use crate::hmmer_core::rng::XorShift64;
     use crate::hmmer_core::test_helpers::{random_digital_seq, setup_profile};
 
     fn calibrate(profile: &mut Profile) {
         profile.ev_params = [0.0, 0.7, 0.0, 0.7, 0.0, 0.7];
+    }
+
+    /// The most likely residue of every match state of `hmm`, as a digital
+    /// sequence: a target the profile scores well whatever the filters.
+    fn consensus_sequence(hmm: &Hmm, alphabet: &Alphabet) -> DigitalSequence {
+        let residues: Vec<u8> = (1..=hmm.num_nodes)
+            .map(|node| {
+                let emissions = &hmm.match_emissions(node)[..alphabet.canonical_size];
+                emissions
+                    .iter()
+                    .enumerate()
+                    .max_by(|a, b| a.1.total_cmp(b.1))
+                    .map(|(code, _)| code as u8)
+                    .unwrap()
+            })
+            .collect();
+        DigitalSequence {
+            name: "consensus".to_string(),
+            accession: None,
+            description: None,
+            source_length: residues.len() as i64,
+            residues,
+            database_index: -1,
+        }
+    }
+
+    /// A sampled profile whose match states nearly always follow one
+    /// another. The consensus of a plain sample pays as much in its random
+    /// transitions as it gains in emissions and fails the Viterbi filter.
+    fn conserved_profile(
+        rng: &mut XorShift64,
+        model_length: usize,
+        target_length: usize,
+        alphabet: &Alphabet,
+    ) -> (Hmm, BackgroundModel, Profile) {
+        let mut hmm = crate::hmmer_core::test_helpers::hmm_sample(rng, model_length, alphabet);
+        for node in 0..model_length {
+            let transitions = hmm.transitions_mut(node);
+            transitions[HTransition::MatchToMatch as usize] = 0.98;
+            transitions[HTransition::MatchToInsert as usize] = 0.01;
+            transitions[HTransition::MatchToDelete as usize] = 0.01;
+        }
+        let mut background = BackgroundModel::new(alphabet);
+        background.set_length(target_length);
+        let mut profile = Profile::new(hmm.num_nodes, alphabet);
+        crate::hmmer_core::modelconfig::profile_config(
+            &hmm,
+            &background,
+            &mut profile,
+            target_length,
+            crate::hmmer_core::config::SearchMode::Local,
+        );
+        (hmm, background, profile)
+    }
+
+    fn search_with(
+        query: &SearchQuery,
+        filters: FilterPolicy,
+        sequence: &DigitalSequence,
+    ) -> SearchReport {
+        let plan = SearchPlan::builder(query.clone())
+            .filters(filters)
+            .build()
+            .unwrap();
+        let mut worker = plan
+            .spawn_worker(CapacityHints {
+                target_length: sequence.residues.len(),
+            })
+            .unwrap();
+        worker.search(sequence).unwrap()
     }
 
     #[test]
@@ -1296,6 +1367,7 @@ mod tests {
         assert!((filters.forward_threshold - 1e-5).abs() < 1e-10);
         assert!(!filters.max_mode);
         assert!(filters.bias_filter);
+        assert!(!filters.exact);
     }
 
     #[test]
@@ -1537,5 +1609,96 @@ mod tests {
         assert_eq!(report.trace.filter_reason, Some(FilterReason::Msv));
         assert!(report.trace.viterbi_raw_score.is_none());
         assert!(report.trace.forward_raw_score.is_none());
+    }
+
+    #[test]
+    fn test_exact_and_default_filters_agree_on_a_hit() {
+        let abc = Alphabet::amino();
+        let mut rng = XorShift64::new(19);
+        let (hmm, bg, mut gm) = conserved_profile(&mut rng, 40, 40, &abc);
+        calibrate(&mut gm);
+        let sequence = consensus_sequence(&hmm, &abc);
+        let query = SearchQuery::from_configured_profile(gm, bg).unwrap();
+
+        let fast = search_with(&query, FilterPolicy::default(), &sequence);
+        let exact = search_with(
+            &query,
+            FilterPolicy {
+                exact: true,
+                ..FilterPolicy::default()
+            },
+            &sequence,
+        );
+
+        // The default policy decides the MSV filters with the 8-bit lower
+        // bound and never computes the exact MSV score; the exact policy
+        // records the upper bound it starts from.
+        assert!(fast.trace.msv_score_lower_bound.is_some());
+        assert!(fast.trace.msv_score_bound.is_none());
+        assert!(fast.trace.msv_raw_score.is_none());
+        assert!(exact.trace.msv_score_bound.is_some());
+
+        let (SearchOutcome::Hit(fast_hit), SearchOutcome::Hit(exact_hit)) =
+            (fast.outcome, exact.outcome)
+        else {
+            panic!("the consensus of the profile is a hit with either policy");
+        };
+        assert_eq!(fast_hit.domains.len(), exact_hit.domains.len());
+        for (a, b) in fast_hit.domains.iter().zip(&exact_hit.domains) {
+            assert_eq!(
+                (a.envelope_start, a.envelope_end),
+                (b.envelope_start, b.envelope_end)
+            );
+        }
+        let tolerance = 0.01 * exact_hit.score.abs().max(1.0);
+        assert!(
+            (fast_hit.score - exact_hit.score).abs() <= tolerance,
+            "default {} exact {}",
+            fast_hit.score,
+            exact_hit.score
+        );
+    }
+
+    #[test]
+    fn test_exact_filters_drop_a_sequence_on_an_upper_bound() {
+        let abc = Alphabet::amino();
+        let mut rng = XorShift64::new(23);
+        let (_, bg, mut gm) = setup_profile(
+            &mut rng,
+            8,
+            32,
+            &abc,
+            crate::hmmer_core::config::SearchMode::Local,
+        );
+        calibrate(&mut gm);
+        gm.ev_params[EvParam::MsvMu.idx()] = 1_000_000.0;
+        let residues =
+            random_digital_seq(&mut rng, &bg.residue_frequencies, abc.canonical_size, 32);
+        let sequence = DigitalSequence {
+            name: "filtered-exactly".to_string(),
+            accession: None,
+            description: None,
+            residues,
+            source_length: 32,
+            database_index: -1,
+        };
+        let query = SearchQuery::from_configured_profile(gm, bg).unwrap();
+
+        let report = search_with(
+            &query,
+            FilterPolicy {
+                exact: true,
+                ..FilterPolicy::default()
+            },
+            &sequence,
+        );
+
+        assert!(matches!(
+            report.outcome,
+            SearchOutcome::Filtered(FilterReason::Msv)
+        ));
+        // An upper bound settled it, which the default policy never computes.
+        assert!(report.trace.msv_score_bound.is_some());
+        assert!(report.trace.viterbi_raw_score.is_none());
     }
 }
