@@ -189,13 +189,30 @@ pub fn detect_cas_systems(
     include: Option<&HashSet<String>>,
 ) -> Result<CasAnalysis> {
     validate_config(config)?;
-    let proteome = load_proteome(sequences, config, include)?;
+    // Gene prediction of a single genome is one long serial task; the model
+    // definitions and the HMM profiles are read meanwhile, on other threads.
+    // The proteome is checked first, as the search is skipped without one.
+    let (proteome, models) = rayon::join(
+        || load_proteome(sequences, config, include),
+        || -> Result<_> {
+            let model_set = load_model_set(config)?;
+            let needed_profiles =
+                collect_needed_profiles(&model_set.registry, &model_set.model_names);
+            let profiles = load_hmm_profiles(&model_set.profiles_dir, &needed_profiles)?;
+            Ok((model_set, profiles))
+        },
+    );
+    let proteome = proteome?;
     if proteome.is_empty() {
         info!("No protein-coding gene to search, skipping CasFinder");
         return Ok(CasAnalysis {
             proteome,
             ..CasAnalysis::default()
         });
+    }
+    let (model_set, profiles) = models?;
+    if profiles.is_empty() {
+        anyhow::bail!("CAS model definitions do not reference any HMM profiles");
     }
 
     let amino_alphabet = Alphabet::amino();
@@ -207,21 +224,14 @@ pub fn detect_cas_systems(
         })
         .collect();
     info!("Loaded {} protein sequences", protein_sequences.len());
-
-    let model_set = load_model_set(config)?;
-    let needed_profiles = collect_needed_profiles(&model_set.registry, &model_set.model_names);
-    if needed_profiles.is_empty() {
-        anyhow::bail!("CAS model definitions do not reference any HMM profiles");
-    }
     info!(
         "Need {} HMM profiles for {} models",
-        needed_profiles.len(),
+        profiles.len(),
         model_set.model_names.len()
     );
 
     let all_hits = run_hmm_search(
-        &model_set.profiles_dir,
-        &needed_profiles,
+        &profiles,
         &protein_sequences,
         &amino_alphabet,
         config.workers,
@@ -454,68 +464,33 @@ fn build_model_registry_from_dir(
 // HMM search via hmmer-core
 // ---------------------------------------------------------------------------
 
-/// Run the full HMMER3 pipeline (MSV -> Viterbi -> Forward) for each needed
-/// profile against all target protein sequences.
-fn run_hmm_search(
-    profiles_dir: &Path,
-    needed_profiles: &HashSet<String>,
-    protein_sequences: &[DigitalSequence],
-    alphabet: &Alphabet,
-    workers: usize,
-    filtering: &HitFiltering,
-) -> Result<HashMap<String, Vec<HmmerHit>>> {
-    let mut all_hits: HashMap<String, Vec<HmmerHit>> = HashMap::new();
-    let mut profile_names: Vec<String> = needed_profiles.iter().cloned().collect();
-    profile_names.sort_unstable();
-    // A profile's search time grows with its length, and its file size with
-    // it. Starting the longest profiles first and handing them out one at a
-    // time keeps every thread busy until the end.
-    let profile_size = |name: &str| {
-        fs::metadata(profiles_dir.join(format!("{name}.hmm")))
-            .map(|metadata| metadata.len())
-            .unwrap_or(0)
-    };
-    profile_names.sort_by_cached_key(|name| std::cmp::Reverse(profile_size(name)));
-
-    let pool = build_hmm_search_pool(workers)?;
-    info!(
-        "Searching {} HMM profiles across {} protein sequences with {} thread(s)",
-        profile_names.len(),
-        protein_sequences.len(),
-        pool.current_num_threads()
-    );
-    let search_results = pool.install(|| {
-        profile_names
-            .par_iter()
-            .with_max_len(1)
-            .map(|profile_name| {
-                search_profile_hits(
-                    profiles_dir,
-                    profile_name,
-                    protein_sequences,
-                    alphabet,
-                    filtering,
-                )
-            })
-            .collect::<Vec<_>>()
-    });
-
-    for result in search_results {
-        if let Some((profile_name, profile_hits)) = result? {
-            all_hits.insert(profile_name, profile_hits);
-        }
-    }
-
-    Ok(all_hits)
+/// A parsed HMM profile and the alphabet it was built on.
+#[derive(Debug)]
+struct HmmProfile {
+    name: String,
+    alphabet: Alphabet,
+    hmm: Hmm,
 }
 
-fn search_profile_hits(
+/// Read every profile of `needed_profiles` from `profiles_dir`, longest
+/// model first. A profile's search time grows with its length, so starting
+/// the longest ones first and handing them out one at a time keeps every
+/// thread of the search busy until the end.
+fn load_hmm_profiles(
     profiles_dir: &Path,
-    profile_name: &str,
-    protein_sequences: &[DigitalSequence],
-    alphabet: &Alphabet,
-    filtering: &HitFiltering,
-) -> Result<Option<(String, Vec<HmmerHit>)>> {
+    needed_profiles: &HashSet<String>,
+) -> Result<Vec<HmmProfile>> {
+    let mut profile_names: Vec<&String> = needed_profiles.iter().collect();
+    profile_names.sort_unstable();
+    let mut profiles = profile_names
+        .par_iter()
+        .map(|profile_name| load_hmm_profile(profiles_dir, profile_name))
+        .collect::<Result<Vec<_>>>()?;
+    profiles.sort_by_key(|profile| std::cmp::Reverse(profile.hmm.num_nodes));
+    Ok(profiles)
+}
+
+fn load_hmm_profile(profiles_dir: &Path, profile_name: &str) -> Result<HmmProfile> {
     let hmm_path = profiles_dir.join(format!("{}.hmm", profile_name));
     if !hmm_path.is_file() {
         anyhow::bail!(
@@ -528,18 +503,58 @@ fn search_profile_hits(
     let hmm_path_string = path_as_utf8(&hmm_path, "HMM profile")?;
     let mut hmm_file = HmmFile::open(hmm_path_string, None)
         .map_err(|e| anyhow::anyhow!("Failed to open {}: {}", profile_name, e))?;
-    let (hmm_alphabet, hmm) = hmm_file
+    let (alphabet, hmm) = hmm_file
         .read()
         .map_err(|e| anyhow::anyhow!("Failed to parse {}: {}", profile_name, e))?;
-    let profile_hits = search_hmm_profile(
-        profile_name,
-        &hmm_alphabet,
-        &hmm,
-        protein_sequences,
+    Ok(HmmProfile {
+        name: profile_name.to_string(),
         alphabet,
-        filtering,
-    )?;
-    Ok((!profile_hits.is_empty()).then(|| (profile_name.to_string(), profile_hits)))
+        hmm,
+    })
+}
+
+/// Run the full HMMER3 pipeline (MSV -> Viterbi -> Forward) for each profile
+/// against all target protein sequences.
+fn run_hmm_search(
+    profiles: &[HmmProfile],
+    protein_sequences: &[DigitalSequence],
+    alphabet: &Alphabet,
+    workers: usize,
+    filtering: &HitFiltering,
+) -> Result<HashMap<String, Vec<HmmerHit>>> {
+    let pool = build_hmm_search_pool(workers)?;
+    info!(
+        "Searching {} HMM profiles across {} protein sequences with {} thread(s)",
+        profiles.len(),
+        protein_sequences.len(),
+        pool.current_num_threads()
+    );
+    let search_results = pool.install(|| {
+        profiles
+            .par_iter()
+            .with_max_len(1)
+            .map(|profile| {
+                let profile_hits = search_hmm_profile(
+                    &profile.name,
+                    &profile.alphabet,
+                    &profile.hmm,
+                    protein_sequences,
+                    alphabet,
+                    filtering,
+                )?;
+                Ok((!profile_hits.is_empty()).then(|| (profile.name.clone(), profile_hits)))
+            })
+            .collect::<Vec<Result<_>>>()
+    });
+
+    let mut all_hits: HashMap<String, Vec<HmmerHit>> = HashMap::new();
+    for result in search_results {
+        if let Some((profile_name, profile_hits)) = result? {
+            all_hits.insert(profile_name, profile_hits);
+        }
+    }
+
+    Ok(all_hits)
 }
 
 /// Search one parsed HMM profile against all proteins and return the
@@ -1087,15 +1102,9 @@ mod tests {
         write_test_hmm(temporary.path(), "Cas1", &alphabet);
         let profiles = HashSet::from(["Cas1".to_string()]);
 
-        let hits = run_hmm_search(
-            temporary.path(),
-            &profiles,
-            &[],
-            &alphabet,
-            1,
-            &legacy_hit_filtering(),
-        )
-        .expect("load and configure HMM profile");
+        let loaded = load_hmm_profiles(temporary.path(), &profiles).expect("load HMM profile");
+        let hits = run_hmm_search(&loaded, &[], &alphabet, 1, &legacy_hit_filtering())
+            .expect("configure HMM profile");
 
         assert!(hits.is_empty());
     }
@@ -1105,15 +1114,8 @@ mod tests {
         let temporary = tempfile::tempdir().expect("temporary directory");
         let profiles = HashSet::from(["missing".to_string()]);
 
-        let error = run_hmm_search(
-            temporary.path(),
-            &profiles,
-            &[],
-            &Alphabet::amino(),
-            1,
-            &legacy_hit_filtering(),
-        )
-        .expect_err("missing profile must fail the search");
+        let error = load_hmm_profiles(temporary.path(), &profiles)
+            .expect_err("missing profile must fail the search");
 
         assert!(error.to_string().contains("Required HMM profile 'missing'"));
     }
@@ -1124,15 +1126,9 @@ mod tests {
         write_test_hmm(temporary.path(), "Cas1", &Alphabet::dna());
         let profiles = HashSet::from(["Cas1".to_string()]);
 
-        let error = run_hmm_search(
-            temporary.path(),
-            &profiles,
-            &[],
-            &Alphabet::amino(),
-            1,
-            &legacy_hit_filtering(),
-        )
-        .expect_err("DNA profile must not be searched as protein");
+        let loaded = load_hmm_profiles(temporary.path(), &profiles).expect("load HMM profile");
+        let error = run_hmm_search(&loaded, &[], &Alphabet::amino(), 1, &legacy_hit_filtering())
+            .expect_err("DNA profile must not be searched as protein");
 
         assert!(error.to_string().contains("expected Amino alphabet"));
     }

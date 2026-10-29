@@ -8,6 +8,10 @@ with the pull request that merged it.
 
 ### Array detection
 
+- The repeat search compares the hashes of the windows a repeat's partner can
+  start in eight at a time, with the processor's widest vectors, instead of
+  one by one: about half the time of the array detection on E. coli K-12 on
+  one thread, with the same repeats.
 - Repeats are found by a port of the Vmatch search CRISPRCasFinder runs, which
   reports the same repeats as Vmatch 2.3.1 on the 72 inputs of the comparison
   in `benchmarks/`. Arrays are then built in the original's order: the left
@@ -41,7 +45,9 @@ with the pull request that merged it.
   elsewhere), and the bounds come out identical on every one. The HMM reader
   parses a model without a string per line or a vector per row. One thread
   searches the E. coli K-12 proteome against the embedded CasFinder 2.0.3
-  profiles in about half the time, with identical output.
+  profiles in about half the time, with identical output. The model
+  definitions and the HMM profiles are read while the genes are predicted,
+  which is one long serial task on a single genome.
 - The HMM search decides its MSV and bias filters with an 8-bit lower bound on
   the MSV score, its Viterbi filter with a 16-bit upper bound, and decodes
   posteriors in probability space, as HMMER does. One thread of an M1 Max
