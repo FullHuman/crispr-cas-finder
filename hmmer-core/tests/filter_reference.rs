@@ -343,8 +343,8 @@ fn integer_bounds_are_never_below_the_exact_scores_and_stay_tight() {
 
 /// The integer bounds do not depend on the instruction set: every one this
 /// processor supports gives the portable kernels' results, bit for bit, for
-/// the whole-sequence bounds, the block-wise record and the bounds within
-/// blocks. Rows in registers and rows in memory are both covered: with the
+/// the whole-sequence MSV and Viterbi bounds, the block-wise record and the
+/// bounds within blocks. Rows in registers and rows in memory are both covered: with the
 /// widest vectors a row of 1,600 nodes still spills to memory.
 #[test]
 fn integer_bounds_are_the_same_on_every_instruction_set() {
@@ -428,6 +428,7 @@ fn integer_bounds_are_the_same_on_every_instruction_set() {
                                 i8_msv::msv_lower_bound(seq, l, om).map(bits),
                                 bits(i16_msv::msv_upper_bound(seq, l, om)),
                                 i16_msv::msv_lower_bound(seq, l, om).map(bits),
+                                bits(viterbi_upper_bound(seq, l, om)),
                                 blocks.bounds.iter().copied().map(bits).collect::<Vec<_>>(),
                                 blocks.saturated,
                                 states,

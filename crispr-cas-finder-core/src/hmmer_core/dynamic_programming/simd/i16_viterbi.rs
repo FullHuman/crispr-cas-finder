@@ -1,13 +1,13 @@
-// simd/i16_viterbi.rs — i16x8 over-estimate of the Viterbi filter score
+// simd/i16_viterbi.rs — 16-bit over-estimate of the Viterbi filter score
 //
 // Same idea as i16_msv.rs, applied to the full match/insert/delete
-// recurrence of f32_viterbi.rs: 16-bit cells, eight lanes, every score
-// rounded up and every clamp going upward, so the result is never below the
-// exact Viterbi filter score. A sequence whose over-estimate fails the
-// Viterbi threshold is dropped without running the exact filter. By default
-// a finite over-estimate also stands in for the score of a sequence that
-// passes; the exact filter runs when the bound saturates and, for every
-// sequence the bound lets through, with `FilterPolicy::exact`.
+// recurrence of f32_viterbi.rs: 16-bit cells, every score rounded up and
+// every clamp going upward, so the result is never below the exact Viterbi
+// filter score. A sequence whose over-estimate fails the Viterbi threshold
+// is dropped without running the exact filter. By default a finite
+// over-estimate also stands in for the score of a sequence that passes; the
+// exact filter runs when the bound saturates and, for every sequence the
+// bound lets through, with `FilterPolicy::exact`.
 //
 // The N, C and J self-loops share one score, tloop. Subtracting i·tloop from
 // every state of row i removes them and leaves delta = -tloop to add for
@@ -16,9 +16,15 @@
 // subtracted from the begin state on entry and added back to the row
 // maximum on exit, and one extra unit on entry covers the rounding of that
 // difference. Transitions between rows then need no delta at all.
+//
+// As for the MSV bounds (int_msv.rs), the kernel runs with the widest
+// vectors the processor has, eight to thirty-two lanes, compiled once per
+// instruction set; the result does not depend on the striping.
 
-use super::i16_msv::{CEIL_GUARD, I16x8, LANES, SAFETY_MARGIN, emission_units};
-use super::int_msv::DELTA_FRACTION_BITS;
+use super::i16_msv::{CEIL_GUARD, SAFETY_MARGIN, emission_units};
+#[cfg(target_arch = "x86_64")]
+use super::int_msv::{Avx2Kernels, Avx512Kernels, Sse41Kernels};
+use super::int_msv::{DELTA_FRACTION_BITS, Isa, Kernels, PortableKernels};
 use super::oprofile::{
     NTSC_PER_Q, OptimizedProfile, TSC_BM, TSC_DM, TSC_II, TSC_IM, TSC_MD, TSC_MI, TSC_MM, XST_C,
     XST_E, XST_J, XST_N, XTR_LOOP, XTR_MOVE,
@@ -41,12 +47,13 @@ fn special_units(scale: f64, nats: f64) -> i64 {
     }
 }
 
-/// DP rows of the Viterbi over-estimate, kept by a worker across sequences.
+/// DP rows of the Viterbi over-estimate, kept by a worker across sequences:
+/// match, insert and delete cells, vector by vector.
 #[derive(Debug, Default)]
 pub struct Rows {
-    mmx: Vec<I16x8>,
-    imx: Vec<I16x8>,
-    dmx: Vec<I16x8>,
+    mmx: Vec<i16>,
+    imx: Vec<i16>,
+    dmx: Vec<i16>,
 }
 
 /// Upper bound, in nats, on the score `viterbi_filter_f32` returns.
@@ -67,6 +74,77 @@ pub fn viterbi_upper_bound_with(
     om: &OptimizedProfile,
     rows: &mut Rows,
 ) -> f32 {
+    // The kernels of an instruction set run only where it is available,
+    // which `OptimizedProfile` guarantees of the one it records (see
+    // `int_msv::Kernels`).
+    match om.isa() {
+        Isa::Portable => {
+            portable::viterbi_upper_bound::<{ Isa::Portable.lanes::<i16>() }>(dsq, l, om, rows)
+        }
+        #[cfg(target_arch = "x86_64")]
+        Isa::Sse41 => unsafe {
+            sse41::viterbi_upper_bound::<{ Isa::Sse41.lanes::<i16>() }>(dsq, l, om, rows)
+        },
+        #[cfg(target_arch = "x86_64")]
+        Isa::Avx2 => unsafe {
+            avx2::viterbi_upper_bound::<{ Isa::Avx2.lanes::<i16>() }>(dsq, l, om, rows)
+        },
+        #[cfg(target_arch = "x86_64")]
+        Isa::Avx512 => unsafe {
+            avx512::viterbi_upper_bound::<{ Isa::Avx512.lanes::<i16>() }>(dsq, l, om, rows)
+        },
+    }
+}
+
+/// The kernel compiled for one instruction set.
+macro_rules! isa_kernel {
+    ($(#[$meta:meta])* $module:ident, $kernels:ty $(, $feature:literal)*) => {
+        $(#[$meta])*
+        mod $module {
+            use super::*;
+
+            $(#[target_feature(enable = $feature)])*
+            pub(super) fn viterbi_upper_bound<const N: usize>(
+                dsq: &[u8],
+                l: usize,
+                om: &OptimizedProfile,
+                rows: &mut Rows,
+            ) -> f32 {
+                viterbi_upper_bound_impl::<N, $kernels>(dsq, l, om, rows)
+            }
+        }
+    };
+}
+
+isa_kernel!(portable, PortableKernels);
+isa_kernel!(
+    #[cfg(target_arch = "x86_64")]
+    sse41,
+    Sse41Kernels,
+    "sse4.1"
+);
+isa_kernel!(
+    #[cfg(target_arch = "x86_64")]
+    avx2,
+    Avx2Kernels,
+    "avx2"
+);
+isa_kernel!(
+    #[cfg(target_arch = "x86_64")]
+    avx512,
+    Avx512Kernels,
+    "avx512bw"
+);
+
+/// [`viterbi_upper_bound_with`] on vectors of `N` lanes with the shift of
+/// `K`; `om`'s Viterbi tables must be striped for `N` lanes.
+#[inline(always)]
+fn viterbi_upper_bound_impl<const N: usize, K: Kernels>(
+    dsq: &[u8],
+    l: usize,
+    om: &OptimizedProfile,
+    rows: &mut Rows,
+) -> f32 {
     if l == 0 {
         return f32::INFINITY;
     }
@@ -79,7 +157,8 @@ pub fn viterbi_upper_bound_with(
     }
 
     let scale = om.msv_scale;
-    let q = om.q8;
+    let q = om.q_vit;
+    debug_assert_eq!(om.isa().lanes::<i16>(), N);
     let length = l as f64;
     let tmove_units = special_units(scale, tmove);
     let e_loop_units = special_units(scale, ln(om.xf[XST_E][XTR_LOOP]));
@@ -95,19 +174,28 @@ pub fn viterbi_upper_bound_with(
     // the bottom only raises values that could not win anyway.
     let base =
         tmove_units + i64::from(om.vit_min_begin_units) - delta_of(l as u64 * delta_step) - 1;
-    let floor_v = I16x8::splat(i16::MIN);
     for row in [&mut rows.mmx, &mut rows.imx, &mut rows.dmx] {
         row.clear();
-        row.resize(q, floor_v);
+        row.resize(q * N, i16::MIN);
     }
+    let (mmx, _) = rows.mmx.as_chunks_mut::<N>();
+    let (imx, _) = rows.imx.as_chunks_mut::<N>();
+    let (dmx, _) = rows.dmx.as_chunks_mut::<N>();
 
     let mut xj = i64::MIN / 2;
     let mut xc = i64::MIN / 2;
     let mut xb = tmove_units;
 
-    let (transitions, _) = om.vit_units.as_chunks::<LANES>();
+    let (transitions, _) = om.vit_units.as_chunks::<N>();
     let (main_transitions, dd_transitions) = transitions.split_at(NTSC_PER_Q * q);
     let (main_transitions, _) = main_transitions.as_chunks::<NTSC_PER_Q>();
+    let (emissions, _) = om.msv_units.as_chunks::<N>();
+    assert!(emissions.len() >= om.kp * q, "emission table too short");
+    let residue_vectors = |residue: u8| -> &[[i16; N]] {
+        let xi = residue as usize;
+        let xi = if xi < om.kp { xi } else { 0 };
+        &emissions[xi * q..][..q]
+    };
     let exit_base = base + 32_768;
     // Cumulative delta of the current row, as a fixed-point number.
     let mut delta_acc = 0u64;
@@ -122,12 +210,14 @@ pub fn viterbi_upper_bound_with(
         if entry > 65_535 {
             return f32::INFINITY;
         }
-        let xb_v = I16x8::splat((entry.max(0) - 32_768) as i16);
-        let xe = viterbi_row(
-            rows,
+        let xb_v = Simd::<i16, N>::splat((entry.max(0) - 32_768) as i16);
+        let xe = viterbi_row::<N, K>(
+            mmx,
+            imx,
+            dmx,
             main_transitions,
             dd_transitions,
-            residue_vectors(om, dsq[row]),
+            residue_vectors(dsq[row]),
             xb_v,
         );
         if xe == i16::MAX {
@@ -150,12 +240,14 @@ pub fn viterbi_upper_bound_with(
         if entry > 65_535 {
             return f32::INFINITY;
         }
-        let xb_v = I16x8::splat((entry.max(0) - 32_768) as i16);
-        let xe = viterbi_row(
-            rows,
+        let xb_v = Simd::<i16, N>::splat((entry.max(0) - 32_768) as i16);
+        let xe = viterbi_row::<N, K>(
+            mmx,
+            imx,
+            dmx,
             main_transitions,
             dd_transitions,
-            residue_vectors(om, residue),
+            residue_vectors(residue),
             xb_v,
         );
         if xe == i16::MAX {
@@ -178,35 +270,31 @@ pub fn viterbi_upper_bound_with(
     }
 }
 
-/// Striped match emissions of `residue`, in integer units.
-#[inline(always)]
-fn residue_vectors(om: &OptimizedProfile, residue: u8) -> &[[i16; LANES]] {
-    om.msv_units_row(residue).as_chunks::<LANES>().0
-}
-
 /// One row of the recurrence: updates the rows in place and returns the
 /// maximum over the new match and delete cells.
 #[inline(always)]
-fn viterbi_row(
-    rows: &mut Rows,
-    main_transitions: &[[[i16; LANES]; NTSC_PER_Q]],
-    dd_transitions: &[[i16; LANES]],
-    rsc_vectors: &[[i16; LANES]],
-    xb_v: I16x8,
+#[allow(clippy::too_many_arguments)]
+fn viterbi_row<const N: usize, K: Kernels>(
+    mmx: &mut [[i16; N]],
+    imx: &mut [[i16; N]],
+    dmx: &mut [[i16; N]],
+    main_transitions: &[[[i16; N]; NTSC_PER_Q]],
+    dd_transitions: &[[i16; N]],
+    rsc_vectors: &[[i16; N]],
+    xb_v: Simd<i16, N>,
 ) -> i16 {
-    let Rows { mmx, imx, dmx } = rows;
     let q = mmx.len();
-    let floor_v = I16x8::splat(i16::MIN);
+    let floor_v = Simd::<i16, N>::splat(i16::MIN);
     let mut dcv = floor_v;
     let mut xe_v = floor_v;
 
     // Right-shift previous row by 1 lane (Farrar shift)
-    let mut mpv = shift_right(mmx[q - 1]);
-    let mut dpv = shift_right(dmx[q - 1]);
-    let mut ipv = shift_right(imx[q - 1]);
+    let mut mpv = K::shift_right_one(Simd::from_array(mmx[q - 1]));
+    let mut dpv = K::shift_right_one(Simd::from_array(dmx[q - 1]));
+    let mut ipv = K::shift_right_one(Simd::from_array(imx[q - 1]));
 
     for (qi, (tsc, rsc_vector)) in main_transitions.iter().zip(rsc_vectors).enumerate() {
-        let t = |kind: usize| I16x8::from_array(tsc[kind]);
+        let t = |kind: usize| Simd::<i16, N>::from_array(tsc[kind]);
 
         // M(i,q) = max(B+tBM, M(i-1,q-1)+tMM, I(i-1,q-1)+tIM, D(i-1,q-1)+tDM) + rsc
         let mut sv = xb_v
@@ -214,16 +302,16 @@ fn viterbi_row(
             .simd_max(mpv.saturating_add(t(TSC_MM)));
         sv = sv.simd_max(ipv.saturating_add(t(TSC_IM)));
         sv = sv.simd_max(dpv.saturating_add(t(TSC_DM)));
-        sv = sv.saturating_add(I16x8::from_array(*rsc_vector));
+        sv = sv.saturating_add(Simd::from_array(*rsc_vector));
 
         xe_v = xe_v.simd_max(sv);
 
-        mpv = mmx[qi];
-        dpv = dmx[qi];
-        ipv = imx[qi];
+        mpv = Simd::from_array(mmx[qi]);
+        dpv = Simd::from_array(dmx[qi]);
+        ipv = Simd::from_array(imx[qi]);
 
-        mmx[qi] = sv;
-        dmx[qi] = dcv;
+        mmx[qi] = sv.to_array();
+        dmx[qi] = dcv.to_array();
 
         // D carry: M(i,k) + tMD
         dcv = sv.saturating_add(t(TSC_MD));
@@ -231,29 +319,33 @@ fn viterbi_row(
         // I(i,q) = max(M(i-1,q)+tMI, I(i-1,q)+tII)
         imx[qi] = mpv
             .saturating_add(t(TSC_MI))
-            .simd_max(ipv.saturating_add(t(TSC_II)));
+            .simd_max(ipv.saturating_add(t(TSC_II)))
+            .to_array();
     }
 
     // D->D propagation across stripes. One full pass, then passes that
     // stop at the first vector the carry does not improve; a lane can
     // need as many passes as there are lanes.
-    dcv = shift_right(dcv);
+    dcv = K::shift_right_one(dcv);
     for (dmx_q, dd) in dmx.iter_mut().zip(dd_transitions) {
-        *dmx_q = (*dmx_q).simd_max(dcv);
-        xe_v = xe_v.simd_max(*dmx_q);
-        dcv = (*dmx_q).saturating_add(I16x8::from_array(*dd));
+        let cell = Simd::from_array(*dmx_q).simd_max(dcv);
+        *dmx_q = cell.to_array();
+        xe_v = xe_v.simd_max(cell);
+        dcv = cell.saturating_add(Simd::from_array(*dd));
     }
-    for _pass in 1..LANES {
-        dcv = shift_right(dcv);
+    for _pass in 1..N {
+        dcv = K::shift_right_one(dcv);
         let mut reached_end = true;
         for (dmx_q, dd) in dmx.iter_mut().zip(dd_transitions) {
-            if !dcv.simd_gt(*dmx_q).any() {
+            let cell = Simd::from_array(*dmx_q);
+            if !dcv.simd_gt(cell).any() {
                 reached_end = false;
                 break;
             }
-            *dmx_q = (*dmx_q).simd_max(dcv);
-            xe_v = xe_v.simd_max(*dmx_q);
-            dcv = (*dmx_q).saturating_add(I16x8::from_array(*dd));
+            let cell = cell.simd_max(dcv);
+            *dmx_q = cell.to_array();
+            xe_v = xe_v.simd_max(cell);
+            dcv = cell.saturating_add(Simd::from_array(*dd));
         }
         if !reached_end {
             break;
@@ -261,11 +353,4 @@ fn viterbi_row(
     }
 
     xe_v.reduce_max()
-}
-
-/// Right-shift an i16x8 by 1 lane, filling with the floor value.
-#[inline(always)]
-fn shift_right(v: I16x8) -> I16x8 {
-    let fill = I16x8::splat(i16::MIN);
-    simd_swizzle!(v, fill, [8, 0, 1, 2, 3, 4, 5, 6])
 }

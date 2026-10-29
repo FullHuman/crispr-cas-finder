@@ -20,19 +20,6 @@ use std::simd::num::SimdInt;
 
 pub use super::int_msv::{CEIL_GUARD, SAFETY_MARGIN, units_above};
 
-/// Eight 16-bit lanes: the vectors of the Viterbi over-estimate
-/// (i16_viterbi.rs) and of the emission tables it shares.
-pub type I16x8 = Simd<i16, 8>;
-
-/// Lanes per vector of the Viterbi over-estimate.
-pub const LANES: usize = 8;
-
-/// Number of i16x8 vectors for a model of `m` nodes.
-#[inline]
-pub fn vector_count(m: usize) -> usize {
-    int_msv::vector_count(m, LANES)
-}
-
 /// Integer units per nat for a model of `m` nodes, shared with the Viterbi
 /// over-estimate and its transition table.
 ///

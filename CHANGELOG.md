@@ -34,6 +34,14 @@ with the pull request that merged it.
 
 ### Cas detection
 
+- The integer MSV and Viterbi bounds of the HMM search, which decide the
+  filters for nearly every sequence, run with the widest vectors the
+  processor has: the kernels are compiled once per instruction set and chosen
+  at run time (SSE4.1, AVX2 and AVX-512BW on x86-64, the portable baseline
+  elsewhere), and the bounds come out identical on every one. The HMM reader
+  parses a model without a string per line or a vector per row. One thread
+  searches the E. coli K-12 proteome against the embedded CasFinder 2.0.3
+  profiles in about half the time, with identical output.
 - The HMM search decides its MSV and bias filters with an 8-bit lower bound on
   the MSV score, its Viterbi filter with a 16-bit upper bound, and decodes
   posteriors in probability space, as HMMER does. One thread of an M1 Max
