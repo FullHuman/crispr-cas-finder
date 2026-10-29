@@ -249,11 +249,15 @@ def cas_section(rows, genomes):
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("timing", type=Path, help="results directory of the sequential timing runs")
-    parser.add_argument("--outputs", type=Path,
-                        help="results directory compare.py was run on (default: the timing one)")
+    parser.add_argument("--outputs", type=Path, nargs="+",
+                        help="results directories compare.py was run on, combined when several "
+                             "are given (default: the timing one)")
     parser.add_argument("--out", type=Path, help="file to write (default: summary.md in timing)")
     args = parser.parse_args()
-    outputs = args.outputs or args.timing
+    outputs = args.outputs or [args.timing]
+
+    def comparison(name):
+        return [row for directory in outputs for row in read(directory / name)]
 
     t = Timings(read(args.timing / "timings.csv"))
     sections = [
@@ -263,8 +267,8 @@ def main():
         scaling_section(t),
         spread_section(t),
         browser_section(read(args.timing / "browser_timings.csv")),
-        array_section(read(outputs / "arrays.csv")),
-        cas_section(read(outputs / "cas_systems.csv"), read(outputs / "genomes.csv")),
+        array_section(comparison("arrays.csv")),
+        cas_section(comparison("cas_systems.csv"), comparison("genomes.csv")),
     ]
     text = "\n".join(s for s in sections if s)
     (args.out or args.timing / "summary.md").write_text(text)

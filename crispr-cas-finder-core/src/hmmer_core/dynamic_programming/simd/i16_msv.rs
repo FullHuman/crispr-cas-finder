@@ -1,9 +1,12 @@
-// simd/i16_msv.rs — i16x8 over-estimate of the MSV score
+// simd/i16_msv.rs — i16x8 bounds on the MSV score
 //
 // The integer MSV bound of int_msv.rs on 16-bit cells, eight lanes per
 // vector. With thousands of units per nat it sits within a few hundredths
 // of a nat of the exact score, so nearly everything it lets through is a
-// real MSV hit. The 8-bit bound of i8_msv.rs runs before it.
+// real MSV hit. Only the exact filter policy runs it (pipeline/search.rs):
+// the 8-bit bound of i8_msv.rs runs first, and this one looks at the blocks
+// of rows that bound could not settle. The default policy decides with the
+// 8-bit lower bound alone.
 
 use super::int_msv::{self, Blocks, Table, Unit};
 use super::oprofile::OptimizedProfile;

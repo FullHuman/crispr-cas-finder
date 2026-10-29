@@ -98,7 +98,13 @@ pub struct CrisprArray {
 pub struct DetectionParams {
     pub min_repeat_length: usize,
     pub max_repeat_length: usize,
+    /// Shortest distance, in bases, between the two copies of a repeat that
+    /// can seed an array. The spacers of the array itself are bounded by
+    /// `min_spacer_to_repeat_ratio` and `max_spacer_to_repeat_ratio`
+    /// instead, so a reported spacer can lie outside these two limits.
     pub min_spacer_length: usize,
+    /// Longest distance, in bases, between the two copies of a repeat that
+    /// can seed an array.
     pub max_spacer_length: usize,
     pub repeat_mismatch_percent: f64,
     pub truncated_repeat_mismatch_percent: f64,

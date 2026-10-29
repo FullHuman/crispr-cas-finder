@@ -1,8 +1,11 @@
-// simd/i8_msv.rs — i8x16 over-estimate of the MSV score
+// simd/i8_msv.rs — i8x16 bounds on the MSV score
 //
 // The integer MSV bound of int_msv.rs on 8-bit cells, sixteen lanes per
-// vector. Its coarse scale makes it looser than the 16-bit bound, so what it
-// lets through is checked by that one next; it costs half as much per cell.
+// vector, at half the cost per cell of the 16-bit bound. By default its
+// lower bound alone decides the MSV and bias filters, standing in for the
+// exact score (pipeline/search.rs). With the exact filter policy its upper
+// bound runs first and, being coarser than the 16-bit bound, leaves what it
+// lets through to that one.
 
 use super::int_msv::{self, Blocks, Table, Unit};
 use super::oprofile::OptimizedProfile;

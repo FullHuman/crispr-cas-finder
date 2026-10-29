@@ -88,9 +88,21 @@ pub struct Cli {
     min_repeat_length: usize,
     #[arg(long, alias = "maxDR", value_name = "INT", default_value_t = 55)]
     max_repeat_length: usize,
-    #[arg(long, alias = "minSP", value_name = "INT", default_value_t = 25)]
+    #[arg(
+        long,
+        alias = "minSP",
+        value_name = "INT",
+        default_value_t = 25,
+        help = "Shortest distance between the two copies of a repeat that can seed an array; the spacers themselves are bounded by --min-spacer-to-repeat-ratio and --max-spacer-to-repeat-ratio"
+    )]
     min_spacer_length: usize,
-    #[arg(long, alias = "maxSP", value_name = "INT", default_value_t = 60)]
+    #[arg(
+        long,
+        alias = "maxSP",
+        value_name = "INT",
+        default_value_t = 60,
+        help = "Longest distance between the two copies of a repeat that can seed an array"
+    )]
     max_spacer_length: usize,
     #[arg(long, alias = "noMism", short = 'n', action = clap::ArgAction::SetTrue)]
     no_mismatch: bool,

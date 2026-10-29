@@ -130,6 +130,10 @@ format are evaluated with MacSyFinder 2 rules implemented in Rust.
 
 #### Output files
 
+Without `--outdir`, the files go to `Result_<name>` in the current directory,
+`<name>` being the input file's name without its extension, or to
+`Result_<name>_2` and so on when that directory exists.
+
 | File | Content |
 | --- | --- |
 | `report.json` | Everything below in one document: parameters, per-sequence summaries, arrays, Cas systems, arrays near a Cas system, loci, totals |
@@ -140,7 +144,7 @@ format are evaluated with MacSyFinder 2 rules implemented in Rust.
 | `cas_systems.tsv`, `cas_proteins.faa` | With `--cas`: one row per Cas gene, and the Cas proteins |
 | `associations.tsv` | With `--cas`: arrays within `--vicinity` bp (default 600) of a Cas system |
 | `loci.tsv` | With `--locus-distance`: arrays and Cas systems chained by proximity |
-| `annotation/` | With `--cas`: all predicted proteins, their coordinates, and every HMM hit that passed the thresholds |
+| `annotation/` | With `--cas`: `proteins.faa` with all predicted proteins, `genes.gff` with their coordinates, and `cas_hits.tsv` with every HMM hit that passed the thresholds |
 
 ### Python
 

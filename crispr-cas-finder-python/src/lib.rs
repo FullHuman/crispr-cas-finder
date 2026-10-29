@@ -240,9 +240,13 @@ fn crispr_array_from_core(a: &CoreCrisprArray) -> CrisprArray {
 /// max_repeat_length : int, optional
 ///     Maximum direct repeat length in bp. Default: 55.
 /// min_spacer_length : int, optional
-///     Minimum spacer length in bp. Default: 25.
+///     Shortest distance in bp between the two copies of a repeat that can
+///     seed an array; the spacers themselves may be as short as 0.6 times the
+///     repeat length. Default: 25.
 /// max_spacer_length : int, optional
-///     Maximum spacer length in bp. Default: 60.
+///     Longest distance in bp between the two copies of a repeat that can seed
+///     an array; spacers up to 2.5 times the repeat length are kept.
+///     Default: 60.
 /// no_mismatch : bool, optional
 ///     If ``True``, require repeats to be identical (no mismatches allowed).
 ///     Default: ``False``.
@@ -324,9 +328,13 @@ fn find_crispr_arrays(
 /// max_repeat_length : int, optional
 ///     Maximum direct repeat length in bp. Default: 55.
 /// min_spacer_length : int, optional
-///     Minimum spacer length in bp. Default: 25.
+///     Shortest distance in bp between the two copies of a repeat that can
+///     seed an array; the spacers themselves may be as short as 0.6 times the
+///     repeat length. Default: 25.
 /// max_spacer_length : int, optional
-///     Maximum spacer length in bp. Default: 60.
+///     Longest distance in bp between the two copies of a repeat that can seed
+///     an array; spacers up to 2.5 times the repeat length are kept.
+///     Default: 60.
 /// no_mismatch : bool, optional
 ///     If ``True``, require repeats to be identical. Default: ``False``.
 /// min_spacer_count : int, optional
