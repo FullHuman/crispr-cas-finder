@@ -21,6 +21,8 @@ use hmmer_core::simd::f32_msv;
 use hmmer_core::simd::f32_viterbi;
 use hmmer_core::simd::forward_filter;
 use hmmer_core::simd::fwd_bck;
+use hmmer_core::simd::i8_msv;
+use hmmer_core::simd::int_msv::Isa;
 use hmmer_core::simd::oprofile::OptimizedProfile;
 use hmmer_core::test_helpers::*;
 use hmmer_core::tophits::TopHits;
@@ -238,6 +240,49 @@ fn bench_generic_msv(c: &mut Criterion) {
 }
 
 // ===================================================================
+// 8-bit MSV lower bound benchmark, per instruction set
+// ===================================================================
+
+fn bench_msv_lower_bound(c: &mut Criterion) {
+    let abc = Alphabet::amino();
+    let mut rng = XorShift64::new(42);
+    let l = 400;
+    let bg = BackgroundModel::new(&abc);
+    let nseqs = 100;
+    let seqs: Vec<Vec<Dsq>> = (0..nseqs)
+        .map(|_| random_digital_seq(&mut rng, &bg.residue_frequencies, abc.canonical_size, l))
+        .collect();
+
+    let mut group = c.benchmark_group("msv_lower_bound_i8");
+    for m in [50, 150, 200, 250] {
+        let hmm = hmm_sample(&mut rng, m, &abc);
+        let mut gm = Profile::new(hmm.num_nodes, &abc);
+        hmmer_core::modelconfig::profile_config(&hmm, &bg, &mut gm, l, SearchMode::Local);
+        for isa in Isa::available() {
+            let mut om = OptimizedProfile::from_profile_with_isa(&gm, isa);
+            om.reconfigure_length(l);
+            let mut row = Vec::new();
+            group.bench_function(
+                BenchmarkId::new(format!("{isa:?}"), format!("M{m}_L{l}")),
+                |b| {
+                    b.iter(|| {
+                        for dsq in &seqs {
+                            black_box(i8_msv::msv_lower_bound_with(
+                                black_box(dsq),
+                                dsq.len(),
+                                &om,
+                                &mut row,
+                            ));
+                        }
+                    })
+                },
+            );
+        }
+    }
+    group.finish();
+}
+
+// ===================================================================
 // DP matrix allocation/growth benchmark
 // ===================================================================
 
@@ -317,6 +362,7 @@ criterion_group!(
     bench_generic_forward,
     bench_checkpointed_forward,
     bench_generic_msv,
+    bench_msv_lower_bound,
     bench_gmx_operations,
     bench_occupancy,
     bench_tophits_sort,

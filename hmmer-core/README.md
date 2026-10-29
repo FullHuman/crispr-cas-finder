@@ -20,9 +20,15 @@ compiler pinned in the repository's `rust-toolchain.toml` for `std::simd`.
 
 ## SIMD
 
-The kernels use four-lane portable `Simd<f32, 4>`. Rust lowers these operations
-for the compilation target (including WASM SIMD); there is no runtime CPU
-dispatch or separate AVX2 backend. Native builds use portable target defaults.
-For local performance measurements, use `RUSTFLAGS="-C target-cpu=native" cargo bench`.
+The floating-point kernels use four-lane portable `Simd<f32, 4>`. Rust lowers
+these operations for the compilation target (including WASM SIMD).
+
+The integer MSV bounds (`simd/int_msv.rs`), which decide the MSV filter for
+nearly every sequence, are compiled once per instruction set and chosen at run
+time (`int_msv::Isa`): 128-bit vectors on the portable baseline and with
+SSE4.1, 256-bit with AVX2 and 512-bit with AVX-512BW on x86-64. The bounds do
+not depend on the vector width, so every instruction set gives the same
+results. For local measurements of the other kernels, use
+`RUSTFLAGS="-C target-cpu=native" cargo bench`.
 
 This crate is licensed under GPL-3.0-or-later.

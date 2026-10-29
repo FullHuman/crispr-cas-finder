@@ -340,3 +340,109 @@ fn integer_bounds_are_never_below_the_exact_scores_and_stay_tight() {
         );
     }
 }
+
+/// The integer bounds do not depend on the instruction set: every one this
+/// processor supports gives the portable kernels' results, bit for bit, for
+/// the whole-sequence bounds, the block-wise record and the bounds within
+/// blocks. Rows in registers and rows in memory are both covered: with the
+/// widest vectors a row of 1,600 nodes still spills to memory.
+#[test]
+fn integer_bounds_are_the_same_on_every_instruction_set() {
+    let alphabet = Alphabet::amino();
+    let background = BackgroundModel::new(&alphabet);
+    let isas = int_msv::Isa::available();
+    assert_eq!(isas[0], int_msv::Isa::Portable);
+    eprintln!("instruction sets: {isas:?}");
+    let bits = |value: f32| value.to_bits();
+    for seed in [0, 3, 42] {
+        let mut rng = XorShift64::new(seed);
+        for m in [1, 2, 8, 16, 17, 33, 64, 65, 129, 300, 400, 1600] {
+            let hmm = hmm_sample(&mut rng, m, &alphabet);
+            for l in [1, 2, 7, 64, 65, 200] {
+                let mut profile = Profile::new(m, &alphabet);
+                modelconfig::profile_config(&hmm, &background, &mut profile, l, SearchMode::Local);
+                let optimized: Vec<OptimizedProfile> = isas
+                    .iter()
+                    .map(|&isa| OptimizedProfile::from_profile_with_isa(&profile, isa))
+                    .collect();
+                for (isa, om) in isas.iter().zip(&optimized) {
+                    assert_eq!(om.isa(), *isa);
+                }
+                let random = random_digital_seq(
+                    &mut rng,
+                    &background.residue_frequencies,
+                    alphabet.canonical_size,
+                    l,
+                );
+                let best_residue = |k: usize| {
+                    (0..alphabet.canonical_size)
+                        .max_by(|&left, &right| {
+                            profile.residue_scores_for(left)[k * 2]
+                                .total_cmp(&profile.residue_scores_for(right)[k * 2])
+                        })
+                        .unwrap() as u8
+                };
+                let consensus: Vec<u8> = (0..l)
+                    .map(|position| best_residue(position % m + 1))
+                    .collect();
+                let mut half = random.clone();
+                for (position, residue) in half.iter_mut().enumerate().skip(l / 2) {
+                    *residue = best_residue(position % m + 1);
+                }
+                for seq in [&random, &consensus, &half] {
+                    let results: Vec<_> = optimized
+                        .iter()
+                        .map(|om| {
+                            let mut blocks = int_msv::Blocks::default();
+                            let upper8 = i8_msv::msv_upper_bound_with(
+                                seq,
+                                l,
+                                om,
+                                &mut Vec::new(),
+                                Some(&mut blocks),
+                            );
+                            let states: Vec<Option<Vec<i64>>> = (0..blocks.bounds.len())
+                                .map(|block| blocks.state_by_node(block, m))
+                                .collect();
+                            let within: Vec<u32> = if blocks.saturated {
+                                Vec::new()
+                            } else {
+                                let every = (1u64 << blocks.bounds.len()) - 1;
+                                (0..blocks.bounds.len())
+                                    .map(|block| 1u64 << block)
+                                    .chain([every])
+                                    .map(|selected| {
+                                        bits(i16_msv::msv_upper_bound_within(
+                                            seq,
+                                            l,
+                                            om,
+                                            &mut Vec::new(),
+                                            &blocks,
+                                            selected,
+                                        ))
+                                    })
+                                    .collect()
+                            };
+                            (
+                                bits(upper8),
+                                i8_msv::msv_lower_bound(seq, l, om).map(bits),
+                                bits(i16_msv::msv_upper_bound(seq, l, om)),
+                                i16_msv::msv_lower_bound(seq, l, om).map(bits),
+                                blocks.bounds.iter().copied().map(bits).collect::<Vec<_>>(),
+                                blocks.saturated,
+                                states,
+                                within,
+                            )
+                        })
+                        .collect();
+                    for (isa, result) in isas.iter().zip(&results).skip(1) {
+                        assert_eq!(
+                            result, &results[0],
+                            "{isa:?} differs from the portable kernels: seed={seed}, M={m}, L={l}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}

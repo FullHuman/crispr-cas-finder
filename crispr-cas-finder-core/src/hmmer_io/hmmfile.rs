@@ -159,44 +159,52 @@ impl HmmFile {
             .consensus_structure
             .then(|| vec![b' '; model_length + 2]);
 
-        let mut line = read_required_line(reader, "node 0 insert emissions or COMPO")?;
-        if line.split_whitespace().next() == Some("COMPO") {
-            let tokens: Vec<_> = line.split_whitespace().skip(1).collect();
-            hmm.model_composition = Some(parse_probability_row(
-                &tokens,
-                alphabet.canonical_size,
-                "COMPO",
-            )?);
-            line = read_required_line(reader, "node 0 insert emissions")?;
+        // One line buffer serves the whole model; the error contexts are
+        // built only when an error is reported.
+        let mut line = String::new();
+        read_required_line_into(reader, &mut line, || {
+            "node 0 insert emissions or COMPO".to_string()
+        })?;
+        if line.split_ascii_whitespace().next() == Some("COMPO") {
+            let mut composition = vec![0.0f32; alphabet.canonical_size];
+            parse_probability_row_into(
+                line.split_ascii_whitespace().skip(1),
+                &mut composition,
+                || "COMPO".to_string(),
+            )?;
+            hmm.model_composition = Some(composition);
+            read_required_line_into(reader, &mut line, || "node 0 insert emissions".to_string())?;
         }
         parse_probability_row_into(
-            &line.split_whitespace().collect::<Vec<_>>(),
+            line.split_ascii_whitespace(),
             hmm.insert_emissions_mut(0),
-            "node 0 insert emissions",
+            || "node 0 insert emissions".to_string(),
         )?;
 
-        let line = read_required_line(reader, "node 0 transitions")?;
+        read_required_line_into(reader, &mut line, || "node 0 transitions".to_string())?;
         parse_probability_row_into(
-            &line.split_whitespace().collect::<Vec<_>>(),
+            line.split_ascii_whitespace(),
             hmm.transitions_mut(0),
-            "node 0 transitions",
+            || "node 0 transitions".to_string(),
         )?;
 
         for node in 1..=model_length {
-            parse_match_row(reader, &mut hmm, &header, format, node)?;
+            parse_match_row(reader, &mut line, &mut hmm, &header, format, node)?;
 
-            let line = read_required_line(reader, &format!("node {node} insert emissions"))?;
+            read_required_line_into(reader, &mut line, || {
+                format!("node {node} insert emissions")
+            })?;
             parse_probability_row_into(
-                &line.split_whitespace().collect::<Vec<_>>(),
+                line.split_ascii_whitespace(),
                 hmm.insert_emissions_mut(node),
-                &format!("node {node} insert emissions"),
+                || format!("node {node} insert emissions"),
             )?;
 
-            let line = read_required_line(reader, &format!("node {node} transitions"))?;
+            read_required_line_into(reader, &mut line, || format!("node {node} transitions"))?;
             parse_probability_row_into(
-                &line.split_whitespace().collect::<Vec<_>>(),
+                line.split_ascii_whitespace(),
                 hmm.transitions_mut(node),
-                &format!("node {node} transitions"),
+                || format!("node {node} transitions"),
             )?;
         }
 
@@ -424,37 +432,53 @@ fn read_header<R: BufRead>(
     }
 }
 
+/// Largest number of annotation columns of any format.
+const MAX_ANNOTATIONS: usize = 5;
+
 fn parse_match_row<R: BufRead>(
     reader: &mut R,
+    line: &mut String,
     hmm: &mut Hmm,
     header: &Header,
     format: AsciiFormat,
     node: usize,
 ) -> Result<(), HmmerError> {
-    let context = format!("node {node} match emissions");
-    let line = read_required_line(reader, &context)?;
-    let tokens: Vec<_> = line.split_whitespace().collect();
-    let expected = 1 + hmm.alphabet.canonical_size + format.annotation_count();
-    if tokens.len() != expected {
-        return Err(HmmerError::Format(format!(
-            "{context}: expected {expected} columns, found {}",
-            tokens.len()
-        )));
-    }
-    let parsed_node: usize = parse_value("model node", tokens[0])?;
+    let context = || format!("node {node} match emissions");
+    read_required_line_into(reader, line, context)?;
+    let canonical_size = hmm.alphabet.canonical_size;
+    let expected = 1 + canonical_size + format.annotation_count();
+    let mut tokens = line.split_ascii_whitespace();
+    let column_count_error = |found: usize| {
+        HmmerError::Format(format!(
+            "{}: expected {expected} columns, found {found}",
+            context()
+        ))
+    };
+    let Some(node_token) = tokens.next() else {
+        return Err(column_count_error(0));
+    };
+    let parsed_node: usize = parse_value("model node", node_token)?;
     if parsed_node != node {
         return Err(HmmerError::Format(format!(
             "expected model node {node}, found {parsed_node}"
         )));
     }
-    let probability_end = 1 + hmm.alphabet.canonical_size;
-    parse_probability_row_into(
-        &tokens[1..probability_end],
-        hmm.match_emissions_mut(node),
-        &context,
-    )?;
+    let probabilities = tokens.by_ref().take(canonical_size);
+    parse_probability_row_into(probabilities, hmm.match_emissions_mut(node), context)?;
 
-    let annotations = &tokens[probability_end..];
+    let mut annotations = [""; MAX_ANNOTATIONS];
+    let mut annotation_count = 0;
+    for token in tokens {
+        if annotation_count == MAX_ANNOTATIONS {
+            return Err(column_count_error(expected + 1));
+        }
+        annotations[annotation_count] = token;
+        annotation_count += 1;
+    }
+    if annotation_count != format.annotation_count() {
+        return Err(column_count_error(1 + canonical_size + annotation_count));
+    }
+    let annotations = &annotations[..annotation_count];
     if header.map {
         let map = hmm.map.as_mut().expect("MAP allocation follows header");
         map[node] = parse_value("MAP annotation", annotations[0])?;
@@ -535,12 +559,25 @@ fn parse_match_row<R: BufRead>(
 
 fn read_required_line<R: BufRead>(reader: &mut R, context: &str) -> Result<String, HmmerError> {
     let mut line = String::new();
-    if reader.read_line(&mut line)? == 0 {
+    read_required_line_into(reader, &mut line, || context.to_string())?;
+    Ok(line)
+}
+
+/// Read the next line into `line`, replacing its contents; `context` names
+/// what the line should hold, for the error when the file ends first.
+fn read_required_line_into<R: BufRead>(
+    reader: &mut R,
+    line: &mut String,
+    context: impl FnOnce() -> String,
+) -> Result<(), HmmerError> {
+    line.clear();
+    if reader.read_line(line)? == 0 {
         return Err(HmmerError::Format(format!(
-            "premature EOF while reading {context}"
+            "premature EOF while reading {}",
+            context()
         )));
     }
-    Ok(line)
+    Ok(())
 }
 
 fn validate_symbol_header(line: &str, alphabet: &Alphabet) -> Result<(), HmmerError> {
@@ -576,43 +613,48 @@ fn validate_transition_header(line: &str) -> Result<(), HmmerError> {
     Ok(())
 }
 
-fn parse_probability_row_into(
-    tokens: &[&str],
+/// Parse exactly `destination.len()` probability scores from `tokens` into
+/// `destination`; `context` names the row for error messages.
+fn parse_probability_row_into<'a>(
+    tokens: impl Iterator<Item = &'a str>,
     destination: &mut [f32],
-    context: &str,
+    context: impl Fn() -> String,
 ) -> Result<(), HmmerError> {
-    let parsed = parse_probability_row(tokens, destination.len(), context)?;
-    destination.copy_from_slice(&parsed);
+    let expected = destination.len();
+    let mut found = 0;
+    for token in tokens {
+        if found == expected {
+            found += 1;
+            break;
+        }
+        destination[found] = parse_probability(token, &context)?;
+        found += 1;
+    }
+    if found != expected {
+        return Err(HmmerError::Format(format!(
+            "{}: expected {expected} probabilities, found {found}",
+            context()
+        )));
+    }
     Ok(())
 }
 
-fn parse_probability_row(
-    tokens: &[&str],
-    expected: usize,
-    context: &str,
-) -> Result<Vec<f32>, HmmerError> {
-    if tokens.len() != expected {
-        return Err(HmmerError::Format(format!(
-            "{context}: expected {expected} probabilities, found {}",
-            tokens.len()
-        )));
-    }
-    tokens
-        .iter()
-        .map(|token| parse_probability(token, context))
-        .collect()
-}
-
-fn parse_probability(token: &str, context: &str) -> Result<f32, HmmerError> {
+fn parse_probability(token: &str, context: &dyn Fn() -> String) -> Result<f32, HmmerError> {
     if token == "*" {
         return Ok(0.0);
     }
-    let score = token.parse::<f32>().map_err(|_| {
-        HmmerError::Format(format!("{context}: invalid probability score `{token}`"))
-    })?;
+    let score = parse_fixed_f32(token)
+        .or_else(|| token.parse::<f32>().ok())
+        .ok_or_else(|| {
+            HmmerError::Format(format!(
+                "{}: invalid probability score `{token}`",
+                context()
+            ))
+        })?;
     if !score.is_finite() || score < 0.0 {
         return Err(HmmerError::Format(format!(
-            "{context}: invalid probability score `{token}`"
+            "{}: invalid probability score `{token}`",
+            context()
         )));
     }
     Ok(if score >= HMMER_ZERO_PROB_SENTINEL {
@@ -620,6 +662,58 @@ fn parse_probability(token: &str, context: &str) -> Result<f32, HmmerError> {
     } else {
         (-score).exp()
     })
+}
+
+/// The value of a plain non-negative decimal such as `2.47921`, the form
+/// HMMER writes every score in, or `None` when the token is anything else or
+/// the fast path cannot guarantee the result `str::parse::<f32>` would give.
+///
+/// The digits are read as an integer `n` of at most 15 digits, exact in
+/// double precision, and divided by a power of ten that is exact too, so the
+/// quotient is the correctly rounded double of the value. Narrowing it to
+/// single precision then gives the correctly rounded `f32` unless that
+/// double lies exactly on a rounding boundary between two `f32` values, where
+/// the value itself may lie on either side; such tokens, and values outside
+/// the normal `f32` range, take the slow path.
+fn parse_fixed_f32(token: &str) -> Option<f32> {
+    const POWERS_OF_TEN: [f64; 16] = [
+        1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15,
+    ];
+    let bytes = token.as_bytes();
+    let mut mantissa: u64 = 0;
+    let mut digits = 0usize;
+    let mut fraction_digits: Option<usize> = None;
+    for &byte in bytes {
+        match byte {
+            b'0'..=b'9' => {
+                mantissa = mantissa * 10 + u64::from(byte - b'0');
+                digits += 1;
+                if let Some(count) = fraction_digits.as_mut() {
+                    *count += 1;
+                }
+            }
+            b'.' if fraction_digits.is_none() => fraction_digits = Some(0),
+            _ => return None,
+        }
+    }
+    let fraction_digits = fraction_digits.unwrap_or(0);
+    if digits == 0 || digits > 15 || fraction_digits == digits {
+        return None;
+    }
+    if mantissa == 0 {
+        return Some(0.0);
+    }
+    let value = mantissa as f64 / POWERS_OF_TEN[fraction_digits];
+    if !(f64::from(f32::MIN_POSITIVE)..=f64::from(f32::MAX)).contains(&value) {
+        return None;
+    }
+    // The 29 low bits of a double are what single precision drops; a lone
+    // top bit there is a rounding boundary.
+    const DROPPED_BITS: u32 = f64::MANTISSA_DIGITS - f32::MANTISSA_DIGITS;
+    if value.to_bits() & ((1 << DROPPED_BITS) - 1) == 1 << (DROPPED_BITS - 1) {
+        return None;
+    }
+    Some(value as f32)
 }
 
 fn required_text<'a>(tag: &str, value: &'a str) -> Result<&'a str, HmmerError> {
@@ -890,6 +984,67 @@ fn annotation_at(annotation: Option<&[u8]>, node: usize) -> char {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fixed_decimal_fast_path_matches_the_standard_parser() {
+        // Every fixed-point token of up to seven decimals near the values
+        // HMMER writes, plus the boundaries of the fast path.
+        let mut rng = crate::hmmer_core::rng::XorShift64::new(7);
+        let mut checked = 0;
+        for _ in 0..200_000 {
+            let decimals = (rng.random() * 8.0) as usize;
+            let magnitude = (rng.random() * 100_000.0) as u64;
+            let fraction = (rng.random() * 10f64.powi(decimals as i32)) as u64;
+            let token = if decimals == 0 {
+                format!("{magnitude}")
+            } else {
+                format!("{magnitude}.{fraction:0width$}", width = decimals)
+            };
+            if let Some(fast) = parse_fixed_f32(&token) {
+                assert_eq!(
+                    fast.to_bits(),
+                    token.parse::<f32>().unwrap().to_bits(),
+                    "{token}"
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked > 190_000);
+        for token in [
+            "0",
+            "0.0",
+            "0.00000",
+            "1",
+            "2.47921",
+            "99999.0",
+            "0.5",
+            "1234567.1234567",
+        ] {
+            assert_eq!(
+                parse_fixed_f32(token).map(f32::to_bits),
+                Some(token.parse::<f32>().unwrap().to_bits()),
+                "{token}"
+            );
+        }
+        // Not a plain decimal, too many digits, outside the normal range, or
+        // (16777217 = 2^24 + 1) exactly on a single-precision rounding
+        // boundary: all left to the standard parser.
+        for token in [
+            "*",
+            "",
+            ".",
+            "-1.0",
+            "1e5",
+            "1.0.0",
+            "1234567890123456",
+            "+1",
+            " 1",
+            "16777217",
+            "0.00000000000000000000000000000000000001",
+        ] {
+            assert_eq!(parse_fixed_f32(token), None, "{token}");
+        }
+    }
     use std::io::Cursor;
 
     #[test]
@@ -903,7 +1058,8 @@ mod tests {
 
     #[test]
     fn rejects_malformed_probability() {
-        let error = parse_probability("not-a-number", "test row").expect_err("must fail");
+        let error =
+            parse_probability("not-a-number", &|| "test row".to_string()).expect_err("must fail");
         assert!(error.to_string().contains("not-a-number"));
     }
 }
