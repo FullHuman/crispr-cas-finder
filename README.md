@@ -6,7 +6,7 @@ An experimental, parallel Rust implementation for exploring CRISPR arrays and ca
 
 ## What is crispr-cas-finder?
 
-crispr-cas-finder is an independent implementation inspired by [CRISPRCasFinder](https://github.com/dcouvin/CRISPRCasFinder). This first public release is intended for experimental use and feedback. Detection behavior and APIs may change. See [limitations and validation](LIMITATIONS.md) for implemented behavior, initial comparisons, and known differences. Broad accuracy and performance comparisons are ongoing.
+crispr-cas-finder is an independent implementation inspired by [CRISPRCasFinder](https://github.com/dcouvin/CRISPRCasFinder). This first public release is intended for experimental use and feedback. Detection behavior and APIs may change. See [limitations and validation](LIMITATIONS.md) for implemented behavior, initial comparisons, and known differences. Broad accuracy and performance comparisons are ongoing; [Benchmarks](#benchmarks) below compares run time and results with CRISPRCasFinder on 72 genomes.
 
 **[Try the browser application](https://crisprcasfinder.full-human.com).** Your genome sequence is processed locally and is not uploaded.
 
@@ -207,6 +207,87 @@ for array detection on in-memory sequences.
 Build and run the threaded WebAssembly app using the instructions in
 [crispr-cas-finder-wasm/README.md](crispr-cas-finder-wasm/README.md). Both CRISPR
 and Cas detection run locally in the browser.
+
+## Benchmarks
+
+Both tools were run on the same machine, a MacBook Pro with an Apple M1 Max
+(8 performance and 2 efficiency cores, 32 GB), on 40 genomes with Cas
+detection and 72 without: the 21 reference genomes of bacteria and archaea
+listed in [benchmarks/panel.tsv](benchmarks/panel.tsv), E. coli K-12, the
+Acetobacter plasmid of the original's install test, and enterobacterial
+assemblies of 1 to 376 contigs. The original is CRISPRCasFinder 4.3.2 run
+natively on Apple silicon with Vmatch 2.3.1, Prodigal 2.6.3, MacSyFinder 2.1.6
+and HMMER 3.4; both tools read the same CasFinder 3.1.0 models. "Original" is
+the original with its defaults, one MacSyFinder worker; "original, all cores"
+adds `-cpuM 10`. The speed-up compares the two tools at their defaults, the
+original on one worker and this project on every core. Each figure is one run,
+or the median of three for E. coli K-12 and three other inputs. The scripts,
+every row and the caveats are in [benchmarks/README.md](benchmarks/README.md);
+the Rust rows are of the build at `45c346f` (2026-10-30).
+
+**Arrays and Cas systems** (`--cas`), a selection of the 40 genomes:
+
+| genome | note | Mb | original | original, all cores | Rust, 1 thread | Rust, all cores | speed-up |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Mycoplasmoides genitalium G37 | no CRISPR-Cas, genetic code 4 | 0.6 | 9.64 s | 3.72 s | 1.45 s | 0.27 s | 35x |
+| Campylobacter jejuni NCTC 11168 | type II-C | 1.6 | 14.9 s | 6.02 s | 3.03 s | 0.46 s | 32x |
+| Methanocaldococcus jannaschii DSM 2661 | archaeon, about twenty arrays | 1.7 | 37.0 s | 18.8 s | 4.12 s | 0.60 s | 62x |
+| Saccharolobus solfataricus P2 | archaeon, types I-A and III-B | 3.0 | 27.5 s | 16.4 s | 8.08 s | 1.58 s | 17x |
+| Haloferax volcanii DS2 | archaeon, type I-B, high GC | 3.5 | 33.0 s | 16.9 s | 6.85 s | 1.57 s | 21x |
+| Bacillus subtilis 168 | no CRISPR-Cas | 4.2 | 30.5 s | 15.3 s | 7.17 s | 1.19 s | 26x |
+| Clostridioides difficile 630 | type I-B, many arrays | 4.3 | 43.9 s | 29.5 s | 7.42 s | 1.10 s | 40x |
+| Mycobacterium tuberculosis H37Rv | type III-A, high GC | 4.4 | 39.3 s | 26.2 s | 7.15 s | 1.39 s | 28x |
+| Escherichia coli K-12 MG1655 | type I-E | 4.6 | 23.8 s | 12.3 s | 7.45 s | 1.29 s | 18x |
+| Pseudomonas aeruginosa PA14 | type I-F | 6.5 | 32.3 s | 18.9 s | 9.88 s | 1.74 s | 19x |
+| Streptomyces coelicolor A3(2) | 8.7 Mb linear chromosome | 8.7 | 53.7 s | 37.3 s | 12.6 s | 2.30 s | 23x |
+| Phytobacter ursingii ATCC 27989 | draft, 19 contigs | 5.8 | 110.9 s | 35.9 s | 9.44 s | 1.68 s | 66x |
+| Phytobacter diazotrophicus Pd1 | draft, 79 contigs | 5.6 | 7.6 min | 2.2 min | 10.4 s | 1.36 s | 335x |
+| isolate 13020RM | enterobacterial draft, 234 contigs | 5.7 | 13.5 min | 3.9 min | 12.2 s | 1.64 s | 496x |
+
+Over all 40 genomes, geometric means of the original's wall time over this
+project's:
+
+| | geometric mean | range |
+| --- | --- | --- |
+| both at their defaults | 31x | 15x to 496x |
+| this project held to one thread | 5.3x | 2.8x to 67x |
+| both using every core | 15x | 8x to 142x |
+
+The gain grows with the number of contigs because the original runs the
+whole Cas search once per sequence. With Cas detection the largest process
+of this project peaks at about 1.4 times the original's memory; for arrays
+only, at a third to a sixth of it. E. coli K-12 with Cas detection against
+the number of threads:
+
+| threads | 1 | 2 | 4 | 8 |
+| --- | --- | --- | --- | --- |
+| wall time | 7.45 s | 3.88 s | 2.23 s | 1.35 s |
+
+**Arrays only**, 72 genomes: the geometric mean is 82x at the defaults (26x to
+278x) and 39x with this project held to one thread. The 51 inputs of the local
+set take 6.1 minutes one after another with the original and 4.6 s here; the
+21 of the panel take 2.3 minutes and 2.1 s.
+
+**Agreement with the original.** Of the original's 448 arrays on these 72
+inputs, 439 are reported here with the same start and the same number of
+spacers: all of evidence levels 2, 3 and 4 and 263 of the 272 of level 1. The
+nine arrays of the original not reported and the three reported only here are
+loci of three spacers or more on the other side of the 60% spacer similarity
+limit. Of the original's 48 Cas systems, 47 are reported with the same
+subtype; 13 more are reported here, 9 of them found by MacSyFinder inside the
+original and then lost by its Perl script, and 4 on sequences under 100 kb,
+where the original reports none. [LIMITATIONS.md](LIMITATIONS.md) goes through
+every difference.
+
+Things to keep in mind:
+
+- Agreement with the original is not accuracy; no independent truth set was
+  used.
+- The original ran with MacSyFinder 2.1.6 and HMMER 3.4 rather than the 2.1.2
+  and 3.3.2 it documents, and with Vmatch compiled from source for ARM.
+- Most figures are single runs on one machine. On Apple silicon the HMM
+  kernels run their portable code path; the SSE4.1, AVX2 and AVX-512 paths
+  used on x86-64 are not measured here.
 
 ## Contributing
 
