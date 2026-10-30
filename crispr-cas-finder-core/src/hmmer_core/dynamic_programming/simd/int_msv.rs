@@ -1,7 +1,7 @@
 // simd/int_msv.rs — integer bounds on the MSV score
 //
 // This kernel bounds the score of the exact MSV filter (f32_msv.rs) on
-// integer cells, eight 16-bit or sixteen 8-bit lanes per vector. With every
+// integer cells, 16-bit or 8-bit lanes packed into one vector. With every
 // rounding and every clamp going upward the result is an upper bound: a
 // sequence whose bound fails the MSV threshold would fail the exact filter
 // too. With them going downward it is a lower bound: a sequence whose bound
@@ -46,8 +46,21 @@
 // running maximum, and the row stays in registers when it is short enough.
 // Nothing is carried between rows except the cells themselves, so the
 // processor overlaps consecutive rows freely.
+//
+// Vector width. The recurrence is the same whatever the number of lanes:
+// each cell depends on one cell of the previous row, and the result is the
+// largest cell, so the bounds come out identical for any striping. The
+// kernels therefore run with the widest vectors the processor has (`Isa`):
+// 128-bit vectors everywhere, 256-bit with AVX2 and 512-bit with AVX-512BW,
+// chosen once when the optimized profile is built and its emission tables
+// striped. Each kernel is compiled once per instruction set, so that the
+// portable `std::simd` operations lower to the native instructions of that
+// set (on the x86-64 baseline, for instance, there is no 8-bit signed
+// maximum, and every running maximum costs four instructions instead of
+// one).
 
 use super::oprofile::OptimizedProfile;
+use std::ops::Range;
 use std::simd::cmp::SimdOrd;
 use std::simd::num::SimdInt;
 use std::simd::{Simd, SimdElement};
@@ -83,8 +96,185 @@ pub fn vector_count(m: usize, lanes: usize) -> usize {
     2.max(m.saturating_sub(1) / lanes + 1)
 }
 
+// ---------- instruction sets ----------
+
+/// The instruction set the integer kernels run with, and with it the width
+/// of their vectors. Detected once per process with [`Isa::detect`]; the
+/// optimized profile records the one its emission tables are striped for.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Isa {
+    /// The target's baseline: 128-bit vectors through portable `std::simd`.
+    #[default]
+    Portable,
+    /// SSE4.1: 128-bit vectors with a native 8-bit maximum.
+    #[cfg(target_arch = "x86_64")]
+    Sse41,
+    /// AVX2: 256-bit vectors.
+    #[cfg(target_arch = "x86_64")]
+    Avx2,
+    /// AVX-512BW: 512-bit vectors.
+    #[cfg(target_arch = "x86_64")]
+    Avx512,
+}
+
+impl Isa {
+    /// Every instruction set the kernels are compiled for, slowest first.
+    pub const ALL: &'static [Isa] = &[
+        Isa::Portable,
+        #[cfg(target_arch = "x86_64")]
+        Isa::Sse41,
+        #[cfg(target_arch = "x86_64")]
+        Isa::Avx2,
+        #[cfg(target_arch = "x86_64")]
+        Isa::Avx512,
+    ];
+
+    /// The instruction set this processor runs a model of `m` nodes best
+    /// with. 512-bit vectors pay off from about four vectors per row; below
+    /// that, every row costs a fixed amount besides its vectors, and the
+    /// shorter rows of 256-bit vectors come out ahead.
+    pub fn for_model(m: usize) -> Isa {
+        let isa = Self::detect();
+        #[cfg(target_arch = "x86_64")]
+        if isa == Isa::Avx512 && isa.vector_count::<i8>(m) < 4 {
+            return Isa::Avx2;
+        }
+        let _ = m;
+        isa
+    }
+
+    /// The fastest instruction set this processor supports.
+    pub fn detect() -> Isa {
+        Self::ALL
+            .iter()
+            .rev()
+            .copied()
+            .find(|isa| isa.is_available())
+            .unwrap_or_default()
+    }
+
+    /// The instruction sets this processor supports.
+    pub fn available() -> Vec<Isa> {
+        Self::ALL
+            .iter()
+            .copied()
+            .filter(|isa| isa.is_available())
+            .collect()
+    }
+
+    /// Whether this processor supports the instruction set.
+    pub fn is_available(self) -> bool {
+        match self {
+            Isa::Portable => true,
+            #[cfg(target_arch = "x86_64")]
+            Isa::Sse41 => std::arch::is_x86_feature_detected!("sse4.1"),
+            #[cfg(target_arch = "x86_64")]
+            Isa::Avx2 => std::arch::is_x86_feature_detected!("avx2"),
+            #[cfg(target_arch = "x86_64")]
+            Isa::Avx512 => std::arch::is_x86_feature_detected!("avx512bw"),
+        }
+    }
+
+    /// Bytes per vector.
+    pub const fn vector_bytes(self) -> usize {
+        match self {
+            Isa::Portable => 16,
+            #[cfg(target_arch = "x86_64")]
+            Isa::Sse41 => 16,
+            #[cfg(target_arch = "x86_64")]
+            Isa::Avx2 => 32,
+            #[cfg(target_arch = "x86_64")]
+            Isa::Avx512 => 64,
+        }
+    }
+
+    /// Lanes per vector for cells of type `T`.
+    pub const fn lanes<T>(self) -> usize {
+        self.vector_bytes() / size_of::<T>()
+    }
+
+    /// Number of vectors per DP row for a model of `m` nodes and cells of
+    /// type `T`.
+    pub const fn vector_count<T>(self, m: usize) -> usize {
+        let lanes = self.lanes::<T>();
+        let count = if m == 0 { 0 } else { (m - 1) / lanes + 1 };
+        if count < 2 { 2 } else { count }
+    }
+}
+
+/// The kernels compiled for one instruction set (see the `Kernels` marker
+/// types), as the generic entry points below reach them.
+pub trait Kernels {
+    /// The instruction set the kernels are compiled for.
+    const ISA: Isa;
+
+    /// The largest cell of the single-segment recurrence over `rows` of
+    /// `dsq` (see `best_segment`).
+    fn best_segment_of<T, const N: usize>(
+        dsq: &[u8],
+        rows: Range<usize>,
+        start: Option<&[i64]>,
+        emissions: &Emissions<'_, T, N>,
+        m_row: &mut Vec<T>,
+        recorder: Option<&mut Recorder<'_, T>>,
+    ) -> Option<i64>
+    where
+        T: Unit,
+        Simd<T, N>: SimdInt<Scalar = T> + SimdOrd;
+
+    /// `v` shifted right by one lane, the floor entering lane 0: the Farrar
+    /// shift between two rows. The portable lowering of a one-lane shift
+    /// across a 256- or 512-bit vector takes several shuffles, where two
+    /// instructions do; the wide instruction sets override this.
+    #[inline(always)]
+    fn shift_right_one<T, const N: usize>(v: Simd<T, N>) -> Simd<T, N>
+    where
+        T: Unit,
+        Simd<T, N>: SimdInt<Scalar = T>,
+    {
+        v.shift_elements_right::<1>(T::MIN)
+    }
+}
+
+/// Calls `$f::<$t, N, K>($args)` with the lane count `N` and the kernels `K`
+/// of the instruction set `$isa`: the way the typed entry points of i8_msv.rs
+/// and i16_msv.rs reach the generic ones here (`$f` names one of them, in
+/// scope).
+macro_rules! dispatch {
+    ($isa:expr, $t:ty, $f:ident ( $($arg:expr),* $(,)? )) => {
+        match $isa {
+            $crate::hmmer_core::dynamic_programming::simd::int_msv::Isa::Portable => $f::<
+                $t,
+                { $crate::hmmer_core::dynamic_programming::simd::int_msv::Isa::Portable.lanes::<$t>() },
+                $crate::hmmer_core::dynamic_programming::simd::int_msv::PortableKernels,
+            >($($arg),*),
+            #[cfg(target_arch = "x86_64")]
+            $crate::hmmer_core::dynamic_programming::simd::int_msv::Isa::Sse41 => $f::<
+                $t,
+                { $crate::hmmer_core::dynamic_programming::simd::int_msv::Isa::Sse41.lanes::<$t>() },
+                $crate::hmmer_core::dynamic_programming::simd::int_msv::Sse41Kernels,
+            >($($arg),*),
+            #[cfg(target_arch = "x86_64")]
+            $crate::hmmer_core::dynamic_programming::simd::int_msv::Isa::Avx2 => $f::<
+                $t,
+                { $crate::hmmer_core::dynamic_programming::simd::int_msv::Isa::Avx2.lanes::<$t>() },
+                $crate::hmmer_core::dynamic_programming::simd::int_msv::Avx2Kernels,
+            >($($arg),*),
+            #[cfg(target_arch = "x86_64")]
+            $crate::hmmer_core::dynamic_programming::simd::int_msv::Isa::Avx512 => $f::<
+                $t,
+                { $crate::hmmer_core::dynamic_programming::simd::int_msv::Isa::Avx512.lanes::<$t>() },
+                $crate::hmmer_core::dynamic_programming::simd::int_msv::Avx512Kernels,
+            >($($arg),*),
+        }
+    };
+}
+pub(crate) use dispatch;
+
+// ---------- cells ----------
+
 /// An integer cell type of the recurrence.
-pub trait Unit: SimdElement + PartialEq {
+pub trait Unit: SimdElement + PartialEq + Default {
     const MIN: Self;
     const MAX: Self;
     /// Units of this cell above the floor.
@@ -150,8 +340,9 @@ unit!(i8, 128);
 unit!(i16, 32_768);
 
 /// Striped match emissions of a profile in integer units: `kp` rows of
-/// `q` vectors, lane `z` of vector `qi` holding node `qi + 1 + z·q`, and
-/// optionally the same one unit higher (see the module comment).
+/// `q` vectors of `lanes` lanes, lane `z` of vector `qi` holding node
+/// `qi + 1 + z·q`, and optionally the same one unit higher (see the module
+/// comment).
 pub struct Table<'a, T: Unit> {
     pub units: &'a [T],
     pub units_plus_one: Option<&'a [T]>,
@@ -215,20 +406,23 @@ pub const BLOCK_ROWS: usize = 64;
 /// bound can then start from that row and look at the blocks that matter
 /// (see [`msv_upper_bound_within`]), instead of at the whole sequence.
 #[derive(Debug, Default)]
-pub struct Blocks<T: Unit, const N: usize> {
+pub struct Blocks<T: Unit> {
     /// Vectors per row.
     pub q: usize,
+    /// Lanes per vector.
+    pub lanes: usize,
     /// Per block, in nats; infinite when no bound is known for the block.
     pub bounds: Vec<f32>,
-    /// `q` vectors per block.
-    pub states: Vec<Simd<T, N>>,
+    /// `q · lanes` cells per block, vector by vector.
+    pub states: Vec<T>,
     /// A cell saturated somewhere: the states cannot be trusted.
     pub saturated: bool,
 }
 
-impl<T: Unit, const N: usize> Blocks<T, N> {
-    fn clear(&mut self, q: usize) {
+impl<T: Unit> Blocks<T> {
+    fn clear(&mut self, q: usize, lanes: usize) {
         self.q = q;
+        self.lanes = lanes;
         self.bounds.clear();
         self.states.clear();
         self.saturated = false;
@@ -240,39 +434,36 @@ impl<T: Unit, const N: usize> Blocks<T, N> {
         if block == 0 {
             return None;
         }
-        let state = &self.states[(block - 1) * self.q..][..self.q];
+        let width = self.q * self.lanes;
+        let state = &self.states[(block - 1) * width..][..width];
         Some(
             (1..=m)
                 .map(|k| {
                     // Lane `z` of vector `qi` holds node `qi + 1 + z·q`.
                     let (qi, z) = ((k - 1) % self.q, (k - 1) / self.q);
-                    state[qi].as_array()[z].units()
+                    state[qi * self.lanes + z].units()
                 })
                 .collect(),
         )
     }
 }
 
-/// Load `cells` from units above the begin state per node, striped for `q`
-/// vectors; nodes beyond `m` sit at the floor.
-fn restripe<T, const N: usize>(units: &[i64], q: usize, cells: &mut [Simd<T, N>])
-where
-    T: Unit,
-{
-    for (qi, cell) in cells.iter_mut().enumerate() {
-        let mut lanes = [T::MIN; N];
-        for (z, lane) in lanes.iter_mut().enumerate() {
-            let k = qi + 1 + z * q;
-            if let Some(&value) = units.get(k - 1) {
-                *lane = T::from_units(value);
-            }
+/// Vector `qi` of a row of `q` vectors loaded from `units` above the begin
+/// state per node; nodes beyond the units given sit at the floor.
+#[inline]
+fn restriped<T: Unit, const N: usize>(units: &[i64], q: usize, qi: usize) -> [T; N] {
+    let mut lanes = [T::MIN; N];
+    for (z, lane) in lanes.iter_mut().enumerate() {
+        let k = qi + 1 + z * q;
+        if let Some(&value) = units.get(k - 1) {
+            *lane = T::from_units(value);
         }
-        *cell = Simd::from_array(lanes);
     }
+    lanes
 }
 
 /// The special transition scores of a sequence of length `l`, in nats.
-struct Specials {
+pub struct Specials {
     tloop: f64,
     tmove: f64,
     /// tBMk + tEC + tmove: what a segment pays besides its emissions.
@@ -309,34 +500,37 @@ impl Specials {
 /// could score higher still. `m_row` is the DP row, kept by the caller so
 /// that a worker searching many sequences does not allocate one per call;
 /// short rows live in registers instead and leave it untouched. With
-/// `blocks`, the pass also records its block-wise results.
-pub fn msv_upper_bound<T, const N: usize>(
+/// `blocks`, the pass also records its block-wise results. `N` is the lane
+/// count `table` is striped for and `K` the kernels of its instruction set
+/// (see [`dispatch`]).
+pub fn msv_upper_bound<T, const N: usize, K>(
     dsq: &[u8],
     l: usize,
     om: &OptimizedProfile,
     table: Table<'_, T>,
-    m_row: &mut Vec<Simd<T, N>>,
-    blocks: Option<&mut Blocks<T, N>>,
+    m_row: &mut Vec<T>,
+    blocks: Option<&mut Blocks<T>>,
 ) -> f32
 where
     T: Unit,
+    K: Kernels,
     Simd<T, N>: SimdInt<Scalar = T> + SimdOrd,
 {
     if l == 0 {
         if let Some(blocks) = blocks {
-            blocks.clear(table.q);
+            blocks.clear(table.q, N);
         }
         return f32::INFINITY;
     }
     let specials = Specials::new(l, om.m);
     let mut recorder = blocks.map(|blocks| {
-        blocks.clear(table.q);
+        blocks.clear(table.q, N);
         Recorder {
             blocks,
             maxima: Vec::new(),
         }
     });
-    let best = best_segment_of(
+    let best = best_segment_of::<T, N, K>(
         dsq,
         0..l,
         None,
@@ -388,18 +582,19 @@ fn upper_bound_of(maximum: Option<i64>, scale: f64, specials: &Specials, l: usiz
 /// holds. The result is the largest bound over all blocks: the finer one
 /// for the selected blocks, the coarser one for the rest.
 #[allow(clippy::too_many_arguments)]
-pub fn msv_upper_bound_within<T, const N: usize, S, const NS: usize>(
+pub fn msv_upper_bound_within<T, const N: usize, K, S>(
     dsq: &[u8],
     l: usize,
     om: &OptimizedProfile,
     table: Table<'_, T>,
-    m_row: &mut Vec<Simd<T, N>>,
-    from: &Blocks<S, NS>,
+    m_row: &mut Vec<T>,
+    from: &Blocks<S>,
     from_scale: f64,
     selected: u64,
 ) -> f32
 where
     T: Unit,
+    K: Kernels,
     S: Unit,
     Simd<T, N>: SimdInt<Scalar = T> + SimdOrd,
 {
@@ -433,7 +628,7 @@ where
                 .collect::<Vec<i64>>()
         });
         let rows = first * BLOCK_ROWS..(block * BLOCK_ROWS).min(l);
-        let best = best_segment_of(
+        let best = best_segment_of::<T, N, K>(
             dsq,
             rows,
             start.as_deref(),
@@ -456,22 +651,23 @@ where
 ///
 /// The best single segment never scores above the whole multi-hit path, so
 /// this holds whatever the J state does.
-pub fn msv_lower_bound<T, const N: usize>(
+pub fn msv_lower_bound<T, const N: usize, K>(
     dsq: &[u8],
     l: usize,
     om: &OptimizedProfile,
     table: Table<'_, T>,
-    m_row: &mut Vec<Simd<T, N>>,
+    m_row: &mut Vec<T>,
 ) -> Option<f32>
 where
     T: Unit,
+    K: Kernels,
     Simd<T, N>: SimdInt<Scalar = T> + SimdOrd,
 {
     if l == 0 {
         return None;
     }
     let specials = Specials::new(l, om.m);
-    let Some(best) = best_segment_of(
+    let Some(best) = best_segment_of::<T, N, K>(
         dsq,
         0..l,
         None,
@@ -501,8 +697,8 @@ where
 }
 
 /// Collects the block-wise results of a pass.
-struct Recorder<'a, T: Unit, const N: usize> {
-    blocks: &'a mut Blocks<T, N>,
+pub struct Recorder<'a, T: Unit> {
+    blocks: &'a mut Blocks<T>,
     /// Largest cell of each block, `None` when a cell saturated.
     maxima: Vec<Option<i64>>,
 }
@@ -512,18 +708,19 @@ struct Recorder<'a, T: Unit, const N: usize> {
 /// starts from `start` (units above the begin state per node) or at the
 /// begin state.
 #[allow(clippy::too_many_arguments)]
-fn best_segment_of<T, const N: usize>(
+fn best_segment_of<T, const N: usize, K>(
     dsq: &[u8],
-    rows: std::ops::Range<usize>,
+    rows: Range<usize>,
     start: Option<&[i64]>,
     table: &Table<'_, T>,
     rounding: Rounding,
     specials: &Specials,
-    m_row: &mut Vec<Simd<T, N>>,
-    recorder: Option<&mut Recorder<'_, T, N>>,
+    m_row: &mut Vec<T>,
+    recorder: Option<&mut Recorder<'_, T>>,
 ) -> Option<i64>
 where
     T: Unit,
+    K: Kernels,
     Simd<T, N>: SimdInt<Scalar = T> + SimdOrd,
 {
     let q = table.q;
@@ -548,36 +745,14 @@ where
             Rounding::Down => delta_step.floor(),
         } as u64,
         raise_after: rounding == Rounding::Up,
+        growth_vector: vectors_plus_one.is_none(),
     };
-
-    // Rows of up to 24 vectors are kept in registers rather than memory: the
-    // row, the running maxima and a few temporaries must fit the 32 vector
-    // registers of AArch64 NEON (and of x86-64 with AVX-512).
-    macro_rules! in_registers {
-        ($growth:literal; $($q:literal)*) => {
-            match q {
-                $($q => in_registers::<T, N, $q, $growth>(dsq, rows, start, &emissions, recorder),)*
-                _ => {
-                    m_row.clear();
-                    m_row.resize(q, Simd::splat(T::MIN));
-                    if let Some(start) = start {
-                        restripe(start, q, m_row.as_mut_slice());
-                    }
-                    best_segment::<T, N, _, $growth>(dsq, rows, &emissions, m_row.as_mut_slice(), recorder)
-                }
-            }
-        };
-    }
-    if vectors_plus_one.is_some() {
-        in_registers!(false; 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24)
-    } else {
-        in_registers!(true; 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24)
-    }
+    K::best_segment_of::<T, N>(dsq, rows, start, &emissions, m_row, recorder)
 }
 
 /// Striped match emissions of a profile, `kp` rows of `q` vectors, and the
 /// per-row growth of the cumulative delta.
-struct Emissions<'a, T: Unit, const N: usize> {
+pub struct Emissions<'a, T: Unit, const N: usize> {
     vectors: &'a [[T; N]],
     vectors_plus_one: &'a [[T; N]],
     kp: usize,
@@ -587,12 +762,21 @@ struct Emissions<'a, T: Unit, const N: usize> {
     /// Whether a row's extra growth is added after its emissions (upper
     /// bound) or before them (lower bound).
     raise_after: bool,
+    /// Whether the growth is added to every cell as a vector (fine scales)
+    /// rather than taken from the table one unit higher (coarse scales).
+    growth_vector: bool,
 }
 
-impl<'a, T: Unit, const N: usize> Emissions<'a, T, N> {
+/// Where a kernel takes the striped emissions of a residue from.
+trait Rows<T: Unit, const N: usize> {
     /// The emissions of `residue`, one unit higher when `plus_one`.
+    fn of(&self, residue: u8, plus_one: bool) -> &[[T; N]];
+}
+
+/// Rows of a width known at run time, for rows in memory.
+impl<T: Unit, const N: usize> Rows<T, N> for Emissions<'_, T, N> {
     #[inline(always)]
-    fn of(&self, residue: u8, plus_one: bool) -> &'a [[T; N]] {
+    fn of(&self, residue: u8, plus_one: bool) -> &[[T; N]] {
         let xi = residue as usize;
         let xi = if xi < self.kp { xi } else { 0 };
         let vectors = if plus_one {
@@ -604,25 +788,273 @@ impl<'a, T: Unit, const N: usize> Emissions<'a, T, N> {
     }
 }
 
-/// `best_segment` with a row of `Q` vectors held in registers.
-#[inline(never)]
-fn in_registers<T, const N: usize, const Q: usize, const GROWTH_VECTOR: bool>(
-    dsq: &[u8],
-    rows: std::ops::Range<usize>,
-    start: Option<&[i64]>,
-    emissions: &Emissions<'_, T, N>,
-    recorder: Option<&mut Recorder<'_, T, N>>,
-) -> Option<i64>
-where
-    T: Unit,
-    Simd<T, N>: SimdInt<Scalar = T> + SimdOrd,
-{
-    let mut cells = [Simd::<T, N>::splat(T::MIN); Q];
-    if let Some(start) = start {
-        restripe(start, Q, &mut cells);
-    }
-    best_segment::<T, N, _, GROWTH_VECTOR>(dsq, rows, emissions, &mut cells, recorder)
+/// Rows of `Q` vectors, for rows in registers: a residue's row is one
+/// element of an array of rows, found with one bounds check and no
+/// multiplication by a run-time width.
+struct ChunkedRows<'a, T: Unit, const N: usize, const Q: usize> {
+    /// The table and the table one unit higher.
+    tables: [&'a [[[T; N]; Q]]; 2],
+    kp: usize,
 }
+
+impl<'a, T: Unit, const N: usize, const Q: usize> ChunkedRows<'a, T, N, Q> {
+    #[inline(always)]
+    fn new(emissions: &Emissions<'a, T, N>) -> Self {
+        debug_assert_eq!(emissions.q, Q);
+        let (vectors, _) = emissions.vectors.as_chunks::<Q>();
+        let (vectors_plus_one, _) = emissions.vectors_plus_one.as_chunks::<Q>();
+        Self {
+            tables: [vectors, vectors_plus_one],
+            kp: emissions.kp,
+        }
+    }
+}
+
+impl<T: Unit, const N: usize, const Q: usize> Rows<T, N> for ChunkedRows<'_, T, N, Q> {
+    #[inline(always)]
+    fn of(&self, residue: u8, plus_one: bool) -> &[[T; N]] {
+        let xi = residue as usize;
+        let xi = if xi < self.kp { xi } else { 0 };
+        &self.tables[usize::from(plus_one)][xi]
+    }
+}
+
+/// Picks the kernel for the row width `$emissions.q`: rows of up to 24
+/// vectors are kept in registers rather than memory, as the row, the running
+/// maxima and a few temporaries must fit the 32 vector registers of AArch64
+/// NEON and of x86-64 with AVX-512. `T` and `N` are the enclosing function's
+/// cell type and lane count.
+macro_rules! by_row_width {
+    ($growth:literal; $in_registers:ident, $in_memory:ident; $dsq:ident, $rows:ident, $start:ident, $emissions:ident, $m_row:ident, $recorder:ident) => {
+        by_row_width!(
+            @widths $growth; $in_registers, $in_memory; $dsq, $rows, $start, $emissions, $m_row, $recorder;
+            2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24
+        )
+    };
+    (@widths $growth:literal; $in_registers:ident, $in_memory:ident; $dsq:ident, $rows:ident, $start:ident, $emissions:ident, $m_row:ident, $recorder:ident; $($width:literal)*) => {
+        match $emissions.q {
+            $($width => $in_registers::<T, N, $width, $growth>($dsq, $rows, $start, $emissions, $recorder),)*
+            _ => $in_memory::<T, N, $growth>($dsq, $rows, $start, $emissions, $m_row, $recorder),
+        }
+    };
+}
+
+/// The kernels of one instruction set: the row recurrence compiled with
+/// that set's features, for rows in registers (one function per row width,
+/// fully unrolled) and for rows in memory.
+///
+/// A kernel compiled for an instruction set must only run on a processor
+/// that has it; the `Kernels` marker types are reached through an [`Isa`]
+/// only (see [`dispatch`]), and an `OptimizedProfile` only ever records an
+/// available one.
+macro_rules! isa_kernels {
+    ($(#[$meta:meta])* $module:ident, $kernels:ident, $isa:expr $(, $feature:literal)*) => {
+        isa_kernels!(@define $(#[$meta])* $module, $kernels, $isa $(, $feature)*; {});
+    };
+    (@define $(#[$meta:meta])* $module:ident, $kernels:ident, $isa:expr $(, $feature:literal)*; { $($shift:item)* }) => {
+        $(#[$meta])*
+        mod $module {
+            use super::*;
+
+            /// `best_segment` with a row of `Q` vectors held in registers.
+            #[inline(never)]
+            $(#[target_feature(enable = $feature)])*
+            fn in_registers<T, const N: usize, const Q: usize, const GROWTH_VECTOR: bool>(
+                dsq: &[u8],
+                rows: Range<usize>,
+                start: Option<&[i64]>,
+                emissions: &Emissions<'_, T, N>,
+                recorder: Option<&mut Recorder<'_, T>>,
+            ) -> Option<i64>
+            where
+                T: Unit,
+                Simd<T, N>: SimdInt<Scalar = T> + SimdOrd,
+            {
+                let mut cells = [Simd::<T, N>::splat(T::MIN); Q];
+                if let Some(start) = start {
+                    for (qi, cell) in cells.iter_mut().enumerate() {
+                        *cell = Simd::from_array(restriped(start, Q, qi));
+                    }
+                }
+                let chunked = ChunkedRows::<T, N, Q>::new(emissions);
+                best_segment::<T, N, _, _, GROWTH_VECTOR, $kernels>(
+                    dsq, rows, emissions, &chunked, &mut cells, recorder,
+                )
+            }
+
+            /// `best_segment` with a row of `q` vectors in memory.
+            #[inline(never)]
+            $(#[target_feature(enable = $feature)])*
+            fn in_memory<T, const N: usize, const GROWTH_VECTOR: bool>(
+                dsq: &[u8],
+                rows: Range<usize>,
+                start: Option<&[i64]>,
+                emissions: &Emissions<'_, T, N>,
+                m_row: &mut Vec<T>,
+                recorder: Option<&mut Recorder<'_, T>>,
+            ) -> Option<i64>
+            where
+                T: Unit,
+                Simd<T, N>: SimdInt<Scalar = T> + SimdOrd,
+            {
+                let q = emissions.q;
+                m_row.clear();
+                m_row.resize(q * N, T::MIN);
+                let (cells, _) = m_row.as_chunks_mut::<N>();
+                if let Some(start) = start {
+                    for (qi, cell) in cells.iter_mut().enumerate() {
+                        *cell = restriped(start, q, qi);
+                    }
+                }
+                best_segment::<T, N, _, _, GROWTH_VECTOR, $kernels>(
+                    dsq, rows, emissions, emissions, cells, recorder,
+                )
+            }
+
+            /// The largest cell of the recurrence over `rows` (see
+            /// `Kernels::best_segment_of`).
+            $(#[target_feature(enable = $feature)])*
+            pub(super) fn best_segment_of<T, const N: usize>(
+                dsq: &[u8],
+                rows: Range<usize>,
+                start: Option<&[i64]>,
+                emissions: &Emissions<'_, T, N>,
+                m_row: &mut Vec<T>,
+                recorder: Option<&mut Recorder<'_, T>>,
+            ) -> Option<i64>
+            where
+                T: Unit,
+                Simd<T, N>: SimdInt<Scalar = T> + SimdOrd,
+            {
+                if emissions.growth_vector {
+                    by_row_width!(true; in_registers, in_memory; dsq, rows, start, emissions, m_row, recorder)
+                } else {
+                    by_row_width!(false; in_registers, in_memory; dsq, rows, start, emissions, m_row, recorder)
+                }
+            }
+        }
+
+        $(#[$meta])*
+        #[doc = concat!("The kernels compiled for `", stringify!($isa), "`.")]
+        pub struct $kernels;
+
+        $(#[$meta])*
+        impl Kernels for $kernels {
+            const ISA: Isa = $isa;
+
+            #[inline(always)]
+            #[allow(unused_unsafe)]
+            fn best_segment_of<T, const N: usize>(
+                dsq: &[u8],
+                rows: Range<usize>,
+                start: Option<&[i64]>,
+                emissions: &Emissions<'_, T, N>,
+                m_row: &mut Vec<T>,
+                recorder: Option<&mut Recorder<'_, T>>,
+            ) -> Option<i64>
+            where
+                T: Unit,
+                Simd<T, N>: SimdInt<Scalar = T> + SimdOrd,
+            {
+                debug_assert!(
+                    Self::ISA.is_available(),
+                    "{:?} kernels on a processor without them",
+                    Self::ISA
+                );
+                // SAFETY: these kernels are reached through `dispatch!` on an
+                // `Isa` that `OptimizedProfile` recorded after checking it is
+                // available on this processor (see `Isa::detect` and
+                // `OptimizedProfile::from_profile_with_isa`).
+                unsafe { $module::best_segment_of::<T, N>(dsq, rows, start, emissions, m_row, recorder) }
+            }
+
+            $($shift)*
+        }
+    };
+}
+
+isa_kernels!(portable, PortableKernels, Isa::Portable);
+isa_kernels!(
+    #[cfg(target_arch = "x86_64")]
+    sse41,
+    Sse41Kernels,
+    Isa::Sse41,
+    "sse4.1"
+);
+isa_kernels!(
+    @define
+    #[cfg(target_arch = "x86_64")]
+    avx2,
+    Avx2Kernels,
+    Isa::Avx2,
+    "avx2";
+    {
+        /// Two instructions: the vector with its low half moved up and the
+        /// floor below it, then each 128-bit lane taken with the last lane
+        /// of the previous one.
+        #[inline(always)]
+        fn shift_right_one<T, const N: usize>(v: Simd<T, N>) -> Simd<T, N>
+        where
+            T: Unit,
+            Simd<T, N>: SimdInt<Scalar = T>,
+        {
+            use core::arch::x86_64::{__m256i, _mm256_alignr_epi8, _mm256_permute2x128_si256};
+            if size_of::<Simd<T, N>>() != size_of::<__m256i>() {
+                return v.shift_elements_right::<1>(T::MIN);
+            }
+            // SAFETY: the vector and `__m256i` have the same size and both
+            // are plain data, and these kernels run only where AVX2 is
+            // available (see `Kernels`).
+            unsafe {
+                let vector: __m256i = core::mem::transmute_copy(&v);
+                let floor: __m256i = core::mem::transmute_copy(&Simd::<T, N>::splat(T::MIN));
+                let carried = _mm256_permute2x128_si256::<0x20>(floor, vector);
+                let shifted = match size_of::<T>() {
+                    1 => _mm256_alignr_epi8::<15>(vector, carried),
+                    _ => _mm256_alignr_epi8::<14>(vector, carried),
+                };
+                core::mem::transmute_copy(&shifted)
+            }
+        }
+    }
+);
+isa_kernels!(
+    @define
+    #[cfg(target_arch = "x86_64")]
+    avx512,
+    Avx512Kernels,
+    Isa::Avx512,
+    "avx512bw";
+    {
+        /// Two instructions: the vector moved up one 128-bit lane with the
+        /// floor below it, then each lane taken with the last lane of the
+        /// previous one.
+        #[inline(always)]
+        fn shift_right_one<T, const N: usize>(v: Simd<T, N>) -> Simd<T, N>
+        where
+            T: Unit,
+            Simd<T, N>: SimdInt<Scalar = T>,
+        {
+            use core::arch::x86_64::{__m512i, _mm512_alignr_epi8, _mm512_alignr_epi64};
+            if size_of::<Simd<T, N>>() != size_of::<__m512i>() {
+                return v.shift_elements_right::<1>(T::MIN);
+            }
+            // SAFETY: the vector and `__m512i` have the same size and both
+            // are plain data, and these kernels run only where AVX-512BW is
+            // available (see `Kernels`).
+            unsafe {
+                let vector: __m512i = core::mem::transmute_copy(&v);
+                let floor: __m512i = core::mem::transmute_copy(&Simd::<T, N>::splat(T::MIN));
+                let carried = _mm512_alignr_epi64::<6>(vector, floor);
+                let shifted = match size_of::<T>() {
+                    1 => _mm512_alignr_epi8::<15>(vector, carried),
+                    _ => _mm512_alignr_epi8::<14>(vector, carried),
+                };
+                core::mem::transmute_copy(&shifted)
+            }
+        }
+    }
+);
 
 /// The largest cell of the single-segment recurrence over `rows` of `dsq`,
 /// in units above the begin state, or `None` when a cell saturated.
@@ -633,17 +1065,20 @@ where
 /// more get the rest in a second pass. `recorder`, if any, receives each
 /// block's largest cell and the row after it.
 #[inline(always)]
-fn best_segment<T, const N: usize, R, const GROWTH_VECTOR: bool>(
+fn best_segment<T, const N: usize, R, E, const GROWTH_VECTOR: bool, K>(
     dsq: &[u8],
-    rows: std::ops::Range<usize>,
+    rows: Range<usize>,
     emissions: &Emissions<'_, T, N>,
+    emission_rows: &E,
     cells: &mut R,
-    mut recorder: Option<&mut Recorder<'_, T, N>>,
+    mut recorder: Option<&mut Recorder<'_, T>>,
 ) -> Option<i64>
 where
     T: Unit,
+    K: Kernels,
     Simd<T, N>: SimdInt<Scalar = T> + SimdOrd,
     R: Row<T, N> + ?Sized,
+    E: Rows<T, N>,
 {
     let mut best = Simd::<T, N>::splat(T::MIN);
     let floor_v = Simd::<T, N>::splat(T::MIN);
@@ -658,16 +1093,20 @@ where
         delta = delta_next;
         if GROWTH_VECTOR {
             let growth_v = Simd::splat(T::from_count(growth));
-            (emissions.of(residue, false), growth_v, 0)
+            (emission_rows.of(residue, false), growth_v, 0)
         } else {
-            (emissions.of(residue, growth > 0), floor_v, growth - 1)
+            (emission_rows.of(residue, growth > 0), floor_v, growth - 1)
         }
     };
     let mut saturated = false;
     let mut block_start = rows.start;
     while block_start < rows.end {
         let block_end = (block_start + BLOCK_ROWS).min(rows.end);
-        let mut block_best = floor_v;
+        // Several running maxima, each over a different part of the row
+        // and carried through the block, so that no chain of maxima is
+        // longer than the rows are many; max is exact, so the result is
+        // the same whatever the grouping.
+        let mut block_best = [floor_v; ACCUMULATORS];
         // Rows go in pairs: a row in memory is then loaded and stored once
         // for two rows of work. A row whose delta grows by more than one unit
         // (short sequences only) gets the rest in a second pass: after the
@@ -685,25 +1124,26 @@ where
                     if extra > 0 && !emissions.raise_after {
                         cells.raise(extra_v(extra), None);
                     }
-                    cells.step::<GROWTH_VECTOR>(rsc, growth, &mut block_best);
+                    cells.step::<GROWTH_VECTOR, K>(rsc, growth, &mut block_best);
                     if extra > 0 && emissions.raise_after {
-                        cells.raise(extra_v(extra), Some(&mut block_best));
+                        cells.raise(extra_v(extra), Some(&mut block_best[0]));
                     }
                 }
                 continue;
             }
-            cells.step_pair::<GROWTH_VECTOR>(rsc0, growth0, rsc1, growth1, &mut block_best);
+            cells.step_pair::<GROWTH_VECTOR, K>(rsc0, growth0, rsc1, growth1, &mut block_best);
         }
         for &residue in rest {
             let (rsc, growth_v, extra) = row_inputs(residue);
             if extra > 0 && !emissions.raise_after {
                 cells.raise(extra_v(extra), None);
             }
-            cells.step::<GROWTH_VECTOR>(rsc, growth_v, &mut block_best);
+            cells.step::<GROWTH_VECTOR, K>(rsc, growth_v, &mut block_best);
             if extra > 0 && emissions.raise_after {
-                cells.raise(extra_v(extra), Some(&mut block_best));
+                cells.raise(extra_v(extra), Some(&mut block_best[0]));
             }
         }
+        let block_best = fold(block_best);
         best = best.simd_max(block_best);
         if let Some(recorder) = recorder.as_deref_mut() {
             let maximum = block_best.reduce_max();
@@ -765,68 +1205,67 @@ where
     Simd<T, N>: SimdInt<Scalar = T> + SimdOrd,
 {
     /// One row of the recurrence: updates the cells in place and folds the
-    /// new cells into `best`. With `GROWTH`, `growth_v` is added to each cell.
-    fn step<const GROWTH: bool>(
+    /// new cells into the running maxima `best`. With `GROWTH`, `growth_v`
+    /// is added to each cell. `K` provides the shift between rows.
+    fn step<const GROWTH: bool, K: Kernels>(
         &mut self,
         rsc_vectors: &[[T; N]],
         growth_v: Simd<T, N>,
-        best: &mut Simd<T, N>,
+        best: &mut [Simd<T, N>; ACCUMULATORS],
     );
     /// Two consecutive rows of the recurrence.
     #[inline(always)]
-    fn step_pair<const GROWTH: bool>(
+    fn step_pair<const GROWTH: bool, K: Kernels>(
         &mut self,
         rsc0: &[[T; N]],
         growth0: Simd<T, N>,
         rsc1: &[[T; N]],
         growth1: Simd<T, N>,
-        best: &mut Simd<T, N>,
+        best: &mut [Simd<T, N>; ACCUMULATORS],
     ) {
-        self.step::<GROWTH>(rsc0, growth0, best);
-        self.step::<GROWTH>(rsc1, growth1, best);
+        self.step::<GROWTH, K>(rsc0, growth0, best);
+        self.step::<GROWTH, K>(rsc1, growth1, best);
     }
     /// Add `extra` to every cell, folding the results into `best` if given.
     fn raise(&mut self, extra: Simd<T, N>, best: Option<&mut Simd<T, N>>);
-    /// Append the cells to `out`.
-    fn save(&self, out: &mut Vec<Simd<T, N>>);
+    /// Append the cells to `out`, vector by vector.
+    fn save(&self, out: &mut Vec<T>);
 }
 
-impl<T, const N: usize> Row<T, N> for [Simd<T, N>]
+/// A row in memory, one array per vector; vectors are loaded and stored
+/// with unaligned accesses.
+impl<T, const N: usize> Row<T, N> for [[T; N]]
 where
     T: Unit,
     Simd<T, N>: SimdInt<Scalar = T> + SimdOrd,
 {
     #[inline(always)]
-    fn step<const GROWTH: bool>(
+    fn step<const GROWTH: bool, K: Kernels>(
         &mut self,
         rsc_vectors: &[[T; N]],
         growth_v: Simd<T, N>,
-        best: &mut Simd<T, N>,
+        best: &mut [Simd<T, N>; ACCUMULATORS],
     ) {
         let q = self.len();
         // Right-shift previous row by 1 lane (Farrar shift); the begin
         // state enters node 1.
-        let mut mpv = self[q - 1].shift_elements_right::<1>(T::MIN);
-        // The row's maxima start afresh and join `best` with one op, so
-        // one row's chain of maxima never waits for the previous row's.
-        let mut row_best = [Simd::splat(T::MIN); ACCUMULATORS];
+        let mut mpv = K::shift_right_one(Simd::from_array(self[q - 1]));
         let (cell_groups, cell_rest) = self.as_chunks_mut::<ACCUMULATORS>();
         let (rsc_groups, rsc_rest) = rsc_vectors.as_chunks::<ACCUMULATORS>();
         for (cell_group, rsc_group) in cell_groups.iter_mut().zip(rsc_groups) {
             for index in 0..ACCUMULATORS {
                 let sv = new_cell::<T, N, GROWTH>(mpv, rsc_group[index], growth_v);
-                row_best[index] = row_best[index].simd_max(sv);
-                mpv = cell_group[index];
-                cell_group[index] = sv;
+                best[index] = best[index].simd_max(sv);
+                mpv = Simd::from_array(cell_group[index]);
+                cell_group[index] = sv.to_array();
             }
         }
-        for (cell, rsc_vector) in cell_rest.iter_mut().zip(rsc_rest) {
+        for (index, (cell, rsc_vector)) in cell_rest.iter_mut().zip(rsc_rest).enumerate() {
             let sv = new_cell::<T, N, GROWTH>(mpv, *rsc_vector, growth_v);
-            row_best[0] = row_best[0].simd_max(sv);
-            mpv = *cell;
-            *cell = sv;
+            best[index] = best[index].simd_max(sv);
+            mpv = Simd::from_array(*cell);
+            *cell = sv.to_array();
         }
-        *best = best.simd_max(fold(row_best));
     }
 
     /// Vector `q` of row i+1 needs vector `q - 1` of row i, which has just
@@ -834,26 +1273,27 @@ where
     /// row i by one vector and its first vector comes last. Each cell is
     /// loaded and stored once for the two rows.
     #[inline(always)]
-    fn step_pair<const GROWTH: bool>(
+    fn step_pair<const GROWTH: bool, K: Kernels>(
         &mut self,
         rsc0: &[[T; N]],
         growth0: Simd<T, N>,
         rsc1: &[[T; N]],
         growth1: Simd<T, N>,
-        best: &mut Simd<T, N>,
+        best: &mut [Simd<T, N>; ACCUMULATORS],
     ) {
         let q = self.len();
-        let floor_v = Simd::<T, N>::splat(T::MIN);
-        let mut best0 = [floor_v; 2];
-        let mut best1 = [floor_v; 2];
+        // Two running maxima per row.
+        let [best0, best1] = best.as_chunks_mut::<2>().0 else {
+            unreachable!("four accumulators make two pairs");
+        };
         // Vector 0 of row i; row i+1 has nothing to do yet.
-        let mut previous = self[0];
+        let mut previous = Simd::from_array(self[0]);
         let mut new0_previous = new_cell::<T, N, GROWTH>(
-            self[q - 1].shift_elements_right::<1>(T::MIN),
+            K::shift_right_one(Simd::from_array(self[q - 1])),
             rsc0[0],
             growth0,
         );
-        best0[0] = new0_previous;
+        best0[0] = best0[0].simd_max(new0_previous);
         let (cell_pairs, cell_rest) = self[1..].as_chunks_mut::<2>();
         let (rsc0_pairs, rsc0_rest) = rsc0[1..].as_chunks::<2>();
         let (rsc1_pairs, rsc1_rest) = rsc1[1..].as_chunks::<2>();
@@ -861,53 +1301,50 @@ where
             cell_pairs.iter_mut().zip(rsc0_pairs).zip(rsc1_pairs)
         {
             for index in 0..2 {
-                let old = cell_pair[index];
+                let old = Simd::from_array(cell_pair[index]);
                 let new0 = new_cell::<T, N, GROWTH>(previous, rsc0_pair[index], growth0);
                 let new1 = new_cell::<T, N, GROWTH>(new0_previous, rsc1_pair[index], growth1);
                 best0[index] = best0[index].simd_max(new0);
                 best1[index] = best1[index].simd_max(new1);
-                cell_pair[index] = new1;
+                cell_pair[index] = new1.to_array();
                 previous = old;
                 new0_previous = new0;
             }
         }
         for ((cell, rsc0_vector), rsc1_vector) in cell_rest.iter_mut().zip(rsc0_rest).zip(rsc1_rest)
         {
-            let old = *cell;
+            let old = Simd::from_array(*cell);
             let new0 = new_cell::<T, N, GROWTH>(previous, *rsc0_vector, growth0);
             let new1 = new_cell::<T, N, GROWTH>(new0_previous, *rsc1_vector, growth1);
             best0[0] = best0[0].simd_max(new0);
             best1[1] = best1[1].simd_max(new1);
-            *cell = new1;
+            *cell = new1.to_array();
             previous = old;
             new0_previous = new0;
         }
         // Vector 0 of row i+1, from the last vector of row i.
-        let new1_first = new_cell::<T, N, GROWTH>(
-            new0_previous.shift_elements_right::<1>(T::MIN),
-            rsc1[0],
-            growth1,
-        );
-        self[0] = new1_first;
+        let new1_first =
+            new_cell::<T, N, GROWTH>(K::shift_right_one(new0_previous), rsc1[0], growth1);
+        self[0] = new1_first.to_array();
         best1[0] = best1[0].simd_max(new1_first);
-        *best = best
-            .simd_max(best0[0].simd_max(best0[1]))
-            .simd_max(best1[0].simd_max(best1[1]));
     }
 
     #[inline(always)]
     fn raise(&mut self, extra: Simd<T, N>, mut best: Option<&mut Simd<T, N>>) {
         for cell in self.iter_mut() {
-            *cell = cell.saturating_add(extra);
+            let raised = Simd::from_array(*cell).saturating_add(extra);
+            *cell = raised.to_array();
             if let Some(best) = best.as_deref_mut() {
-                *best = best.simd_max(*cell);
+                *best = best.simd_max(raised);
             }
         }
     }
 
     #[inline(always)]
-    fn save(&self, out: &mut Vec<Simd<T, N>>) {
-        out.extend_from_slice(self);
+    fn save(&self, out: &mut Vec<T>) {
+        for cell in self {
+            out.extend_from_slice(cell);
+        }
     }
 }
 
@@ -917,24 +1354,22 @@ where
     Simd<T, N>: SimdInt<Scalar = T> + SimdOrd,
 {
     #[inline(always)]
-    fn step<const GROWTH: bool>(
+    fn step<const GROWTH: bool, K: Kernels>(
         &mut self,
         rsc_vectors: &[[T; N]],
         growth_v: Simd<T, N>,
-        best: &mut Simd<T, N>,
+        best: &mut [Simd<T, N>; ACCUMULATORS],
     ) {
         let rsc_vectors: &[[T; N]; Q] = rsc_vectors[..Q].try_into().expect("row width");
-        let mut mpv = self[Q - 1].shift_elements_right::<1>(T::MIN);
-        let mut row_best = [Simd::splat(T::MIN); ACCUMULATORS];
+        let mut mpv = K::shift_right_one(self[Q - 1]);
         // Fully unrolled: every index is a constant, so the row stays in
         // registers and no cell is loaded or stored.
         for index in 0..Q {
             let sv = new_cell::<T, N, GROWTH>(mpv, rsc_vectors[index], growth_v);
-            row_best[index % ACCUMULATORS] = row_best[index % ACCUMULATORS].simd_max(sv);
+            best[index % ACCUMULATORS] = best[index % ACCUMULATORS].simd_max(sv);
             mpv = self[index];
             self[index] = sv;
         }
-        *best = best.simd_max(fold(row_best));
     }
 
     #[inline(always)]
@@ -948,7 +1383,35 @@ where
     }
 
     #[inline(always)]
-    fn save(&self, out: &mut Vec<Simd<T, N>>) {
-        out.extend_from_slice(self);
+    fn save(&self, out: &mut Vec<T>) {
+        for cell in self {
+            out.extend_from_slice(cell.as_array());
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detected_isa_is_available_and_lane_counts_match_vector_bytes() {
+        let isa = Isa::detect();
+        assert!(isa.is_available());
+        assert!(Isa::available().contains(&isa));
+        for &isa in Isa::ALL {
+            assert_eq!(isa.lanes::<i8>(), isa.vector_bytes());
+            assert_eq!(isa.lanes::<i16>() * 2, isa.vector_bytes());
+            for m in [0, 1, 2, 15, 16, 17, 100, 1000] {
+                assert_eq!(
+                    isa.vector_count::<i8>(m),
+                    vector_count(m, isa.lanes::<i8>())
+                );
+                assert_eq!(
+                    isa.vector_count::<i16>(m),
+                    vector_count(m, isa.lanes::<i16>())
+                );
+            }
+        }
     }
 }

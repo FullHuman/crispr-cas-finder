@@ -30,7 +30,9 @@
 //! degenerate repeats in complete genomes", ISMB 2000. See
 //! THIRD_PARTY_NOTICES.md for the Vmatch sources this is derived from.
 
+use crate::hmmer_core::simd::int_msv::Isa;
 use rayon::prelude::*;
+use std::simd::prelude::*;
 
 /// Rayon setup and merge overhead outweighs parallel scanning below this many
 /// candidate starts.
@@ -155,8 +157,59 @@ struct Seed {
     length: usize,
 }
 
+/// Lanes of the vectors that compare window hashes.
+const HASH_LANES: usize = 8;
+
+/// Call `found` with the offset of every element of `window` equal to
+/// `hash`, in increasing order. Eight hashes are compared at a time.
+#[inline(always)]
+fn for_each_match_impl(window: &[u64], hash: u64, mut found: impl FnMut(usize)) {
+    let needle = Simd::<u64, HASH_LANES>::splat(hash);
+    let (chunks, rest) = window.as_chunks::<HASH_LANES>();
+    for (chunk_index, chunk) in chunks.iter().enumerate() {
+        let mut bits = Simd::from_array(*chunk).simd_eq(needle).to_bitmask();
+        while bits != 0 {
+            found(chunk_index * HASH_LANES + bits.trailing_zeros() as usize);
+            bits &= bits - 1;
+        }
+    }
+    for (offset, &candidate) in rest.iter().enumerate() {
+        if candidate == hash {
+            found(chunks.len() * HASH_LANES + offset);
+        }
+    }
+}
+
+/// [`for_each_match_impl`] compiled for the instruction set `isa`, so that
+/// the comparisons use the processor's wide vectors.
+#[inline(always)]
+fn for_each_match(isa: Isa, window: &[u64], hash: u64, found: impl FnMut(usize)) {
+    // The kernels of an instruction set run only where it is available,
+    // which `Isa::detect` guarantees of the set it returns.
+    match isa {
+        #[cfg(target_arch = "x86_64")]
+        Isa::Avx512 => unsafe { for_each_match_avx512(window, hash, found) },
+        #[cfg(target_arch = "x86_64")]
+        Isa::Avx2 => unsafe { for_each_match_avx2(window, hash, found) },
+        _ => for_each_match_impl(window, hash, found),
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+fn for_each_match_avx2(window: &[u64], hash: u64, found: impl FnMut(usize)) {
+    for_each_match_impl(window, hash, found);
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+fn for_each_match_avx512(window: &[u64], hash: u64, found: impl FnMut(usize)) {
+    for_each_match_impl(window, hash, found);
+}
+
 /// Seeds whose left copy starts at `left`.
 fn seeds_at(
+    isa: Isa,
     seq: &[u8],
     hashes: &[u64],
     left: usize,
@@ -171,12 +224,13 @@ fn seeds_at(
     let first = left + (search.min_length + search.min_gap).saturating_sub(search.max_differences);
     let last =
         (left + search.max_length + search.max_gap + search.max_differences).min(hashes.len() - 1);
-    for right in first..=last {
-        if hashes[right] != hash {
-            continue;
-        }
+    if first > last {
+        return;
+    }
+    for_each_match(isa, &hashes[first..=last], hash, |offset| {
+        let right = first + offset;
         if left > 0 && bases_match(seq[left - 1], seq[right - 1]) {
-            continue;
+            return;
         }
         let length = seq[left..]
             .iter()
@@ -185,14 +239,14 @@ fn seeds_at(
             .count();
         // A repeat is at least as long as its seed.
         if length < seed_length || length > search.max_length {
-            continue;
+            return;
         }
         seeds.push(Seed {
             left,
             right,
             length,
         });
-    }
+    });
 }
 
 /// One front of the greedy alignment: for each diagonal from `left` on, the
@@ -534,10 +588,11 @@ pub fn find_repeats(seq: &[u8], search: &RepeatSearch) -> Vec<RepeatMatch> {
         return Vec::new();
     }
     let evalues = Evalues::new(search.max_differences);
+    let isa = Isa::detect();
 
     let repeats_at = |left: usize, seeds: &mut Vec<Seed>, repeats: &mut Vec<RepeatMatch>| {
         seeds.clear();
-        seeds_at(seq, &hashes, left, seed_length, search, seeds);
+        seeds_at(isa, seq, &hashes, left, seed_length, search, seeds);
         for seed in seeds.iter() {
             if let Some(repeat) = extend_seed(seq, seed, seed_length, search, &evalues)
                 && reported(&repeat, search)

@@ -1,30 +1,24 @@
-// simd/i16_msv.rs — i16x8 bounds on the MSV score
+// simd/i16_msv.rs — 16-bit bounds on the MSV score
 //
-// The integer MSV bound of int_msv.rs on 16-bit cells, eight lanes per
-// vector. With thousands of units per nat it sits within a few hundredths
-// of a nat of the exact score, so nearly everything it lets through is a
-// real MSV hit. Only the exact filter policy runs it (pipeline/search.rs):
-// the 8-bit bound of i8_msv.rs runs first, and this one looks at the blocks
-// of rows that bound could not settle. The default policy decides with the
-// 8-bit lower bound alone.
+// The integer MSV bound of int_msv.rs on 16-bit cells, eight to thirty-two
+// lanes per vector depending on the processor (see `int_msv::Isa`). With
+// thousands of units per nat it sits within a few hundredths of a nat of the
+// exact score, so nearly everything it lets through is a real MSV hit. Only
+// the exact filter policy runs it (pipeline/search.rs): the 8-bit bound of
+// i8_msv.rs runs first, and this one looks at the blocks of rows that bound
+// could not settle. The default policy decides with the 8-bit lower bound
+// alone.
 
-use super::int_msv::{self, Blocks, Table, Unit};
+use super::int_msv::{
+    self, Blocks, Kernels, Table, Unit, dispatch, msv_lower_bound as lower_bound,
+    msv_upper_bound as upper_bound,
+};
 use super::oprofile::OptimizedProfile;
 use std::simd::Simd;
+use std::simd::cmp::SimdOrd;
+use std::simd::num::SimdInt;
 
 pub use super::int_msv::{CEIL_GUARD, SAFETY_MARGIN, units_above};
-
-/// Eight 16-bit lanes.
-pub type I16x8 = Simd<i16, 8>;
-
-/// Lanes per vector.
-pub const LANES: usize = 8;
-
-/// Number of i16x8 vectors for a model of `m` nodes.
-#[inline]
-pub fn vector_count(m: usize) -> usize {
-    int_msv::vector_count(m, LANES)
-}
 
 /// Integer units per nat for a model of `m` nodes, shared with the Viterbi
 /// over-estimate and its transition table.
@@ -66,19 +60,38 @@ pub fn msv_upper_bound_within(
     dsq: &[u8],
     l: usize,
     om: &OptimizedProfile,
-    m_row: &mut Vec<I16x8>,
-    blocks: &Blocks<i8, { super::i8_msv::LANES }>,
+    m_row: &mut Vec<i16>,
+    blocks: &Blocks<i8>,
     selected: u64,
 ) -> f32 {
-    int_msv::msv_upper_bound_within(
-        dsq,
-        l,
-        om,
-        table(om),
-        m_row,
-        blocks,
-        om.msv_scale8,
-        selected,
+    let table = table(om);
+    let from_scale = om.msv_scale8;
+    dispatch!(
+        om.isa(),
+        i16,
+        upper_bound_within(dsq, l, om, table, m_row, blocks, from_scale, selected)
+    )
+}
+
+/// `int_msv::msv_upper_bound_within` from the 8-bit bound's record.
+#[allow(clippy::too_many_arguments)]
+fn upper_bound_within<T, const N: usize, K>(
+    dsq: &[u8],
+    l: usize,
+    om: &OptimizedProfile,
+    table: Table<'_, T>,
+    m_row: &mut Vec<T>,
+    from: &Blocks<i8>,
+    from_scale: f64,
+    selected: u64,
+) -> f32
+where
+    T: Unit,
+    K: Kernels,
+    Simd<T, N>: SimdInt<Scalar = T> + SimdOrd,
+{
+    int_msv::msv_upper_bound_within::<T, N, K, i8>(
+        dsq, l, om, table, m_row, from, from_scale, selected,
     )
 }
 
@@ -88,7 +101,7 @@ fn table(om: &OptimizedProfile) -> Table<'_, i16> {
         units: &om.ssv_units,
         units_plus_one: None,
         kp: om.kp,
-        q: om.q8,
+        q: om.q_msv16,
         scale: SCALE,
     }
 }
@@ -105,16 +118,16 @@ pub fn msv_lower_bound_with(
     dsq: &[u8],
     l: usize,
     om: &OptimizedProfile,
-    m_row: &mut Vec<I16x8>,
+    m_row: &mut Vec<i16>,
 ) -> Option<f32> {
     let table = Table {
         units: &om.ssv_units_down,
         units_plus_one: None,
         kp: om.kp,
-        q: om.q8,
+        q: om.q_msv16,
         scale: SCALE,
     };
-    int_msv::msv_lower_bound(dsq, l, om, table, m_row)
+    dispatch!(om.isa(), i16, lower_bound(dsq, l, om, table, m_row))
 }
 
 /// [`msv_upper_bound`] with a caller-owned DP row, so that a worker searching
@@ -124,7 +137,8 @@ pub fn msv_upper_bound_with(
     dsq: &[u8],
     l: usize,
     om: &OptimizedProfile,
-    m_row: &mut Vec<I16x8>,
+    m_row: &mut Vec<i16>,
 ) -> f32 {
-    int_msv::msv_upper_bound(dsq, l, om, table(om), m_row, None)
+    let table = table(om);
+    dispatch!(om.isa(), i16, upper_bound(dsq, l, om, table, m_row, None))
 }

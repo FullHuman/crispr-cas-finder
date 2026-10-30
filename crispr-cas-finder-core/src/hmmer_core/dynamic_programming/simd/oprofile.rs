@@ -9,7 +9,7 @@
 //   Forward: f32  in 4-lane vectors  (Q4  = max(2, ceil((M-1)/4)  + 1)) — odds space
 //   Log:     f32  in 4-lane vectors  (Q4)  — log-space for MSV/Viterbi filters
 
-use super::int_msv::Rounding;
+use super::int_msv::{Isa, Rounding};
 use super::{i8_msv, i16_msv, i16_viterbi, int_msv};
 use crate::hmmer_core::config::*;
 use crate::hmmer_core::profile::Profile;
@@ -63,23 +63,29 @@ pub struct OptimizedProfile {
     pub rlv: Vec<Vec<f32>>, // [kp][q4 * 4] — match emission log-scores
     pub tlv: Vec<f32>,      // [(7*q4 + q4) * 4] — transition log-scores
 
-    // --- i8x16 MSV over-estimate (see i8_msv.rs) ---
-    pub q16: usize,
+    // --- Instruction set of the integer MSV bounds (see int_msv.rs) ---
+    // Private: the kernels compiled for it may only run where it is
+    // available, which `from_profile_with_isa` checks.
+    isa: Isa,
+
+    // --- 8-bit MSV over-estimate (see i8_msv.rs), isa.lanes::<i8>() lanes ---
+    pub q_msv8: usize,                     // vectors per DP row
     pub msv_scale8: f64,                   // integer units per nat
-    pub msv_units8: Vec<i8>,               // [kp * q16 * 16] — match emissions, rounded up
+    pub msv_units8: Vec<i8>,               // [kp * q_msv8 * lanes] — match emissions, rounded up
     pub msv_units8_plus_one: Vec<i8>,      // the same, one unit higher
     pub msv_units8_down: Vec<i8>,          // match emissions rounded down, for the lower bound
     pub msv_units8_down_plus_one: Vec<i8>, // the same, one unit higher
 
-    // --- i16x8 MSV over-estimate (see i16_msv.rs) ---
-    pub q8: usize,
-    pub ssv_units: Vec<i16>, // [kp * q8 * 8] — match emissions at i16_msv::SCALE, rounded up
+    // --- 16-bit MSV over-estimate (see i16_msv.rs), isa.lanes::<i16>() lanes ---
+    pub q_msv16: usize,           // vectors per DP row
+    pub ssv_units: Vec<i16>, // [kp * q_msv16 * lanes] — match emissions at i16_msv::SCALE, rounded up
     pub ssv_units_down: Vec<i16>, // the same, rounded down, for the lower bound
 
-    // --- i16x8 Viterbi over-estimate (see i16_viterbi.rs) ---
+    // --- 16-bit Viterbi over-estimate (see i16_viterbi.rs), isa.lanes::<i16>() lanes ---
+    pub q_vit: usize,             // vectors per DP row
     pub msv_scale: f64,           // integer units per nat
-    pub msv_units: Vec<i16>,      // [kp * q8 * 8] — match emissions, rounded up
-    pub vit_units: Vec<i16>,      // [(7*q8 + q8) * 8] — transitions, rounded up
+    pub msv_units: Vec<i16>,      // [kp * q_vit * lanes] — match emissions, rounded up
+    pub vit_units: Vec<i16>,      // [(7*q_vit + q_vit) * lanes] — transitions, rounded up
     pub vit_min_begin_units: i16, // smallest finite begin transition
 
     // E-value parameters
@@ -89,7 +95,21 @@ pub struct OptimizedProfile {
 }
 
 impl OptimizedProfile {
+    /// An empty profile of `m` nodes over an alphabet of `kp` symbols, for
+    /// the instruction set this processor runs a model of `m` nodes best
+    /// with.
     pub fn new(m: usize, kp: usize) -> Self {
+        Self::new_with_isa(m, kp, Isa::for_model(m))
+    }
+
+    /// [`OptimizedProfile::new`] for the integer MSV kernels of `isa`, or of
+    /// the portable kernels when this processor lacks it.
+    pub fn new_with_isa(m: usize, kp: usize, isa: Isa) -> Self {
+        let isa = if isa.is_available() {
+            isa
+        } else {
+            Isa::Portable
+        };
         let q4 = nqf(m);
 
         OptimizedProfile {
@@ -104,18 +124,23 @@ impl OptimizedProfile {
             xf: [[0.0f32; 2]; NUM_XSTATES],
             rlv: vec![vec![f32::NEG_INFINITY; q4 * 4]; kp],
             tlv: vec![f32::NEG_INFINITY; (NTSC_PER_Q * q4 + q4) * 4],
-            q16: i8_msv::vector_count(m),
+            isa,
+            q_msv8: isa.vector_count::<i8>(m),
             msv_scale8: i8_msv::SCALE,
             msv_units8: Vec::new(),
             msv_units8_plus_one: Vec::new(),
             msv_units8_down: Vec::new(),
             msv_units8_down_plus_one: Vec::new(),
-            q8: i16_msv::vector_count(m),
+            q_msv16: isa.vector_count::<i16>(m),
             ssv_units: Vec::new(),
             ssv_units_down: Vec::new(),
+            q_vit: isa.vector_count::<i16>(m),
             msv_scale: i16_msv::scale_for(m),
-            msv_units: vec![i16::MIN; kp * i16_msv::vector_count(m) * i16_msv::LANES],
-            vit_units: vec![i16::MIN; (NTSC_PER_Q + 1) * i16_msv::vector_count(m) * i16_msv::LANES],
+            msv_units: vec![i16::MIN; kp * isa.vector_count::<i16>(m) * isa.lanes::<i16>()],
+            vit_units: vec![
+                i16::MIN;
+                (NTSC_PER_Q + 1) * isa.vector_count::<i16>(m) * isa.lanes::<i16>()
+            ],
             vit_min_begin_units: 0,
             ev_params: [EV_PARAM_UNSET; NUM_EV_PARAMS],
             mode: SearchMode::Local,
@@ -123,10 +148,18 @@ impl OptimizedProfile {
         }
     }
 
-    /// Build an OptimizedProfile from a generic Profile.
+    /// Build an OptimizedProfile from a generic Profile, for the instruction
+    /// set this processor runs a model of its length best with.
     pub fn from_profile(gm: &Profile) -> Self {
+        Self::from_profile_with_isa(gm, Isa::for_model(gm.num_nodes))
+    }
+
+    /// [`OptimizedProfile::from_profile`] with the integer MSV kernels of
+    /// `isa`, or of the portable kernels when this processor lacks it. The
+    /// bounds those kernels compute do not depend on the instruction set.
+    pub fn from_profile_with_isa(gm: &Profile, isa: Isa) -> Self {
         let kp = gm.alphabet.full_size;
-        let mut om = OptimizedProfile::new(gm.num_nodes, kp);
+        let mut om = OptimizedProfile::new_with_isa(gm.num_nodes, kp, isa);
         om.mode = gm.mode;
         om.l = gm.target_length;
         om.nj = gm.expected_j_uses;
@@ -141,12 +174,19 @@ impl OptimizedProfile {
         om
     }
 
-    /// Striped 16-bit match emissions of `residue` (see i16_msv.rs).
+    /// The instruction set the integer MSV kernels run with.
+    #[inline]
+    pub fn isa(&self) -> Isa {
+        self.isa
+    }
+
+    /// Striped 16-bit match emissions of `residue` for the Viterbi
+    /// over-estimate (see i16_viterbi.rs).
     #[inline]
     pub fn msv_units_row(&self, residue: u8) -> &[i16] {
         let xi = residue as usize;
         let xi = if xi < self.kp { xi } else { 0 };
-        let width = self.q8 * i16_msv::LANES;
+        let width = self.q_vit * self.isa.lanes::<i16>();
         &self.msv_units[xi * width..][..width]
     }
 
@@ -300,42 +340,41 @@ fn fwd_conversion(gm: &Profile, om: &mut OptimizedProfile) {
 
 fn msv_units_conversion(gm: &Profile, om: &mut OptimizedProfile) {
     let m = gm.num_nodes;
-    let nq = om.q8;
+    let nq = om.q_vit;
+    let lanes = om.isa.lanes::<i16>();
     for x in 0..om.kp {
         let rsc = gm.residue_scores_for(x);
-        let row = &mut om.msv_units[x * nq * i16_msv::LANES..][..nq * i16_msv::LANES];
+        let row = &mut om.msv_units[x * nq * lanes..][..nq * lanes];
         for q in 0..nq {
-            for z in 0..i16_msv::LANES {
+            for z in 0..lanes {
                 let k = q + 1 + z * nq;
                 let score_idx = k * PROFILE_NUM_EMISSIONS + PRsc::MatchScore as usize;
                 if k <= m && score_idx < rsc.len() {
-                    row[q * i16_msv::LANES + z] =
-                        i16_msv::emission_units(om.msv_scale, rsc[score_idx]);
+                    row[q * lanes + z] = i16_msv::emission_units(om.msv_scale, rsc[score_idx]);
                 }
             }
         }
     }
-    let (q8, q16, kp) = (om.q8, om.q16, om.kp);
-    om.ssv_units =
-        int_msv::emission_table(gm, kp, q8, i16_msv::LANES, i16_msv::SCALE, Rounding::Up);
+    let (isa, kp) = (om.isa, om.kp);
+    let (q16, lanes16) = (om.q_msv16, isa.lanes::<i16>());
+    let (q8, lanes8) = (om.q_msv8, isa.lanes::<i8>());
+    om.ssv_units = int_msv::emission_table(gm, kp, q16, lanes16, i16_msv::SCALE, Rounding::Up);
     om.ssv_units_down =
-        int_msv::emission_table(gm, kp, q8, i16_msv::LANES, i16_msv::SCALE, Rounding::Down);
-    om.msv_units8 =
-        int_msv::emission_table(gm, kp, q16, i8_msv::LANES, om.msv_scale8, Rounding::Up);
+        int_msv::emission_table(gm, kp, q16, lanes16, i16_msv::SCALE, Rounding::Down);
+    om.msv_units8 = int_msv::emission_table(gm, kp, q8, lanes8, om.msv_scale8, Rounding::Up);
     om.msv_units8_plus_one = int_msv::one_unit_higher(&om.msv_units8);
-    om.msv_units8_down =
-        int_msv::emission_table(gm, kp, q16, i8_msv::LANES, om.msv_scale8, Rounding::Down);
+    om.msv_units8_down = int_msv::emission_table(gm, kp, q8, lanes8, om.msv_scale8, Rounding::Down);
     om.msv_units8_down_plus_one = int_msv::one_unit_higher(&om.msv_units8_down);
 }
 
 // ---------- i16x8 transitions for the Viterbi over-estimate ----------
 
-/// Same striped layout as `tlv`, with eight lanes: seven transitions per
-/// vector, then the delete-to-delete transitions.
+/// Same striped layout as `tlv`, with the lanes of the instruction set:
+/// seven transitions per vector, then the delete-to-delete transitions.
 fn vit_units_conversion(gm: &Profile, om: &mut OptimizedProfile) {
     let m = gm.num_nodes;
-    let nq = om.q8;
-    let lanes = i16_msv::LANES;
+    let nq = om.q_vit;
+    let lanes = om.isa.lanes::<i16>();
     let tsc = gm.transition_scores_raw();
     let units = |index: usize| {
         tsc.get(index).map_or(i16::MIN, |&score| {

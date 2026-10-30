@@ -1,21 +1,17 @@
-// simd/i8_msv.rs — i8x16 bounds on the MSV score
+// simd/i8_msv.rs — 8-bit bounds on the MSV score
 //
-// The integer MSV bound of int_msv.rs on 8-bit cells, sixteen lanes per
-// vector, at half the cost per cell of the 16-bit bound. By default its
-// lower bound alone decides the MSV and bias filters, standing in for the
-// exact score (pipeline/search.rs). With the exact filter policy its upper
-// bound runs first and, being coarser than the 16-bit bound, leaves what it
-// lets through to that one.
+// The integer MSV bound of int_msv.rs on 8-bit cells, sixteen to sixty-four
+// lanes per vector depending on the processor (see `int_msv::Isa`), at half
+// the cost per cell of the 16-bit bound. By default its lower bound alone
+// decides the MSV and bias filters, standing in for the exact score
+// (pipeline/search.rs). With the exact filter policy its upper bound runs
+// first and, being coarser than the 16-bit bound, leaves what it lets
+// through to that one.
 
-use super::int_msv::{self, Blocks, Table, Unit};
+use super::int_msv::{
+    Blocks, Table, Unit, dispatch, msv_lower_bound as lower_bound, msv_upper_bound as upper_bound,
+};
 use super::oprofile::OptimizedProfile;
-use std::simd::Simd;
-
-/// Sixteen 8-bit lanes.
-pub type I8x16 = Simd<i8, 16>;
-
-/// Lanes per vector.
-pub const LANES: usize = 16;
 
 /// Integer units per nat.
 ///
@@ -26,12 +22,6 @@ pub const LANES: usize = 16;
 /// eighteen nats while keeping the rounding of each emission under a
 /// fourteenth of a nat.
 pub const SCALE: f64 = 14.0;
-
-/// Number of i8x16 vectors for a model of `m` nodes.
-#[inline]
-pub fn vector_count(m: usize) -> usize {
-    int_msv::vector_count(m, LANES)
-}
 
 /// Round an emission score up to integer units, saturating to i8.
 #[inline]
@@ -54,10 +44,11 @@ pub fn msv_upper_bound_with(
     dsq: &[u8],
     l: usize,
     om: &OptimizedProfile,
-    m_row: &mut Vec<I8x16>,
-    blocks: Option<&mut Blocks<i8, LANES>>,
+    m_row: &mut Vec<i8>,
+    blocks: Option<&mut Blocks<i8>>,
 ) -> f32 {
-    int_msv::msv_upper_bound(dsq, l, om, table(om), m_row, blocks)
+    let table = table(om);
+    dispatch!(om.isa(), i8, upper_bound(dsq, l, om, table, m_row, blocks))
 }
 
 /// Lower bound, in nats, on the score `msv_filter_f32` returns, or `None`
@@ -74,16 +65,16 @@ pub fn msv_lower_bound_with(
     dsq: &[u8],
     l: usize,
     om: &OptimizedProfile,
-    m_row: &mut Vec<I8x16>,
+    m_row: &mut Vec<i8>,
 ) -> Option<f32> {
     let table = Table {
         units: &om.msv_units8_down,
         units_plus_one: Some(&om.msv_units8_down_plus_one),
         kp: om.kp,
-        q: om.q16,
+        q: om.q_msv8,
         scale: om.msv_scale8,
     };
-    int_msv::msv_lower_bound(dsq, l, om, table, m_row)
+    dispatch!(om.isa(), i8, lower_bound(dsq, l, om, table, m_row))
 }
 
 /// The emission tables of `om` for the upper bound.
@@ -92,7 +83,7 @@ fn table(om: &OptimizedProfile) -> Table<'_, i8> {
         units: &om.msv_units8,
         units_plus_one: Some(&om.msv_units8_plus_one),
         kp: om.kp,
-        q: om.q16,
+        q: om.q_msv8,
         scale: om.msv_scale8,
     }
 }

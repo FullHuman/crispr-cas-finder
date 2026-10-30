@@ -934,9 +934,9 @@ struct SearchEngine {
     odds_tables: OddsTables,
 
     // DP rows of the integer over-estimates, reused across sequences
-    msv_bound_row8: Vec<i8_msv::I8x16>,
-    msv_blocks8: int_msv::Blocks<i8, { i8_msv::LANES }>,
-    msv_bound_row16: Vec<i16_msv::I16x8>,
+    msv_bound_row8: Vec<i8>,
+    msv_blocks8: int_msv::Blocks<i8>,
+    msv_bound_row16: Vec<i16>,
     viterbi_bound_rows: i16_viterbi::Rows,
 
     // DP rows of the exact MSV and Viterbi filters, reused across sequences
