@@ -223,50 +223,50 @@ adds `-cpuM 10`. The speed-up compares the two tools at their defaults, the
 original on one worker and this project on every core. Each figure is one run,
 or the median of three for E. coli K-12 and three other inputs. The scripts,
 every row and the caveats are in [benchmarks/README.md](benchmarks/README.md);
-the Rust rows are of the build at `45c346f` (2026-10-30).
+the Rust rows are of the build at `f6e326f` (2026-11-11).
 
 **Arrays and Cas systems** (`--cas`), a selection of the 40 genomes:
 
 | genome | note | Mb | original | original, all cores | Rust, 1 thread | Rust, all cores | speed-up |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| Mycoplasmoides genitalium G37 | no CRISPR-Cas, genetic code 4 | 0.6 | 9.64 s | 3.72 s | 1.45 s | 0.27 s | 35x |
-| Campylobacter jejuni NCTC 11168 | type II-C | 1.6 | 14.9 s | 6.02 s | 3.03 s | 0.46 s | 32x |
-| Methanocaldococcus jannaschii DSM 2661 | archaeon, about twenty arrays | 1.7 | 37.0 s | 18.8 s | 4.12 s | 0.60 s | 62x |
-| Saccharolobus solfataricus P2 | archaeon, types I-A and III-B | 3.0 | 27.5 s | 16.4 s | 8.08 s | 1.58 s | 17x |
-| Haloferax volcanii DS2 | archaeon, type I-B, high GC | 3.5 | 33.0 s | 16.9 s | 6.85 s | 1.57 s | 21x |
-| Bacillus subtilis 168 | no CRISPR-Cas | 4.2 | 30.5 s | 15.3 s | 7.17 s | 1.19 s | 26x |
-| Clostridioides difficile 630 | type I-B, many arrays | 4.3 | 43.9 s | 29.5 s | 7.42 s | 1.10 s | 40x |
-| Mycobacterium tuberculosis H37Rv | type III-A, high GC | 4.4 | 39.3 s | 26.2 s | 7.15 s | 1.39 s | 28x |
-| Escherichia coli K-12 MG1655 | type I-E | 4.6 | 23.8 s | 12.3 s | 7.45 s | 1.29 s | 18x |
-| Pseudomonas aeruginosa PA14 | type I-F | 6.5 | 32.3 s | 18.9 s | 9.88 s | 1.74 s | 19x |
-| Streptomyces coelicolor A3(2) | 8.7 Mb linear chromosome | 8.7 | 53.7 s | 37.3 s | 12.6 s | 2.30 s | 23x |
-| Phytobacter ursingii ATCC 27989 | draft, 19 contigs | 5.8 | 110.9 s | 35.9 s | 9.44 s | 1.68 s | 66x |
-| Phytobacter diazotrophicus Pd1 | draft, 79 contigs | 5.6 | 7.6 min | 2.2 min | 10.4 s | 1.36 s | 335x |
-| isolate 13020RM | enterobacterial draft, 234 contigs | 5.7 | 13.5 min | 3.9 min | 12.2 s | 1.64 s | 496x |
+| Mycoplasmoides genitalium G37 | no CRISPR-Cas, genetic code 4 | 0.6 | 9.64 s | 3.72 s | 1.27 s | 0.20 s | 48x |
+| Campylobacter jejuni NCTC 11168 | type II-C | 1.6 | 14.9 s | 6.02 s | 2.65 s | 0.39 s | 38x |
+| Methanocaldococcus jannaschii DSM 2661 | archaeon, about twenty arrays | 1.7 | 37.0 s | 18.8 s | 3.64 s | 0.51 s | 73x |
+| Saccharolobus solfataricus P2 | archaeon, types I-A and III-B | 3.0 | 27.5 s | 16.4 s | 7.07 s | 1.08 s | 26x |
+| Haloferax volcanii DS2 | archaeon, type I-B, high GC | 3.5 | 33.0 s | 16.9 s | 5.56 s | 0.97 s | 34x |
+| Bacillus subtilis 168 | no CRISPR-Cas | 4.2 | 30.5 s | 15.3 s | 6.21 s | 0.93 s | 33x |
+| Clostridioides difficile 630 | type I-B, many arrays | 4.3 | 43.9 s | 29.5 s | 6.48 s | 0.92 s | 48x |
+| Mycobacterium tuberculosis H37Rv | type III-A, high GC | 4.4 | 39.3 s | 26.2 s | 5.91 s | 0.96 s | 41x |
+| Escherichia coli K-12 MG1655 | type I-E | 4.6 | 23.8 s | 12.3 s | 6.48 s | 0.97 s | 24x |
+| Pseudomonas aeruginosa PA14 | type I-F | 6.5 | 32.3 s | 18.9 s | 8.34 s | 1.30 s | 25x |
+| Streptomyces coelicolor A3(2) | 8.7 Mb linear chromosome | 8.7 | 53.7 s | 37.3 s | 10.3 s | 1.65 s | 33x |
+| Phytobacter ursingii ATCC 27989 | draft, 19 contigs | 5.8 | 110.9 s | 35.9 s | 7.61 s | 1.02 s | 109x |
+| Phytobacter diazotrophicus Pd1 | draft, 79 contigs | 5.6 | 7.6 min | 2.2 min | 7.88 s | 1.07 s | 426x |
+| isolate 13020RM | enterobacterial draft, 234 contigs | 5.7 | 13.5 min | 3.9 min | 7.88 s | 1.06 s | 764x |
 
 Over all 40 genomes, geometric means of the original's wall time over this
 project's:
 
 | | geometric mean | range |
 | --- | --- | --- |
-| both at their defaults | 31x | 15x to 496x |
-| this project held to one thread | 5.3x | 2.8x to 67x |
-| both using every core | 15x | 8x to 142x |
+| both at their defaults | 41x | 24x to 764x |
+| this project held to one thread | 6.2x | 3.6x to 103x |
+| both using every core | 19x | 10x to 219x |
 
 The gain grows with the number of contigs because the original runs the
 whole Cas search once per sequence. With Cas detection the largest process
-of this project peaks at about 1.4 times the original's memory; for arrays
+of this project peaks at about 1.1 times the original's memory; for arrays
 only, at a third to a sixth of it. E. coli K-12 with Cas detection against
 the number of threads:
 
 | threads | 1 | 2 | 4 | 8 |
 | --- | --- | --- | --- | --- |
-| wall time | 7.45 s | 3.88 s | 2.23 s | 1.35 s |
+| wall time | 6.48 s | 3.26 s | 1.75 s | 1.04 s |
 
-**Arrays only**, 72 genomes: the geometric mean is 82x at the defaults (26x to
-278x) and 39x with this project held to one thread. The 51 inputs of the local
-set take 6.1 minutes one after another with the original and 4.6 s here; the
-21 of the panel take 2.3 minutes and 2.1 s.
+**Arrays only**, 72 genomes: the geometric mean is 106x at the defaults (31x to
+319x) and 46x with this project held to one thread. The 51 inputs of the local
+set take 6.1 minutes one after another with the original and 3.2 s here; the
+21 of the panel take 2.3 minutes and 1.2 s.
 
 **Agreement with the original.** Of the original's 448 arrays on these 72
 inputs, 439 are reported here with the same start and the same number of
