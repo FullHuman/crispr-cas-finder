@@ -358,7 +358,9 @@ fn integer_bounds_are_the_same_on_every_instruction_set() {
         let mut rng = XorShift64::new(seed);
         for m in [1, 2, 8, 16, 17, 33, 64, 65, 129, 300, 400, 1600] {
             let hmm = hmm_sample(&mut rng, m, &alphabet);
-            for l in [1, 2, 7, 64, 65, 200] {
+            // 66 and 67 leave two and three rows after the last four-row
+            // pass of the plain MSV kernels.
+            for l in [1, 2, 7, 64, 65, 66, 67, 200] {
                 let mut profile = Profile::new(m, &alphabet);
                 modelconfig::profile_config(&hmm, &background, &mut profile, l, SearchMode::Local);
                 let optimized: Vec<OptimizedProfile> = isas

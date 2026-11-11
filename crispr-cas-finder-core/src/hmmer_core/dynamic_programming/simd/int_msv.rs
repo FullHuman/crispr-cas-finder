@@ -831,6 +831,14 @@ impl<T: Unit, const N: usize, const Q: usize> Rows<T, N> for ChunkedRows<'_, T, 
     }
 }
 
+/// Calls `$macro!` with its arguments followed by the row widths, in vectors,
+/// that have a kernel holding the row in registers.
+macro_rules! with_register_widths {
+    ($macro:ident ! ( $($arguments:tt)* )) => {
+        $macro!($($arguments)*; 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24)
+    };
+}
+
 /// Picks the kernel for the row width `$emissions.q`: rows of up to 24
 /// vectors are kept in registers rather than memory, as the row, the running
 /// maxima and a few temporaries must fit the 32 vector registers of AArch64
@@ -838,10 +846,9 @@ impl<T: Unit, const N: usize, const Q: usize> Rows<T, N> for ChunkedRows<'_, T, 
 /// cell type and lane count.
 macro_rules! by_row_width {
     ($growth:literal; $in_registers:ident, $in_memory:ident; $dsq:ident, $rows:ident, $start:ident, $emissions:ident, $m_row:ident, $recorder:ident) => {
-        by_row_width!(
-            @widths $growth; $in_registers, $in_memory; $dsq, $rows, $start, $emissions, $m_row, $recorder;
-            2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24
-        )
+        with_register_widths!(by_row_width!(
+            @widths $growth; $in_registers, $in_memory; $dsq, $rows, $start, $emissions, $m_row, $recorder
+        ))
     };
     (@widths $growth:literal; $in_registers:ident, $in_memory:ident; $dsq:ident, $rows:ident, $start:ident, $emissions:ident, $m_row:ident, $recorder:ident; $($width:literal)*) => {
         match $emissions.q {
@@ -854,13 +861,12 @@ macro_rules! by_row_width {
 /// Returns from the enclosing function with `$in_registers` for the row
 /// width `$emissions.q`, when a row that wide is kept in registers (see
 /// `by_row_width`). `T` and `N` are the enclosing function's cell type and
-/// lane count.
+/// lane count; the call is unsafe, and the caller's to justify.
 macro_rules! plain_by_row_width {
     ($in_registers:ident; $dsq:ident, $first_row:ident, $emissions:ident) => {
-        plain_by_row_width!(
-            @widths $in_registers; $dsq, $first_row, $emissions;
-            2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24
-        )
+        with_register_widths!(plain_by_row_width!(
+            @widths $in_registers; $dsq, $first_row, $emissions
+        ))
     };
     (@widths $in_registers:ident; $dsq:ident, $first_row:ident, $emissions:ident; $($width:literal)*) => {
         match $emissions.q {
@@ -943,9 +949,13 @@ macro_rules! isa_kernels {
             }
 
             /// `plain_rows_in_registers` compiled for this instruction set.
+            ///
+            /// # Safety
+            ///
+            /// As for `plain_rows_in_registers`.
             #[inline(never)]
             $(#[target_feature(enable = $feature)])*
-            fn plain_in_registers<T, const N: usize, const Q: usize>(
+            unsafe fn plain_in_registers<T, const N: usize, const Q: usize>(
                 dsq: &[u8],
                 first_row: usize,
                 emissions: &Emissions<'_, T, N>,
@@ -954,13 +964,18 @@ macro_rules! isa_kernels {
                 T: Unit,
                 Simd<T, N>: SimdInt<Scalar = T> + SimdOrd,
             {
-                plain_rows_in_registers::<T, N, Q, $kernels>(dsq, first_row, emissions)
+                // SAFETY: the caller's contract is this function's.
+                unsafe { plain_rows_in_registers::<T, N, Q, $kernels>(dsq, first_row, emissions) }
             }
 
             /// `chained_rows` compiled for this instruction set.
+            ///
+            /// # Safety
+            ///
+            /// As for `chained_rows`.
             #[inline(never)]
             $(#[target_feature(enable = $feature)])*
-            fn in_chains<T, const N: usize>(
+            unsafe fn in_chains<T, const N: usize>(
                 dsq: &[u8],
                 first_row: usize,
                 emissions: &Emissions<'_, T, N>,
@@ -970,7 +985,8 @@ macro_rules! isa_kernels {
                 T: Unit,
                 Simd<T, N>: SimdInt<Scalar = T> + SimdOrd,
             {
-                chained_rows::<T, N, $kernels>(dsq, first_row, emissions, m_row)
+                // SAFETY: the caller's contract is this function's.
+                unsafe { chained_rows::<T, N, $kernels>(dsq, first_row, emissions, m_row) }
             }
 
             /// The largest cell of the recurrence over `rows` (see
@@ -990,8 +1006,14 @@ macro_rules! isa_kernels {
             {
                 if start.is_none() && recorder.is_none() && emissions.plain_rows(&dsq[rows.clone()]) {
                     let (dsq, first_row) = (&dsq[rows.clone()], rows.start);
-                    plain_by_row_width!(plain_in_registers; dsq, first_row, emissions);
-                    return in_chains::<T, N>(dsq, first_row, emissions, m_row);
+                    // SAFETY: `plain_rows` has just checked the rows, the
+                    // residues of `dsq` among them.
+                    unsafe {
+                        plain_by_row_width!(plain_in_registers; dsq, first_row, emissions);
+                        if emissions.q >= 2 * CHAIN_ROWS {
+                            return in_chains::<T, N>(dsq, first_row, emissions, m_row);
+                        }
+                    }
                 }
                 if emissions.growth_vector {
                     by_row_width!(true; in_registers, in_memory; dsq, rows, start, emissions, m_row, recorder)
@@ -1055,7 +1077,8 @@ isa_kernels!(
             T: Unit,
             Simd<T, N>: SimdInt<Scalar = T>,
         {
-            #[cfg(target_arch = "aarch64")]
+            // Lanes are bytes in memory order on little-endian targets only.
+            #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
             {
                 use core::arch::aarch64::{uint8x16_t, vextq_u8};
                 if size_of::<Simd<T, N>>() == size_of::<uint8x16_t>() && size_of::<T>() <= 2 {
@@ -1235,8 +1258,14 @@ impl<'a, T: Unit, const N: usize> RowCursor<'a, T, N> {
 /// The largest cell of the single-segment recurrence over the plain rows
 /// `dsq`, the first of them row `first_row` of its sequence, starting at
 /// the begin state, with the row of `Q` vectors held in registers.
+///
+/// # Safety
+///
+/// The rows must be plain: [`Emissions::plain_rows`] holds for `dsq`. The
+/// residues are not checked again, and one outside the tables would be read
+/// past their end.
 #[inline(always)]
-fn plain_rows_in_registers<T, const N: usize, const Q: usize, K>(
+unsafe fn plain_rows_in_registers<T, const N: usize, const Q: usize, K>(
     dsq: &[u8],
     first_row: usize,
     emissions: &Emissions<'_, T, N>,
@@ -1252,8 +1281,8 @@ where
     let mut best = [floor_v; ACCUMULATORS];
     let mut cursor = RowCursor::new(emissions, first_row);
     for &residue in dsq {
-        // SAFETY: the caller checked the residues (`Emissions::plain_rows`),
-        // and a row has `Q` vectors.
+        // SAFETY: the residue is under `kp` by the caller's contract, and a
+        // row has `Q` vectors.
         let rsc = unsafe { &*cursor.next(residue).cast::<[[T; N]; Q]>() };
         cells.step::<false, K>(rsc, floor_v, &mut best);
     }
@@ -1264,8 +1293,14 @@ where
 /// The largest cell of the single-segment recurrence over the plain rows
 /// `dsq`, the first of them row `first_row` of its sequence, starting at
 /// the begin state, four rows per pass over the row in memory.
+///
+/// # Safety
+///
+/// The rows must be plain: [`Emissions::plain_rows`] holds for `dsq`. The
+/// residues are not checked again, and one outside the tables would be read
+/// past their end.
 #[inline(always)]
-fn chained_rows<T, const N: usize, K>(
+unsafe fn chained_rows<T, const N: usize, K>(
     dsq: &[u8],
     first_row: usize,
     emissions: &Emissions<'_, T, N>,
@@ -1286,8 +1321,8 @@ where
     let mut cursor = RowCursor::new(emissions, first_row);
     let (passes, rest) = dsq.as_chunks::<CHAIN_ROWS>();
     for &[r0, r1, r2, r3] in passes {
-        // SAFETY: the caller checked the residues (`Emissions::plain_rows`);
-        // each pointer is then the start of a table row of `q` vectors, and
+        // SAFETY: the residues are under `kp` by the caller's contract; each
+        // pointer is then the start of a table row of `q` vectors, and
         // `cells` has `q >= 2 * CHAIN_ROWS` vectors.
         unsafe {
             let rows = [
@@ -1384,29 +1419,32 @@ unsafe fn chain_pass<T, const N: usize, K>(
         // The chains from vectors 0 to q-5, four at a time; chain `c` ends
         // at vector `c + 4 <= q - 1`.
         let chains = q - CHAIN_ROWS;
+        // Chain `c` from the old cell of its vector: the new cell of vector
+        // `c + 4` and the largest of the four cells on the way.
+        let chain_from = |old: Simd<T, N>, c: usize| {
+            let v0 = add(old, e0.add(c + 1));
+            let v1 = add(v0, e1.add(c + 2));
+            let v2 = add(v1, e2.add(c + 3));
+            let v3 = add(v2, e3.add(c + 4));
+            (v3, fold([v0, v1, v2, v3]))
+        };
         let mut chain = 0;
         while chain + ACCUMULATORS <= chains {
             for index in 0..ACCUMULATORS {
                 let c = chain + index;
                 let next = load(cells.add(c + 4));
-                let v0 = add(window[index], e0.add(c + 1));
-                let v1 = add(v0, e1.add(c + 2));
-                let v2 = add(v1, e2.add(c + 3));
-                let v3 = add(v2, e3.add(c + 4));
-                *cells.add(c + 4) = v3.to_array();
-                maxima[index] = maxima[index].simd_max(fold([v0, v1, v2, v3]));
+                let (last, largest) = chain_from(window[index], c);
+                *cells.add(c + 4) = last.to_array();
+                maxima[index] = maxima[index].simd_max(largest);
                 window[index] = next;
             }
             chain += ACCUMULATORS;
         }
         for index in 0..chains - chain {
             let c = chain + index;
-            let v0 = add(window[index], e0.add(c + 1));
-            let v1 = add(v0, e1.add(c + 2));
-            let v2 = add(v1, e2.add(c + 3));
-            let v3 = add(v2, e3.add(c + 4));
-            *cells.add(c + 4) = v3.to_array();
-            maxima[index] = maxima[index].simd_max(fold([v0, v1, v2, v3]));
+            let (last, largest) = chain_from(window[index], c);
+            *cells.add(c + 4) = last.to_array();
+            maxima[index] = maxima[index].simd_max(largest);
         }
     }
     *best = maxima;
@@ -1823,6 +1861,14 @@ mod tests {
                     assert_eq!(plain, general, "q={q} l={l} seed={seed}");
                 }
             }
+        }
+    }
+
+    #[test]
+    fn rows_of_one_vector_are_left_to_the_general_kernels() {
+        for rounding in [Rounding::Up, Rounding::Down] {
+            let [plain, general] = plain_and_general(1, 96, rounding, 7);
+            assert_eq!(plain, general);
         }
     }
 
