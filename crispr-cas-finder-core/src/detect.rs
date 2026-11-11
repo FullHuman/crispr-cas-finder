@@ -30,8 +30,18 @@ pub fn infer_orientation(
     array_end: usize,
     flank_len: usize,
 ) -> Orientation {
-    let global_at = at_percent(seq);
+    infer_orientation_with_global_at(seq, array_start, array_end, flank_len, at_percent(seq))
+}
 
+/// [`infer_orientation`] with the AT% of the whole sequence given, so that
+/// a sequence with several arrays is not read through once for each.
+pub fn infer_orientation_with_global_at(
+    seq: &[u8],
+    array_start: usize,
+    array_end: usize,
+    flank_len: usize,
+    global_at: f64,
+) -> Orientation {
     // Left flanking region (before the array)
     let left_start = if array_start > flank_len + 1 {
         array_start - flank_len - 1

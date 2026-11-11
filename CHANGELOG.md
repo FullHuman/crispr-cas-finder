@@ -8,6 +8,10 @@ with the pull request that merged it.
 
 ### Array detection
 
+- The AT content of a sequence, which the orientation of each array is judged
+  against, is counted once per sequence instead of once per array: detecting
+  the arrays of E. coli K-12 takes 0.08 s where it took 0.15 s, with the same
+  arrays.
 - The repeat search compares the hashes of the windows a repeat's partner can
   start in eight at a time, with the processor's widest vectors, instead of
   one by one: about half the time of the array detection on E. coli K-12 on
