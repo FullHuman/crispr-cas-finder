@@ -959,9 +959,9 @@ dependencies = [
 
 [[package]]
 name = "orphos-core"
-version = "0.4.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "93b0d1389bd62a0718772d79a327f7d67e057dc070cbd3e33904d11a0444dd80"
+checksum = "72e47ad4093328b1ebcaa5e3e9ebfa0ffd59d2d4a36a8f18f34f7239458e2399"
 dependencies = [
  "bio",
  "rayon",

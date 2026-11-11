@@ -54,7 +54,7 @@ and specificity against an independent truth set have not been measured.
 - `--force-detection` and `--better-detect-truncated` are reimplemented rather
   than copied: fostered start/end patterns are IUPAC codes (`.` = any base), and
   truncated detection adds at most one terminal repeat per side.
-- Gene prediction uses Orphos 0.4.0, run once per sequence. Sequences shorter
+- Gene prediction uses Orphos 0.5.0, run once per sequence. Sequences shorter
   than 100 kb are predicted in metagenomic mode, as in CRISPRCasFinder;
   `--auto-metagenome-below 0` disables this. A GFF3 annotation and protein FASTA
   can be supplied instead (`--gff`, `--faa`). Prokka is not supported.
