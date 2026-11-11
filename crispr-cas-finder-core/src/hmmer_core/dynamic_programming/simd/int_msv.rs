@@ -47,6 +47,18 @@
 // Nothing is carried between rows except the cells themselves, so the
 // processor overlaps consecutive rows freely.
 //
+// Plain rows. With 8-bit cells the cumulative delta grows by at most one
+// unit a row for all but the shortest sequences, and the bound the search
+// decides its first filter with needs neither a starting row nor a record
+// of blocks. Such rows have kernels of their own, pared down to the
+// additions and maxima: a cursor finds the emissions of a row in four
+// instructions, a row of up to 24 vectors is updated in its registers from
+// the last vector down, so that no cell has to be moved aside, and a longer
+// row goes four rows per pass along chains of cells, each loaded and stored
+// once for four rows of work (`chained_rows`). The maxima are the same
+// whatever the order the cells are taken in, so these kernels return what
+// the general ones do.
+//
 // Vector width. The recurrence is the same whatever the number of lanes:
 // each cell depends on one cell of the previous row, and the result is the
 // largest cell, so the bounds come out identical for any striping. The
@@ -839,6 +851,25 @@ macro_rules! by_row_width {
     };
 }
 
+/// Returns from the enclosing function with `$in_registers` for the row
+/// width `$emissions.q`, when a row that wide is kept in registers (see
+/// `by_row_width`). `T` and `N` are the enclosing function's cell type and
+/// lane count.
+macro_rules! plain_by_row_width {
+    ($in_registers:ident; $dsq:ident, $first_row:ident, $emissions:ident) => {
+        plain_by_row_width!(
+            @widths $in_registers; $dsq, $first_row, $emissions;
+            2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24
+        )
+    };
+    (@widths $in_registers:ident; $dsq:ident, $first_row:ident, $emissions:ident; $($width:literal)*) => {
+        match $emissions.q {
+            $($width => return $in_registers::<T, N, $width>($dsq, $first_row, $emissions),)*
+            _ => {}
+        }
+    };
+}
+
 /// The kernels of one instruction set: the row recurrence compiled with
 /// that set's features, for rows in registers (one function per row width,
 /// fully unrolled) and for rows in memory.
@@ -911,6 +942,37 @@ macro_rules! isa_kernels {
                 )
             }
 
+            /// `plain_rows_in_registers` compiled for this instruction set.
+            #[inline(never)]
+            $(#[target_feature(enable = $feature)])*
+            fn plain_in_registers<T, const N: usize, const Q: usize>(
+                dsq: &[u8],
+                first_row: usize,
+                emissions: &Emissions<'_, T, N>,
+            ) -> Option<i64>
+            where
+                T: Unit,
+                Simd<T, N>: SimdInt<Scalar = T> + SimdOrd,
+            {
+                plain_rows_in_registers::<T, N, Q, $kernels>(dsq, first_row, emissions)
+            }
+
+            /// `chained_rows` compiled for this instruction set.
+            #[inline(never)]
+            $(#[target_feature(enable = $feature)])*
+            fn in_chains<T, const N: usize>(
+                dsq: &[u8],
+                first_row: usize,
+                emissions: &Emissions<'_, T, N>,
+                m_row: &mut Vec<T>,
+            ) -> Option<i64>
+            where
+                T: Unit,
+                Simd<T, N>: SimdInt<Scalar = T> + SimdOrd,
+            {
+                chained_rows::<T, N, $kernels>(dsq, first_row, emissions, m_row)
+            }
+
             /// The largest cell of the recurrence over `rows` (see
             /// `Kernels::best_segment_of`).
             $(#[target_feature(enable = $feature)])*
@@ -926,6 +988,11 @@ macro_rules! isa_kernels {
                 T: Unit,
                 Simd<T, N>: SimdInt<Scalar = T> + SimdOrd,
             {
+                if start.is_none() && recorder.is_none() && emissions.plain_rows(&dsq[rows.clone()]) {
+                    let (dsq, first_row) = (&dsq[rows.clone()], rows.start);
+                    plain_by_row_width!(plain_in_registers; dsq, first_row, emissions);
+                    return in_chains::<T, N>(dsq, first_row, emissions, m_row);
+                }
                 if emissions.growth_vector {
                     by_row_width!(true; in_registers, in_memory; dsq, rows, start, emissions, m_row, recorder)
                 } else {
@@ -973,7 +1040,44 @@ macro_rules! isa_kernels {
     };
 }
 
-isa_kernels!(portable, PortableKernels, Isa::Portable);
+isa_kernels!(
+    @define
+    portable,
+    PortableKernels,
+    Isa::Portable;
+    {
+        /// One instruction on AArch64: the vector taken with the last lane
+        /// of the floor before it. The portable lowering is a two-register
+        /// table lookup, with its index vector loaded from memory.
+        #[inline(always)]
+        fn shift_right_one<T, const N: usize>(v: Simd<T, N>) -> Simd<T, N>
+        where
+            T: Unit,
+            Simd<T, N>: SimdInt<Scalar = T>,
+        {
+            #[cfg(target_arch = "aarch64")]
+            {
+                use core::arch::aarch64::{uint8x16_t, vextq_u8};
+                if size_of::<Simd<T, N>>() == size_of::<uint8x16_t>() && size_of::<T>() <= 2 {
+                    // SAFETY: the vector and `uint8x16_t` have the same size
+                    // and both are plain data; NEON is part of the AArch64
+                    // baseline.
+                    unsafe {
+                        let vector: uint8x16_t = core::mem::transmute_copy(&v);
+                        let floor: uint8x16_t =
+                            core::mem::transmute_copy(&Simd::<T, N>::splat(T::MIN));
+                        let shifted = match size_of::<T>() {
+                            1 => vextq_u8::<15>(floor, vector),
+                            _ => vextq_u8::<14>(floor, vector),
+                        };
+                        return core::mem::transmute_copy(&shifted);
+                    }
+                }
+            }
+            v.shift_elements_right::<1>(T::MIN)
+        }
+    }
+);
 isa_kernels!(
     #[cfg(target_arch = "x86_64")]
     sse41,
@@ -1055,6 +1159,258 @@ isa_kernels!(
         }
     }
 );
+
+/// Rows per pass of [`chained_rows`].
+const CHAIN_ROWS: usize = 4;
+
+impl<T: Unit, const N: usize> Emissions<'_, T, N> {
+    /// Whether the rows `dsq` are plain: the growth of the cumulative delta
+    /// comes from the table one unit higher and never exceeds one unit a
+    /// row, and every residue has a row in the tables. All but the shortest
+    /// sequences are, with 8-bit cells; [`RowCursor`] then finds a row's
+    /// emissions in a few instructions.
+    fn plain_rows(&self, dsq: &[u8]) -> bool {
+        !self.growth_vector
+            && self.delta_step < 1 << DELTA_FRACTION_BITS
+            && dsq.iter().all(|&residue| usize::from(residue) < self.kp)
+    }
+}
+
+/// Gives the emissions of one plain row after the other (see
+/// [`Emissions::plain_rows`]).
+struct RowCursor<'a, T: Unit, const N: usize> {
+    /// The table and the table one unit higher.
+    tables: [*const [T; N]; 2],
+    /// Vectors per row.
+    q: usize,
+    /// The fractional part of the cumulative delta, in the top bits: adding
+    /// a row's step overflows exactly when the integer part grows.
+    fraction: u64,
+    step: u64,
+    emissions: std::marker::PhantomData<&'a [[T; N]]>,
+}
+
+impl<'a, T: Unit, const N: usize> RowCursor<'a, T, N> {
+    /// A cursor over the rows from `first_row` of a sequence on.
+    fn new(emissions: &Emissions<'a, T, N>, first_row: usize) -> Self {
+        let rows = emissions.kp * emissions.q;
+        assert!(
+            emissions.vectors.len() >= rows && emissions.vectors_plus_one.len() >= rows,
+            "emission table too short"
+        );
+        assert!(emissions.delta_step < 1 << DELTA_FRACTION_BITS);
+        let top = u64::BITS - DELTA_FRACTION_BITS;
+        Self {
+            tables: [
+                emissions.vectors.as_ptr(),
+                emissions.vectors_plus_one.as_ptr(),
+            ],
+            q: emissions.q,
+            fraction: (first_row as u64).wrapping_mul(emissions.delta_step) << top,
+            step: emissions.delta_step << top,
+            emissions: std::marker::PhantomData,
+        }
+    }
+
+    /// The `q` emission vectors of the next row, whose residue is `residue`.
+    ///
+    /// # Safety
+    ///
+    /// `residue` must be under the `kp` of the emissions.
+    #[inline(always)]
+    unsafe fn next(&mut self, residue: u8) -> *const [T; N] {
+        let (fraction, grows) = self.fraction.overflowing_add(self.step);
+        self.fraction = fraction;
+        let table = if grows {
+            self.tables[1]
+        } else {
+            self.tables[0]
+        };
+        // SAFETY: both tables hold `kp` rows of `q` vectors (checked in
+        // `new`), and `residue < kp`.
+        unsafe { table.add(usize::from(residue) * self.q) }
+    }
+}
+
+/// The largest cell of the single-segment recurrence over the plain rows
+/// `dsq`, the first of them row `first_row` of its sequence, starting at
+/// the begin state, with the row of `Q` vectors held in registers.
+#[inline(always)]
+fn plain_rows_in_registers<T, const N: usize, const Q: usize, K>(
+    dsq: &[u8],
+    first_row: usize,
+    emissions: &Emissions<'_, T, N>,
+) -> Option<i64>
+where
+    T: Unit,
+    K: Kernels,
+    Simd<T, N>: SimdInt<Scalar = T> + SimdOrd,
+{
+    assert!(emissions.q == Q && emissions.plain_rows(&[]));
+    let floor_v = Simd::<T, N>::splat(T::MIN);
+    let mut cells = [floor_v; Q];
+    let mut best = [floor_v; ACCUMULATORS];
+    let mut cursor = RowCursor::new(emissions, first_row);
+    for &residue in dsq {
+        // SAFETY: the caller checked the residues (`Emissions::plain_rows`),
+        // and a row has `Q` vectors.
+        let rsc = unsafe { &*cursor.next(residue).cast::<[[T; N]; Q]>() };
+        cells.step::<false, K>(rsc, floor_v, &mut best);
+    }
+    let best = fold(best).reduce_max();
+    (best != T::MAX).then(|| best.units())
+}
+
+/// The largest cell of the single-segment recurrence over the plain rows
+/// `dsq`, the first of them row `first_row` of its sequence, starting at
+/// the begin state, four rows per pass over the row in memory.
+#[inline(always)]
+fn chained_rows<T, const N: usize, K>(
+    dsq: &[u8],
+    first_row: usize,
+    emissions: &Emissions<'_, T, N>,
+    m_row: &mut Vec<T>,
+) -> Option<i64>
+where
+    T: Unit,
+    K: Kernels,
+    Simd<T, N>: SimdInt<Scalar = T> + SimdOrd,
+{
+    let q = emissions.q;
+    assert!(q >= 2 * CHAIN_ROWS && emissions.plain_rows(&[]));
+    m_row.clear();
+    m_row.resize(q * N, T::MIN);
+    let (cells, _) = m_row.as_chunks_mut::<N>();
+    let floor_v = Simd::<T, N>::splat(T::MIN);
+    let mut best = [floor_v; ACCUMULATORS];
+    let mut cursor = RowCursor::new(emissions, first_row);
+    let (passes, rest) = dsq.as_chunks::<CHAIN_ROWS>();
+    for &[r0, r1, r2, r3] in passes {
+        // SAFETY: the caller checked the residues (`Emissions::plain_rows`);
+        // each pointer is then the start of a table row of `q` vectors, and
+        // `cells` has `q >= 2 * CHAIN_ROWS` vectors.
+        unsafe {
+            let rows = [
+                cursor.next(r0),
+                cursor.next(r1),
+                cursor.next(r2),
+                cursor.next(r3),
+            ];
+            chain_pass::<T, N, K>(cells, rows, &mut best);
+        }
+    }
+    for &residue in rest {
+        // SAFETY: as above.
+        let rsc = unsafe { std::slice::from_raw_parts(cursor.next(residue), q) };
+        cells.step::<false, K>(rsc, floor_v, &mut best);
+    }
+    let best = fold(best).reduce_max();
+    (best != T::MAX).then(|| best.units())
+}
+
+/// Four rows of the recurrence in one pass over the row in memory.
+///
+/// A cell depends on one cell only, the one before it in the row above, so
+/// the four rows come apart into chains: the cell of vector `c` gives, one
+/// row after the other, those of vectors `c + 1` to `c + 4`, and the last
+/// one is the new cell of vector `c + 4`. A chain loads one cell and stores
+/// one for four cells of work, where a row at a time loads and stores each
+/// of them, and no chain waits for another. The chains from the last four
+/// vectors cross the end of the row, where the lanes shift (Farrar's
+/// striping); they go first, as they read the cells the last chains of the
+/// pass overwrite. Cells are updated in place: the old cell of a vector is
+/// read just before the chain four vectors back stores the new one.
+///
+/// # Safety
+///
+/// Each of `rows` must point to as many vectors as `cells` has, and `cells`
+/// must have at least `2 * CHAIN_ROWS` of them.
+#[inline(always)]
+unsafe fn chain_pass<T, const N: usize, K>(
+    cells: &mut [[T; N]],
+    rows: [*const [T; N]; CHAIN_ROWS],
+    best: &mut [Simd<T, N>; ACCUMULATORS],
+) where
+    T: Unit,
+    K: Kernels,
+    Simd<T, N>: SimdInt<Scalar = T> + SimdOrd,
+{
+    let q = cells.len();
+    debug_assert!(q >= 2 * CHAIN_ROWS);
+    let [e0, e1, e2, e3] = rows;
+    let cells = cells.as_mut_ptr();
+    // The running maxima stay in registers: a store through `cells` cannot
+    // be taken for one into them.
+    let mut maxima = *best;
+    // SAFETY: every vector index below is under `q` (see the comments), for
+    // `cells` and, by the caller's contract, for the rows.
+    unsafe {
+        let load = |cell: *const [T; N]| Simd::<T, N>::from_array(*cell);
+        let add = |cell: Simd<T, N>, rsc: *const [T; N]| cell.saturating_add(load(rsc));
+        // The old cells of the first four vectors, which the crossing
+        // chains are about to overwrite.
+        let mut window = [
+            load(cells),
+            load(cells.add(1)),
+            load(cells.add(2)),
+            load(cells.add(3)),
+        ];
+        // The chains from vectors q-4 to q-1, each crossing to vector 0
+        // one row earlier than the one before.
+        let a0 = add(load(cells.add(q - 4)), e0.add(q - 3));
+        let a1 = add(a0, e1.add(q - 2));
+        let a2 = add(a1, e2.add(q - 1));
+        let a3 = add(K::shift_right_one(a2), e3);
+        let b0 = add(load(cells.add(q - 3)), e0.add(q - 2));
+        let b1 = add(b0, e1.add(q - 1));
+        let b2 = add(K::shift_right_one(b1), e2);
+        let b3 = add(b2, e3.add(1));
+        let c0 = add(load(cells.add(q - 2)), e0.add(q - 1));
+        let c1 = add(K::shift_right_one(c0), e1);
+        let c2 = add(c1, e2.add(1));
+        let c3 = add(c2, e3.add(2));
+        let d0 = add(K::shift_right_one(load(cells.add(q - 1))), e0);
+        let d1 = add(d0, e1.add(1));
+        let d2 = add(d1, e2.add(2));
+        let d3 = add(d2, e3.add(3));
+        *cells = a3.to_array();
+        *cells.add(1) = b3.to_array();
+        *cells.add(2) = c3.to_array();
+        *cells.add(3) = d3.to_array();
+        maxima[0] = maxima[0].simd_max(fold([a0, a1, a2, a3]));
+        maxima[1] = maxima[1].simd_max(fold([b0, b1, b2, b3]));
+        maxima[2] = maxima[2].simd_max(fold([c0, c1, c2, c3]));
+        maxima[3] = maxima[3].simd_max(fold([d0, d1, d2, d3]));
+        // The chains from vectors 0 to q-5, four at a time; chain `c` ends
+        // at vector `c + 4 <= q - 1`.
+        let chains = q - CHAIN_ROWS;
+        let mut chain = 0;
+        while chain + ACCUMULATORS <= chains {
+            for index in 0..ACCUMULATORS {
+                let c = chain + index;
+                let next = load(cells.add(c + 4));
+                let v0 = add(window[index], e0.add(c + 1));
+                let v1 = add(v0, e1.add(c + 2));
+                let v2 = add(v1, e2.add(c + 3));
+                let v3 = add(v2, e3.add(c + 4));
+                *cells.add(c + 4) = v3.to_array();
+                maxima[index] = maxima[index].simd_max(fold([v0, v1, v2, v3]));
+                window[index] = next;
+            }
+            chain += ACCUMULATORS;
+        }
+        for index in 0..chains - chain {
+            let c = chain + index;
+            let v0 = add(window[index], e0.add(c + 1));
+            let v1 = add(v0, e1.add(c + 2));
+            let v2 = add(v1, e2.add(c + 3));
+            let v3 = add(v2, e3.add(c + 4));
+            *cells.add(c + 4) = v3.to_array();
+            maxima[index] = maxima[index].simd_max(fold([v0, v1, v2, v3]));
+        }
+    }
+    *best = maxima;
+}
 
 /// The largest cell of the single-segment recurrence over `rows` of `dsq`,
 /// in units above the begin state, or `None` when a cell saturated.
@@ -1361,14 +1717,30 @@ where
         best: &mut [Simd<T, N>; ACCUMULATORS],
     ) {
         let rsc_vectors: &[[T; N]; Q] = rsc_vectors[..Q].try_into().expect("row width");
-        let mut mpv = K::shift_right_one(self[Q - 1]);
+        let mpv = K::shift_right_one(self[Q - 1]);
         // Fully unrolled: every index is a constant, so the row stays in
         // registers and no cell is loaded or stored.
-        for index in 0..Q {
-            let sv = new_cell::<T, N, GROWTH>(mpv, rsc_vectors[index], growth_v);
-            best[index % ACCUMULATORS] = best[index % ACCUMULATORS].simd_max(sv);
-            mpv = self[index];
-            self[index] = sv;
+        // From the last vector down, each new cell can take the register
+        // of the old one: the cell it is computed from, one vector lower,
+        // has not been replaced yet. Going up, every cell would have to be
+        // moved aside first.
+        for index in (1..Q).rev() {
+            self[index] = new_cell::<T, N, GROWTH>(self[index - 1], rsc_vectors[index], growth_v);
+        }
+        self[0] = new_cell::<T, N, GROWTH>(mpv, rsc_vectors[0], growth_v);
+        // The new cells join the running maxima four at a time, as a tree:
+        // a running maximum then takes one value in sixteen cells, and the
+        // chain of maxima from one row to the next is no longer than the
+        // row's additions.
+        let (groups, rest) = self.as_chunks::<ACCUMULATORS>();
+        for (group_index, group) in groups.iter().enumerate() {
+            let slot = group_index % ACCUMULATORS;
+            best[slot] = best[slot].simd_max(fold(*group));
+        }
+        if let Some((&first, others)) = rest.split_first() {
+            let slot = groups.len() % ACCUMULATORS;
+            let rest_max = others.iter().fold(first, |max, &cell| max.simd_max(cell));
+            best[slot] = best[slot].simd_max(rest_max);
         }
     }
 
@@ -1393,6 +1765,85 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hmmer_core::rng::XorShift64;
+
+    /// The largest cell for a random table of `q` vectors and a random
+    /// sequence of `l` residues, by the plain kernels when they apply and
+    /// by the general ones, which a starting row at the begin state forces.
+    fn plain_and_general(q: usize, l: usize, rounding: Rounding, seed: u64) -> [Option<i64>; 2] {
+        const LANES: usize = 16;
+        const KP: usize = 29;
+        let mut rng = XorShift64::new(seed);
+        let mut draw = |below: usize| rng.roll(below);
+        let units: Vec<i8> = (0..KP * q * LANES)
+            .map(|_| match draw(40) {
+                0 => i8::MIN,
+                // Mostly below zero, as emissions are, with a few high ones.
+                value if value < 30 => -(value as i8) - 1,
+                value => (value as i8 - 30) * 3,
+            })
+            .collect();
+        let units_plus_one = one_unit_higher(&units);
+        let dsq: Vec<u8> = (0..l).map(|_| draw(KP) as u8).collect();
+        let specials = Specials::new(l, q * LANES);
+        let begin_state = vec![0i64; q * LANES];
+        [None, Some(begin_state.as_slice())].map(|start| {
+            let table = Table {
+                units: &units,
+                units_plus_one: Some(&units_plus_one),
+                kp: KP,
+                q,
+                scale: 14.0,
+            };
+            best_segment_of::<i8, LANES, PortableKernels>(
+                &dsq,
+                0..l,
+                start,
+                &table,
+                rounding,
+                &specials,
+                &mut Vec::new(),
+                None,
+            )
+        })
+    }
+
+    #[test]
+    fn plain_kernels_return_what_the_general_ones_do() {
+        let mut seed = 1;
+        for q in [
+            2, 3, 4, 7, 8, 9, 15, 16, 23, 24, 25, 26, 27, 28, 29, 33, 40, 64, 101,
+        ] {
+            // From 43 residues on the delta grows by less than a unit a row;
+            // the lengths leave zero to three rows after the last pass.
+            for l in [1, 5, 42, 43, 44, 45, 46, 47, 96, 257, 600] {
+                for rounding in [Rounding::Up, Rounding::Down] {
+                    seed += 1;
+                    let [plain, general] = plain_and_general(q, l, rounding, seed);
+                    assert_eq!(plain, general, "q={q} l={l} seed={seed}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn plain_rows_exclude_fast_growth_and_unknown_residues() {
+        let vectors = vec![[0i8; 16]; 2 * 29];
+        let emissions = |delta_step: u64, growth_vector: bool| Emissions {
+            vectors: &vectors,
+            vectors_plus_one: &vectors,
+            kp: 29,
+            q: 2,
+            delta_step,
+            raise_after: false,
+            growth_vector,
+        };
+        let one_unit = 1u64 << DELTA_FRACTION_BITS;
+        assert!(emissions(one_unit - 1, false).plain_rows(&[0, 28]));
+        assert!(!emissions(one_unit, false).plain_rows(&[0, 28]));
+        assert!(!emissions(one_unit - 1, true).plain_rows(&[0, 28]));
+        assert!(!emissions(one_unit - 1, false).plain_rows(&[0, 29]));
+    }
 
     #[test]
     fn detected_isa_is_available_and_lane_counts_match_vector_bytes() {
