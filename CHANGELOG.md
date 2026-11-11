@@ -11,7 +11,7 @@ with the pull request that merged it.
 - The AT content of a sequence, which the orientation of each array is judged
   against, is counted once per sequence instead of once per array: detecting
   the arrays of E. coli K-12 takes 0.08 s where it took 0.15 s, with the same
-  arrays.
+  arrays. (#9)
 - The repeat search compares the hashes of the windows a repeat's partner can
   start in eight at a time, with the processor's widest vectors, instead of
   one by one: about half the time of the array detection on E. coli K-12 on
@@ -53,7 +53,7 @@ with the pull request that merged it.
   profiles. With the 535 CasFinder 3.1 profiles, E. coli K-12 takes 6.5 s on
   one thread of an M1 Max where it took 7.9 s, and 1.0 s on all cores where it
   took 1.4 s; every output file is identical on 29 genomes, with and without
-  `--exact-filters`.
+  `--exact-filters`. (#9)
 - The integer MSV and Viterbi bounds of the HMM search, which decide the
   filters for nearly every sequence, run with the widest vectors the
   processor has: the kernels are compiled once per instruction set and chosen
