@@ -11,6 +11,7 @@ use anyhow::Result;
 use log::info;
 use rayon::prelude::*;
 use std::borrow::Cow;
+use std::cell::OnceCell;
 use std::path::Path;
 
 pub mod annotation;
@@ -42,7 +43,8 @@ pub use types::{CasFinderConfig, CrisprArray, DetectionParams, Orientation, Repe
 use detect::{
     RepeatHit, SpacerSpan, allowed_copy_mismatches, candidate_score, check_short_crispr,
     cluster_region, cluster_repeats, define_spacers, extend_with_truncated_repeats,
-    find_direct_repeats, infer_orientation, repeat_candidates, repeat_occurrences, slide_search,
+    find_direct_repeats, infer_orientation_with_global_at, repeat_candidates, repeat_occurrences,
+    slide_search,
 };
 
 /// Detect CRISPR arrays in a set of sequences.
@@ -128,6 +130,23 @@ pub fn reclassify_small_arrays(arrays: &mut [CrisprArray]) {
     }
 }
 
+/// A sequence being searched for arrays, in uppercase.
+struct SearchedSequence<'a> {
+    id: &'a str,
+    bases: &'a [u8],
+    global_at: OnceCell<f64>,
+}
+
+impl SearchedSequence<'_> {
+    /// The AT% of the whole sequence, which the orientation of every array
+    /// is judged against: read once, by the first array that needs it.
+    fn global_at(&self) -> f64 {
+        *self
+            .global_at
+            .get_or_init(|| detect::at_percent(self.bases))
+    }
+}
+
 fn detect_crisprs_for_sequence(
     seq_id: &str,
     seq: &[u8],
@@ -152,14 +171,18 @@ fn detect_crisprs_for_sequence(
     info!("  {} — {} DR candidates", seq_id, hits.len());
     let occurrences = repeat_occurrences(&hits);
 
+    let searched = SearchedSequence {
+        id: seq_id,
+        bases: seq,
+        global_at: OnceCell::new(),
+    };
     let mut arrays = Vec::new();
     for cluster in cluster_repeats(&hits, GAP_THRESHOLD) {
         // Hits are sorted by position.
         let first = hits.partition_point(|hit| hit.pos1 < cluster.0);
         let after = hits.partition_point(|hit| hit.pos1 <= cluster.1);
         arrays.extend(process_cluster(
-            seq_id,
-            seq,
+            &searched,
             &hits[first..after],
             cluster,
             &occurrences,
@@ -216,14 +239,14 @@ struct ChosenRepeat<'a> {
 /// division has no spacer. Neither is followed: a locus is always divided,
 /// and each part holding enough spacers is reported.
 fn process_cluster(
-    seq_id: &str,
-    seq: &[u8],
+    searched: &SearchedSequence<'_>,
     cluster_hits: &[RepeatHit],
     cluster: (usize, usize),
     occurrences: &std::collections::HashMap<&str, usize>,
     params: &DetectionParams,
     min_repeat_count: usize,
 ) -> Vec<CrisprArray> {
+    let seq = searched.bases;
     let region_range = cluster_region(cluster, seq.len());
     let region_start = region_range.start;
     let region = &seq[region_range];
@@ -299,7 +322,7 @@ fn process_cluster(
             repeats.push(repeat_at(region_start + last.start + last.length));
             (repeats.len() >= min_repeat_count).then_some(repeats)
         })
-        .filter_map(|repeats| build_array(seq_id, seq, consensus.to_string(), repeats, params))
+        .filter_map(|repeats| build_array(searched, consensus.to_string(), repeats, params))
         .collect()
 }
 
@@ -308,12 +331,12 @@ fn process_cluster(
 /// The repeats are in order and do not touch: the stretch between two
 /// neighbours is a spacer of the array.
 fn build_array(
-    seq_id: &str,
-    seq: &[u8],
+    searched: &SearchedSequence<'_>,
     best_consensus: String,
     mut best_refined: Vec<RepeatHit>,
     params: &DetectionParams,
 ) -> Option<CrisprArray> {
+    let (seq_id, seq) = (searched.id, searched.bases);
     if params.better_detect_truncated {
         extend_with_truncated_repeats(&best_consensus, &mut best_refined, seq, params);
     }
@@ -364,7 +387,13 @@ fn build_array(
         .map(|h| h.pos1 + h.repeat_length - 1)
         .unwrap_or(0);
 
-    let orientation = infer_orientation(seq, array_start, array_end, params.flank);
+    let orientation = infer_orientation_with_global_at(
+        seq,
+        array_start,
+        array_end,
+        params.flank,
+        searched.global_at(),
+    );
 
     let db_entry = repeat_db::lookup_repeat(&best_consensus);
 

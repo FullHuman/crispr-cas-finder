@@ -8,6 +8,10 @@ with the pull request that merged it.
 
 ### Array detection
 
+- The AT content of a sequence, which the orientation of each array is judged
+  against, is counted once per sequence instead of once per array: detecting
+  the arrays of E. coli K-12 takes 0.08 s where it took 0.15 s, with the same
+  arrays. (#9)
 - The repeat search compares the hashes of the windows a repeat's partner can
   start in eight at a time, with the processor's widest vectors, instead of
   one by one: about half the time of the array detection on E. coli K-12 on
@@ -38,6 +42,18 @@ with the pull request that merged it.
 
 ### Cas detection
 
+- Gene prediction uses Orphos 0.5.0, which predicts the same genes faster
+  (0.2 s less on E. coli K-12). The 8-bit MSV bound that decides the first filter of the HMM
+  search has kernels of its own for the common case: a row of up to 24 vectors
+  is updated in its registers from the last vector down, a longer one four
+  rows per pass along chains of cells that are loaded and stored once for four
+  rows of work, and the emissions of a row are found in four instructions. The
+  forward filter adds the delete states to its exit sum during its last carry
+  pass, and the order the proteins are searched in is worked out once for all
+  profiles. With the 535 CasFinder 3.1 profiles, E. coli K-12 takes 6.5 s on
+  one thread of an M1 Max where it took 7.9 s, and 1.0 s on all cores where it
+  took 1.4 s; every output file is identical on 29 genomes, with and without
+  `--exact-filters`. (#9)
 - The integer MSV and Viterbi bounds of the HMM search, which decide the
   filters for nearly every sequence, run with the widest vectors the
   processor has: the kernels are compiled once per instruction set and chosen

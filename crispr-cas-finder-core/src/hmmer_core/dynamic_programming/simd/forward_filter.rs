@@ -114,21 +114,32 @@ pub fn forward_filter(dsq: &[u8], l: usize, om: &OptimizedProfile) -> ForwardRes
             dcv = *dmx_qi * dd_v;
         }
 
-        // Additional DD passes (up to 3 more, for convergence)
+        // Additional DD passes (up to 3 more, for convergence). Each also
+        // adds the D contributions to xE, starting again from the M
+        // contributions, so that the last one leaves the sum a pass of its
+        // own would, in the same order: the sum is a chain of additions as
+        // long as the row, and it runs beside the chain of the carry instead
+        // of after it.
+        let xe_matches = xe_v;
         if om.m < 100 {
             for _pass in 1..4 {
                 dcv = shr_f32x4(zero_v, dcv);
+                xe_v = xe_matches;
                 for (qi, dmx_qi) in dmx.iter_mut().enumerate() {
                     let dd_v =
                         f32x4::from_slice(&om.tfv[(dd_base + qi) * 4..(dd_base + qi) * 4 + 4]);
                     *dmx_qi += dcv;
+                    xe_v += *dmx_qi;
                     dcv *= dd_v;
                 }
             }
         } else {
+            // A pass that changes no cell leaves the row as it found it, so
+            // the sum it took is the sum over the final row.
             for _pass in 1..4 {
                 dcv = shr_f32x4(zero_v, dcv);
                 let mut any_change = false;
+                xe_v = xe_matches;
                 for (qi, dmx_qi) in dmx.iter_mut().enumerate() {
                     let dd_v =
                         f32x4::from_slice(&om.tfv[(dd_base + qi) * 4..(dd_base + qi) * 4 + 4]);
@@ -138,17 +149,13 @@ pub fn forward_filter(dsq: &[u8], l: usize, om: &OptimizedProfile) -> ForwardRes
                         any_change = true;
                     }
                     *dmx_qi = new_val;
+                    xe_v += new_val;
                     dcv *= dd_v;
                 }
                 if !any_change {
                     break;
                 }
             }
-        }
-
-        // Add D contributions to xE
-        for &v in &dmx {
-            xe_v += v;
         }
 
         // Horizontal sum of xe_v

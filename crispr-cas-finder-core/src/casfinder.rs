@@ -529,16 +529,19 @@ fn run_hmm_search(
         protein_sequences.len(),
         pool.current_num_threads()
     );
+    // Every profile searches the proteins in the same order.
+    let search_order = SearchOrder::of(protein_sequences);
     let search_results = pool.install(|| {
         profiles
             .par_iter()
             .with_max_len(1)
             .map(|profile| {
-                let profile_hits = search_hmm_profile(
+                let profile_hits = search_hmm_profile_in_order(
                     &profile.name,
                     &profile.alphabet,
                     &profile.hmm,
                     protein_sequences,
+                    &search_order,
                     alphabet,
                     filtering,
                 )?;
@@ -557,6 +560,32 @@ fn run_hmm_search(
     Ok(all_hits)
 }
 
+/// The order in which a profile searches a set of proteins, and their
+/// average length; the same for every profile, so worked out once.
+struct SearchOrder {
+    /// Protein indices by increasing length, which keeps a worker's
+    /// matrices growing steadily and lets consecutive proteins share the
+    /// profile's length model.
+    by_length: Vec<usize>,
+    average_length: usize,
+}
+
+impl SearchOrder {
+    fn of(protein_sequences: &[DigitalSequence]) -> Self {
+        let average_length = if protein_sequences.is_empty() {
+            400
+        } else {
+            protein_sequences.iter().map(|s| s.len()).sum::<usize>() / protein_sequences.len()
+        };
+        let mut by_length: Vec<usize> = (0..protein_sequences.len()).collect();
+        by_length.sort_unstable_by_key(|&index| (protein_sequences[index].len(), index));
+        Self {
+            by_length,
+            average_length,
+        }
+    }
+}
+
 /// Search one parsed HMM profile against all proteins and return the
 /// domains passing `filtering`, in protein order. Shared by native and WASM
 /// callers.
@@ -570,6 +599,27 @@ pub fn search_hmm_profile(
     hmm_alphabet: &Alphabet,
     hmm: &Hmm,
     protein_sequences: &[DigitalSequence],
+    alphabet: &Alphabet,
+    filtering: &HitFiltering,
+) -> Result<Vec<HmmerHit>> {
+    search_hmm_profile_in_order(
+        profile_name,
+        hmm_alphabet,
+        hmm,
+        protein_sequences,
+        &SearchOrder::of(protein_sequences),
+        alphabet,
+        filtering,
+    )
+}
+
+/// [`search_hmm_profile`] with the search order of the proteins given.
+fn search_hmm_profile_in_order(
+    profile_name: &str,
+    hmm_alphabet: &Alphabet,
+    hmm: &Hmm,
+    protein_sequences: &[DigitalSequence],
+    search_order: &SearchOrder,
     alphabet: &Alphabet,
     filtering: &HitFiltering,
 ) -> Result<Vec<HmmerHit>> {
@@ -587,14 +637,7 @@ pub fn search_hmm_profile(
         anyhow::bail!("HMM profile '{}' contains no model nodes", profile_name);
     }
     let gathering_cutoffs = hmm.cutoffs.gathering.filter(|_| filtering.cut_ga);
-    let average_sequence_length = if protein_sequences.is_empty() {
-        400
-    } else {
-        protein_sequences.iter().map(|s| s.len()).sum::<usize>() / protein_sequences.len()
-    };
-    // Searching in length order keeps the worker's matrices growing steadily.
-    let mut sequence_search_order: Vec<usize> = (0..protein_sequences.len()).collect();
-    sequence_search_order.sort_unstable_by_key(|&index| (protein_sequences[index].len(), index));
+    let average_sequence_length = search_order.average_length;
 
     let background_model = BackgroundModel::new(alphabet);
     let mut configured_profile = Profile::new(num_nodes, alphabet);
@@ -623,7 +666,7 @@ pub fn search_hmm_profile(
 
     let mut profile_hits: Vec<(usize, HmmerHit)> = Vec::new();
 
-    for &sequence_index in &sequence_search_order {
+    for &sequence_index in &search_order.by_length {
         let target_sequence = &protein_sequences[sequence_index];
         if target_sequence.is_empty() {
             continue;
