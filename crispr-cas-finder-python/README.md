@@ -2,8 +2,10 @@
 
 Python bindings for CRISPR array and Cas system detection written in Rust.
 `analyze` returns the same report as the command-line tool; Cas detection needs
-the CasFinder model and profile directories, which the wheel does not bundle. A CasFinder 3 package directory can be passed
-as `cas_models_dir` on its own.
+the CasFinder model and profile directories, which the wheel does not bundle.
+The CasFinder 2.0.3 files are in the repository, under
+[`crispr-cas-finder-cli/data/CasFinder-2.0.3`](https://github.com/FullHuman/crispr-cas-finder/tree/main/crispr-cas-finder-cli/data/CasFinder-2.0.3).
+A CasFinder 3 package directory can be passed as `cas_models_dir` on its own.
 
 ## Installation
 

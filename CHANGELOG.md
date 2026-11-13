@@ -1,10 +1,12 @@
 # Changelog
 
-Nothing has been released yet; every manifest is at version 0.1.0. The entries
-below cover the work since the port began, newest first within each section,
-with the pull request that merged it.
+## [0.1.0] - 2026-11-14
 
-## [Unreleased]
+The first release: the crates `crispr-cas-finder-core` and
+`crispr-cas-finder-cli` on crates.io, the Python package `crispr-cas-finder` on
+PyPI, and command-line binaries for Linux, macOS and Windows on the GitHub
+release. The entries below cover the work since the port began, newest first
+within each section, with the pull request that merged it.
 
 ### Array detection
 
@@ -84,6 +86,9 @@ with the pull request that merged it.
 
 ### Interfaces and outputs
 
+- The command-line tool ends a run with one line saying how many arrays and Cas
+  systems it found and where the files are; `--quiet`, which did nothing
+  before, leaves that line out. Every option has a description in `--help`.
 - `benchmarks/` holds the scripts that run this project and CRISPRCasFinder on
   the same genomes and compare results, run time and memory, and the check of
   the repeat search against Vmatch. (#6)
@@ -95,6 +100,10 @@ with the pull request that merged it.
 
 ### Release preparation
 
+- The crates and the Python package carry keywords, categories and links for
+  crates.io and PyPI; the Python package has a `py.typed` marker, so type
+  checkers read its stubs; the Python and WebAssembly crates are marked as not
+  for crates.io. `rustix` is updated to 1.1.6 for RUSTSEC-2026-0486.
 - This first public release is experimental; `LIMITATIONS.md` documents the
   supported behaviour, the known differences from CRISPRCasFinder and the
   regression cases.

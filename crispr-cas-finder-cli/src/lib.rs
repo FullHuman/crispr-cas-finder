@@ -1,5 +1,6 @@
 use std::ffi::OsString;
 use std::fs::{File, create_dir_all};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -73,20 +74,32 @@ impl From<TopologyArgument> for RepliconTopology {
 #[command(args_conflicts_with_subcommands = true)]
 pub struct Cli {
     #[arg(short = 'i', long = "in", value_name = "FILE")]
+    #[arg(help = "FASTA file of the sequences to analyse")]
     input: PathBuf,
     #[arg(long, alias = "out", value_name = "DIR")]
+    #[arg(
+        help = "Directory for the output files; by default Result_<input name>, with a number added when it exists"
+    )]
     outdir: Option<String>,
     #[arg(short = 'q', long, action = clap::ArgAction::SetTrue)]
+    #[arg(help = "Do not print the summary line when the run ends")]
     quiet: bool,
     #[arg(long, alias = "minSeqSize", value_name = "INT", default_value_t = 0)]
+    #[arg(help = "Skip sequences shorter than this many bp")]
     min_sequence_length: usize,
     #[arg(long, alias = "mismDRs", value_name = "FLOAT", default_value_t = 20.0)]
+    #[arg(
+        help = "Highest percentage of mismatches, on average, between the copies of a repeat and its consensus"
+    )]
     repeat_mismatch_percent: f64,
     #[arg(long, alias = "truncDR", value_name = "FLOAT", default_value_t = 33.3)]
+    #[arg(help = "Percentage of mismatches allowed in a single copy of a repeat")]
     truncated_repeat_mismatch_percent: f64,
     #[arg(long, alias = "minDR", value_name = "INT", default_value_t = 23)]
+    #[arg(help = "Shortest repeat, in bp")]
     min_repeat_length: usize,
     #[arg(long, alias = "maxDR", value_name = "INT", default_value_t = 55)]
+    #[arg(help = "Longest repeat, in bp")]
     max_repeat_length: usize,
     #[arg(
         long,
@@ -105,16 +118,26 @@ pub struct Cli {
     )]
     max_spacer_length: usize,
     #[arg(long, alias = "noMism", short = 'n', action = clap::ArgAction::SetTrue)]
+    #[arg(
+        help = "Seed arrays only from identical copies of a repeat; by default one difference between the two copies is allowed"
+    )]
     no_mismatch: bool,
     #[arg(long, alias = "percSPmin", value_name = "FLOAT", default_value_t = 0.6)]
+    #[arg(help = "Shortest spacer of an array, as a multiple of the length of its repeat")]
     min_spacer_to_repeat_ratio: f64,
     #[arg(long, alias = "percSPmax", value_name = "FLOAT", default_value_t = 2.5)]
+    #[arg(help = "Longest spacer of an array, as a multiple of the length of its repeat")]
     max_spacer_to_repeat_ratio: f64,
     #[arg(long, alias = "spSim", value_name = "FLOAT", default_value_t = 60.0)]
+    #[arg(help = "Drop a locus whose spacers are at least this percent identical to each other")]
     spacer_similarity_threshold: f64,
     #[arg(long, value_name = "INT", default_value_t = 100)]
+    #[arg(
+        help = "Length in bp of the flanking regions, which are reported and used to infer the orientation"
+    )]
     flank: usize,
     #[arg(long, alias = "levelMin", value_name = "INT", default_value_t = 1)]
+    #[arg(help = "Report only arrays of at least this evidence level, 1 to 4")]
     min_evidence_level: usize,
     #[arg(long, alias = "forceDetection", action = clap::ArgAction::SetTrue)]
     #[arg(
@@ -136,6 +159,7 @@ pub struct Cli {
     #[arg(help = "IUPAC pattern ('.' = any base) a favoured repeat ends with")]
     foster_repeat_end: String,
     #[arg(long, alias = "minNbSpacers", value_name = "INT", default_value_t = 1)]
+    #[arg(help = "Report only arrays with at least this many spacers")]
     min_spacer_count: usize,
     #[arg(long, alias = "betterDetectTrunc", action = clap::ArgAction::SetTrue)]
     #[arg(help = "Look for a truncated terminal repeat on each side of every array")]
@@ -173,6 +197,9 @@ pub struct Cli {
     #[arg(help = "CRISPRdb export used to flag arrays that are already recorded")]
     crisprdb: Option<PathBuf>,
     #[arg(long = "cas", action = clap::ArgAction::SetTrue)]
+    #[arg(
+        help = "Detect Cas systems too: predict the genes and search them with the Cas profiles"
+    )]
     launch_cas_finder: bool,
     #[arg(
         long,
@@ -180,6 +207,7 @@ pub struct Cli {
         value_name = "INT",
         default_value_t = 0
     )]
+    #[arg(help = "Threads for the search with the Cas profiles; 0 uses every core")]
     workers: usize,
     #[arg(long, value_enum, ignore_case = true, default_value_t = DefinitionArgument::SubTyping)]
     #[arg(help = "Cas model set: SubTyping, Typing, or General (class level)")]
@@ -219,12 +247,18 @@ pub struct Cli {
     #[arg(help = "Chain arrays and Cas systems closer than this many bp into loci")]
     locus_distance: Option<usize>,
     #[arg(long, value_enum, default_value_t = TopologyArgument::Circular)]
+    #[arg(
+        help = "Whether the sequences are circular, so that a Cas system can span the two ends, or linear"
+    )]
     topology: TopologyArgument,
     #[arg(long = "min-cas-score", value_name = "FLOAT", default_value_t = 25.0)]
+    #[arg(
+        help = "Bit score the best hit of a Cas system must reach; not applied to MacSyFinder model packages"
+    )]
     min_cas_score: f64,
     #[arg(
         long,
-        help = "Decide the HMM filters with exact scores and decode in log space, as before the fast pipeline (slower)"
+        help = "Decide the HMM filters with exact scores instead of integer bounds, and decode in log space (slower)"
     )]
     exact_filters: bool,
     #[arg(long = "cas-models-dir", value_name = "DIR")]
@@ -233,6 +267,9 @@ pub struct Cli {
     )]
     cas_models_dir: Option<String>,
     #[arg(long = "cas-profiles-dir", value_name = "DIR")]
+    #[arg(
+        help = "Directory of the Cas HMM profiles for --cas-models-dir; a MacSyFinder model package has its own"
+    )]
     cas_profiles_dir: Option<String>,
 }
 
@@ -494,8 +531,31 @@ pub fn run(cli: Cli) -> Result<()> {
         write_output(&outdir, "loci.tsv", |file| io::write_loci_tsv(report, file))?;
     }
     info!("Results written to {:?}", outdir);
+    if !cli.quiet {
+        let cas_systems = cli.launch_cas_finder.then_some(report.cas_clusters.len());
+        // A closed pipe is no reason to fail a run whose files are written.
+        let _ = writeln!(
+            std::io::stdout(),
+            "{}",
+            run_summary(report.crisprs.len(), cas_systems, &outdir)
+        );
+    }
 
     Ok(())
+}
+
+/// The line a run ends with: what was found and where the files are.
+/// `cas_systems` is `None` when Cas systems were not searched for.
+fn run_summary(crisprs: usize, cas_systems: Option<usize>, outdir: &Path) -> String {
+    let counted = |count: usize, noun: &str| {
+        let plural = if count == 1 { "" } else { "s" };
+        format!("{count} {noun}{plural}")
+    };
+    let mut found = counted(crisprs, "CRISPR array");
+    if let Some(cas_systems) = cas_systems {
+        found = format!("{found} and {}", counted(cas_systems, "Cas system"));
+    }
+    format!("{found}; results in {}", outdir.display())
 }
 
 fn write_output(
@@ -720,6 +780,23 @@ mod tests {
             .expect_err("missing data directory must fail");
         assert!(error.to_string().contains("Cas model definitions"));
         assert!(error.to_string().contains("--cas-models-dir"));
+    }
+
+    #[test]
+    fn summary_line_counts_what_was_searched_for() {
+        let outdir = Path::new("Result_ecoli");
+        assert_eq!(
+            run_summary(5, Some(1), outdir),
+            "5 CRISPR arrays and 1 Cas system; results in Result_ecoli"
+        );
+        assert_eq!(
+            run_summary(1, None, outdir),
+            "1 CRISPR array; results in Result_ecoli"
+        );
+        assert_eq!(
+            run_summary(0, Some(0), outdir),
+            "0 CRISPR arrays and 0 Cas systems; results in Result_ecoli"
+        );
     }
 
     #[test]

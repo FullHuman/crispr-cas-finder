@@ -28,6 +28,14 @@ both package archives in a fresh Cargo staging registry before release
 
 ## 📦 Installation
 
+### Prebuilt binaries
+
+Each [release](https://github.com/FullHuman/crispr-cas-finder/releases) has the
+command-line tool for Linux (x86-64 and ARM64), macOS (Intel and Apple silicon)
+and Windows (x86-64), as `crispr-cas-finder-cli-<platform>.tar.gz` or `.zip`
+with a SHA-256 checksum beside it. Unpack the archive and run the
+`crispr-cas-finder` executable inside; nothing else is needed.
+
 ### Using Cargo
 
 ```bash
@@ -111,6 +119,11 @@ crispr-cas-finder -i genome.fasta --cas --exact-filters
 Run `crispr-cas-finder --help` for every option. Most CRISPRCasFinder option
 names are accepted as aliases (for example `--minDR`, `--rcfowce`, `--cSA`,
 `--Mrpts`, `--dbc`).
+
+A run ends with one line on standard output, such as
+`5 CRISPR arrays and 1 Cas system; results in Result_genome`; `--quiet` leaves
+it out. Set the environment variable `RUST_LOG=info` to follow the steps of a
+run on standard error.
 
 #### Cas models
 

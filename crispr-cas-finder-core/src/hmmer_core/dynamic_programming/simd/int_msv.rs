@@ -514,7 +514,7 @@ impl Specials {
 /// short rows live in registers instead and leave it untouched. With
 /// `blocks`, the pass also records its block-wise results. `N` is the lane
 /// count `table` is striped for and `K` the kernels of its instruction set
-/// (see [`dispatch`]).
+/// (see `dispatch`).
 pub fn msv_upper_bound<T, const N: usize, K>(
     dsq: &[u8],
     l: usize,

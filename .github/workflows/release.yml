@@ -77,6 +77,13 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v7
 
+      # The archive checks below are Python scripts; not every runner image
+      # has a `python` command of its own.
+      - name: Set up Python for the release checks
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
       - name: Install Rust
         run: |
           rustup toolchain install nightly-2026-07-29 --profile minimal
