@@ -26,7 +26,7 @@
 // of the profile and the sequence length leave the shortcut unproven,
 // `p7_MSVFilter()`'s own recurrence runs, as in HMMER.
 
-use super::int_msv::{dispatch, largest_cell};
+use super::int_msv::{Isa, dispatch, largest_cell};
 use super::oprofile::OptimizedProfile;
 use crate::hmmer_core::config::{PROFILE_NUM_EMISSIONS, PRsc};
 use crate::hmmer_core::profile::Profile;
@@ -51,18 +51,20 @@ pub struct MsvBytes {
     /// `tjb_b`: cost of N, J or C moving on, for the current target length.
     pub tjb: u8,
     /// Alphabet size of the tables.
-    pub kp: usize,
+    kp: usize,
     /// Vectors per row of `costs`: `p7O_NQB(M)`.
-    pub q: usize,
+    q: usize,
     /// `rbv`: biased match emission costs, `kp` rows of `q` vectors of
     /// sixteen lanes; lane `z` of vector `qi` holds node `qi + 1 + z·q`.
-    pub costs: Vec<u8>,
+    costs: Vec<u8>,
+    /// The instruction set `gains` is striped for; an available one.
+    isa: Isa,
     /// Vectors per row of `gains`.
-    pub gain_q: usize,
+    gain_q: usize,
     /// What a match emission adds to a cell of the single-segment
     /// recurrence: `bias - cost`, the negative of `sbv`, striped for the
-    /// signed byte lanes of the profile's instruction set.
-    pub gains: Vec<i8>,
+    /// signed byte lanes of `isa`.
+    gains: Vec<i8>,
 }
 
 /// `unbiased_byteify()`: a score in nats as a rounded, saturated byte cost.
@@ -85,8 +87,8 @@ pub fn biased_byteify(scale: f32, bias: u8, score: f32) -> u8 {
 
 impl MsvBytes {
     /// `mf_conversion()` and `sf_conversion()` for the profile `gm`, with
-    /// the single-segment gains striped for `gain_lanes` lanes.
-    pub fn from_profile(gm: &Profile, kp: usize, gain_lanes: usize) -> Self {
+    /// the single-segment gains striped for the kernels of `isa`.
+    pub fn from_profile(gm: &Profile, kp: usize, isa: Isa) -> Self {
         let m = gm.num_nodes;
         let scale = (3.0 / std::f64::consts::LN_2) as f32;
         let canonical = gm.alphabet.canonical_size;
@@ -100,18 +102,42 @@ impl MsvBytes {
             }
         }
         let bias = unbiased_byteify(scale, -max);
-        let match_score = |x: usize, k: usize| {
-            gm.residue_scores_for(x)[k * PROFILE_NUM_EMISSIONS + PRsc::MatchScore as usize]
-        };
+        let mut bytes = Self::from_costs(m, kp, bias, isa, |x, k| {
+            let score =
+                gm.residue_scores_for(x)[k * PROFILE_NUM_EMISSIONS + PRsc::MatchScore as usize];
+            biased_byteify(scale, bias, score)
+        });
+        bytes.set_length(gm.target_length);
+        bytes
+    }
 
+    /// The tables of a model of `m` nodes over `kp` symbols whose residue
+    /// `x` costs `cost(x, k)` at node `k`, from 1, with HMMER's scale, base
+    /// and transition costs, for a target of length zero. The single-segment
+    /// gains are striped for the kernels of `isa`, or for the portable ones
+    /// when this processor lacks it.
+    pub fn from_costs(
+        m: usize,
+        kp: usize,
+        bias: u8,
+        isa: Isa,
+        cost: impl Fn(usize, usize) -> u8,
+    ) -> Self {
+        let isa = if isa.is_available() {
+            isa
+        } else {
+            Isa::Portable
+        };
+        let scale = (3.0 / std::f64::consts::LN_2) as f32;
         let q = 2.max(m.saturating_sub(1) / LANES + 1);
         let mut costs = vec![255u8; kp * q * LANES];
-        let gain_q = 2.max(m.saturating_sub(1) / gain_lanes + 1);
+        let gain_lanes = isa.lanes::<i8>();
+        let gain_q = isa.vector_count::<i8>(m);
         // A cost of 255 gives the lowest gain: the cell falls to the floor.
         let mut gains = vec![-127i8; kp * gain_q * gain_lanes];
         for x in 0..kp {
             for k in 1..=m {
-                let cost = biased_byteify(scale, bias, match_score(x, k));
+                let cost = cost(x, k);
                 let (qi, z) = ((k - 1) % q, (k - 1) / q);
                 costs[(x * q + qi) * LANES + z] = cost;
                 // `sbv` is `min(127, cost - bias)`, by an exclusive or on
@@ -121,9 +147,8 @@ impl MsvBytes {
                 gains[(x * gain_q + qi) * gain_lanes + z] = gain;
             }
         }
-
         let mf = m as f32;
-        let mut bytes = Self {
+        Self {
             scale,
             base: 190,
             bias,
@@ -133,11 +158,10 @@ impl MsvBytes {
             kp,
             q,
             costs,
+            isa,
             gain_q,
             gains,
-        };
-        bytes.set_length(gm.target_length);
-        bytes
+        }
     }
 
     /// `p7_oprofile_ReconfigMSVLength()`: the cost of the N, J and C moves
@@ -145,6 +169,25 @@ impl MsvBytes {
     #[inline]
     pub fn set_length(&mut self, l: usize) {
         self.tjb = unbiased_byteify(self.scale, (3.0f32 / (l + 3) as f32).ln());
+    }
+
+    /// Alphabet size of the tables.
+    #[inline]
+    pub fn kp(&self) -> usize {
+        self.kp
+    }
+
+    /// The instruction set the single-segment pass runs with.
+    #[inline]
+    pub fn isa(&self) -> Isa {
+        self.isa
+    }
+
+    /// The cost of residue `x` at node `k`, from 1: an entry of `rbv`.
+    #[inline]
+    pub fn cost(&self, x: usize, k: usize) -> u8 {
+        let (qi, z) = ((k - 1) % self.q, (k - 1) / self.q);
+        self.costs[(x * self.q + qi) * LANES + z]
     }
 
     /// The score, in nats, of a path whose J state ends on the byte `xj`.
@@ -173,8 +216,17 @@ pub fn msv_filter_with(
     segment_row: &mut Vec<i8>,
     row: &mut Vec<u8>,
 ) -> f32 {
-    let bytes = &om.msv_bytes;
-    let dsq = &dsq[..l];
+    msv_filter_of(&dsq[..l], &om.msv_bytes, segment_row, row)
+}
+
+/// [`msv_filter_with`] on the tables `bytes`, whose `tjb` must be the one of
+/// the length of `dsq`.
+pub fn msv_filter_of(
+    dsq: &[u8],
+    bytes: &MsvBytes,
+    segment_row: &mut Vec<i8>,
+    row: &mut Vec<u8>,
+) -> f32 {
     let (base, bias) = (i32::from(bytes.base), i32::from(bytes.bias));
     let (tjb, tbm, tec) = (
         i32::from(bytes.tjb),
@@ -186,8 +238,10 @@ pub fn msv_filter_with(
     // within `bias` of the top may have wrapped, and the shortcut only holds
     // when that happens no sooner than a segment pays for the J state.
     if tjb + tbm + tec + bias < 127 {
+        // The kernels of an instruction set run only where it is available,
+        // which `MsvBytes::from_costs` has checked of the one it records.
         let largest = dispatch!(
-            om.isa(),
+            bytes.isa,
             i8,
             largest_cell(dsq, &bytes.gains, bytes.kp, bytes.gain_q, segment_row)
         );

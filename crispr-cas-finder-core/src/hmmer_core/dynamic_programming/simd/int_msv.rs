@@ -1231,9 +1231,15 @@ impl<T: Unit, const N: usize> Emissions<'_, T, N> {
     /// sequences are, with 8-bit cells; [`RowCursor`] then finds a row's
     /// emissions in a few instructions.
     fn plain_rows(&self, dsq: &[u8]) -> bool {
+        // The largest residue code, not `all`: this runs for every sequence
+        // and every profile, and a reduction is vectorised where a search
+        // that stops at the first match is not.
+        let largest = dsq
+            .iter()
+            .fold(0u8, |largest, &residue| largest.max(residue));
         !self.growth_vector
             && self.delta_step < 1 << DELTA_FRACTION_BITS
-            && dsq.iter().all(|&residue| usize::from(residue) < self.kp)
+            && usize::from(largest) < self.kp
     }
 }
 

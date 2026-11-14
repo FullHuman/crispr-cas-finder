@@ -243,7 +243,9 @@ impl SearchQuery {
             profile.num_nodes,
             &profile.model_composition[..canonical_size],
         )?;
-        let optimized_template = OptimizedProfile::from_profile(&profile);
+        // The tables of the exact filters are built when a plan asks for
+        // them (see `SearchPlanBuilder::build`).
+        let optimized_template = OptimizedProfile::for_hmmer_filters(&profile);
         Ok(Self {
             profile_template: profile,
             background_template: background,
@@ -306,8 +308,13 @@ impl SearchPlanBuilder {
         self
     }
 
-    pub fn build(self) -> Result<SearchPlan, HmmerError> {
+    pub fn build(mut self) -> Result<SearchPlan, HmmerError> {
         self.filters.validate()?;
+        if self.filters.exact || self.filters.max_mode {
+            self.query
+                .optimized_template
+                .build_exact_filter_tables(&self.query.profile_template);
+        }
         Ok(SearchPlan {
             inner: Arc::new(SearchPlanInner {
                 query: self.query,

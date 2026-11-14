@@ -41,11 +41,7 @@ pub fn gumbel_survival(score: f32, mu: f32, lambda: f32) -> f64 {
     let y = f64::from(lambda) * (f64::from(score) - f64::from(mu));
     let ey = -(-y).exp();
     // Easel's `eslSMALLX1`: 1 - e^x is -x for a small x.
-    if ey.abs() < 5e-9 {
-        -ey
-    } else {
-        1.0 - ey.exp()
-    }
+    if ey.abs() < 5e-9 { -ey } else { 1.0 - ey.exp() }
 }
 
 /// `esl_exp_surv()`: the P-value HMMER's Forward filter compares with its

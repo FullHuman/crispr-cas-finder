@@ -61,6 +61,13 @@ pub struct OptimizedProfile {
     pub tfv: Vec<f32>,      // [(7*q4 + q4) * 4]
     pub xf: [[f32; 2]; NUM_XSTATES],
 
+    // --- Tables of the exact filters and of their integer bounds: the
+    // log-space scores and everything down to the Viterbi over-estimate.
+    // The default filter cascade reads none of them, so a search builds
+    // them only for `FilterPolicy::exact` and `max_mode` (see
+    // `for_hmmer_filters` and `build_exact_filter_tables`). ---
+    has_exact_filter_tables: bool,
+
     // --- Log-space f32x4 (MSV/Viterbi exact scores) ---
     pub rlv: Vec<Vec<f32>>, // [kp][q4 * 4] — match emission log-scores
     pub tlv: Vec<f32>,      // [(7*q4 + q4) * 4] — transition log-scores
@@ -113,6 +120,14 @@ impl OptimizedProfile {
     /// [`OptimizedProfile::new`] for the integer MSV kernels of `isa`, or of
     /// the portable kernels when this processor lacks it.
     pub fn new_with_isa(m: usize, kp: usize, isa: Isa) -> Self {
+        let mut om = Self::without_exact_filter_tables(m, kp, isa);
+        om.allocate_exact_filter_tables();
+        om
+    }
+
+    /// [`OptimizedProfile::new_with_isa`] without the tables of the exact
+    /// filters.
+    fn without_exact_filter_tables(m: usize, kp: usize, isa: Isa) -> Self {
         let isa = if isa.is_available() {
             isa
         } else {
@@ -130,8 +145,9 @@ impl OptimizedProfile {
             riv: vec![vec![0.0f32; q4 * 4]; kp],
             tfv: vec![0.0f32; (NTSC_PER_Q * q4 + q4) * 4],
             xf: [[0.0f32; 2]; NUM_XSTATES],
-            rlv: vec![vec![f32::NEG_INFINITY; q4 * 4]; kp],
-            tlv: vec![f32::NEG_INFINITY; (NTSC_PER_Q * q4 + q4) * 4],
+            has_exact_filter_tables: false,
+            rlv: Vec::new(),
+            tlv: Vec::new(),
             isa,
             q_msv8: isa.vector_count::<i8>(m),
             msv_scale8: i8_msv::SCALE,
@@ -144,11 +160,8 @@ impl OptimizedProfile {
             ssv_units_down: Vec::new(),
             q_vit: isa.vector_count::<i16>(m),
             msv_scale: i16_msv::scale_for(m),
-            msv_units: vec![i16::MIN; kp * isa.vector_count::<i16>(m) * isa.lanes::<i16>()],
-            vit_units: vec![
-                i16::MIN;
-                (NTSC_PER_Q + 1) * isa.vector_count::<i16>(m) * isa.lanes::<i16>()
-            ],
+            msv_units: Vec::new(),
+            vit_units: Vec::new(),
             vit_min_begin_units: 0,
             msv_bytes: MsvBytes::default(),
             viterbi_words: ViterbiWords::default(),
@@ -168,8 +181,24 @@ impl OptimizedProfile {
     /// `isa`, or of the portable kernels when this processor lacks it. The
     /// bounds those kernels compute do not depend on the instruction set.
     pub fn from_profile_with_isa(gm: &Profile, isa: Isa) -> Self {
+        let mut om = Self::for_hmmer_filters_with_isa(gm, isa);
+        om.build_exact_filter_tables(gm);
+        om
+    }
+
+    /// [`OptimizedProfile::from_profile`] with the tables of the default
+    /// search only: the Forward tables and those of HMMER's MSV and Viterbi
+    /// filters. The exact MSV and Viterbi filters and their integer bounds
+    /// need [`OptimizedProfile::build_exact_filter_tables`] first.
+    pub fn for_hmmer_filters(gm: &Profile) -> Self {
+        Self::for_hmmer_filters_with_isa(gm, Isa::for_model(gm.num_nodes))
+    }
+
+    /// [`OptimizedProfile::for_hmmer_filters`] for the kernels of `isa`, or
+    /// of the portable kernels when this processor lacks it.
+    pub fn for_hmmer_filters_with_isa(gm: &Profile, isa: Isa) -> Self {
         let kp = gm.alphabet.full_size;
-        let mut om = OptimizedProfile::new_with_isa(gm.num_nodes, kp, isa);
+        let mut om = OptimizedProfile::without_exact_filter_tables(gm.num_nodes, kp, isa);
         om.mode = gm.mode;
         om.l = gm.target_length;
         om.nj = gm.expected_j_uses;
@@ -177,13 +206,40 @@ impl OptimizedProfile {
         om.ev_params = gm.ev_params;
 
         fwd_conversion(gm, &mut om);
-        log_conversion(gm, &mut om);
-        msv_units_conversion(gm, &mut om);
-        vit_units_conversion(gm, &mut om);
-        om.msv_bytes = MsvBytes::from_profile(gm, kp, om.isa.lanes::<i8>());
+        om.msv_bytes = MsvBytes::from_profile(gm, kp, om.isa);
         om.viterbi_words = ViterbiWords::from_profile(gm, kp, om.isa.lanes::<i16>());
 
         om
+    }
+
+    /// Build the tables of the exact MSV and Viterbi filters and of their
+    /// integer bounds from `gm`, the profile this one was converted from,
+    /// unless it has them already.
+    pub fn build_exact_filter_tables(&mut self, gm: &Profile) {
+        if self.has_exact_filter_tables {
+            return;
+        }
+        self.allocate_exact_filter_tables();
+        log_conversion(gm, self);
+        msv_units_conversion(gm, self);
+        vit_units_conversion(gm, self);
+    }
+
+    /// Whether the tables of the exact filters have been built.
+    #[inline]
+    pub fn has_exact_filter_tables(&self) -> bool {
+        self.has_exact_filter_tables
+    }
+
+    /// The tables of the exact filters, with every score impossible.
+    fn allocate_exact_filter_tables(&mut self) {
+        let (m, kp, q4, isa) = (self.m, self.kp, self.q4, self.isa);
+        self.rlv = vec![vec![f32::NEG_INFINITY; q4 * 4]; kp];
+        self.tlv = vec![f32::NEG_INFINITY; (NTSC_PER_Q * q4 + q4) * 4];
+        let (q, lanes) = (isa.vector_count::<i16>(m), isa.lanes::<i16>());
+        self.msv_units = vec![i16::MIN; kp * q * lanes];
+        self.vit_units = vec![i16::MIN; (NTSC_PER_Q + 1) * q * lanes];
+        self.has_exact_filter_tables = true;
     }
 
     /// The instruction set the integer MSV kernels run with.
