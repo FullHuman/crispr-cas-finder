@@ -12,5 +12,7 @@ pub mod i16_msv;
 pub mod i16_viterbi;
 pub mod i8_msv;
 pub mod int_msv;
+pub mod msv_filter;
 pub mod oprofile;
 pub mod striped_forward;
+pub mod viterbi_filter;

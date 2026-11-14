@@ -10,6 +10,8 @@
 //   Log:     f32  in 4-lane vectors  (Q4)  — log-space for MSV/Viterbi filters
 
 use super::int_msv::{Isa, Rounding};
+use super::msv_filter::MsvBytes;
+use super::viterbi_filter::ViterbiWords;
 use super::{i8_msv, i16_msv, i16_viterbi, int_msv};
 use crate::hmmer_core::config::*;
 use crate::hmmer_core::profile::Profile;
@@ -88,6 +90,12 @@ pub struct OptimizedProfile {
     pub vit_units: Vec<i16>,      // [(7*q_vit + q_vit) * lanes] — transitions, rounded up
     pub vit_min_begin_units: i16, // smallest finite begin transition
 
+    // --- HMMER's own filter tables: the scores its MSV and Viterbi filters
+    // return decide the default filter cascade (msv_filter.rs,
+    // viterbi_filter.rs) ---
+    pub msv_bytes: MsvBytes,
+    pub viterbi_words: ViterbiWords,
+
     // E-value parameters
     pub ev_params: [f32; NUM_EV_PARAMS],
     pub mode: SearchMode,
@@ -142,6 +150,8 @@ impl OptimizedProfile {
                 (NTSC_PER_Q + 1) * isa.vector_count::<i16>(m) * isa.lanes::<i16>()
             ],
             vit_min_begin_units: 0,
+            msv_bytes: MsvBytes::default(),
+            viterbi_words: ViterbiWords::default(),
             ev_params: [EV_PARAM_UNSET; NUM_EV_PARAMS],
             mode: SearchMode::Local,
             max_length: 0,
@@ -170,6 +180,8 @@ impl OptimizedProfile {
         log_conversion(gm, &mut om);
         msv_units_conversion(gm, &mut om);
         vit_units_conversion(gm, &mut om);
+        om.msv_bytes = MsvBytes::from_profile(gm, kp, om.isa.lanes::<i8>());
+        om.viterbi_words = ViterbiWords::from_profile(gm, kp, om.isa.lanes::<i16>());
 
         om
     }
@@ -201,6 +213,7 @@ impl OptimizedProfile {
         self.xf[XST_C][XTR_MOVE] = pmove;
         self.xf[XST_J][XTR_LOOP] = ploop;
         self.xf[XST_J][XTR_MOVE] = pmove;
+        self.msv_bytes.set_length(l);
 
         self.l = l;
     }

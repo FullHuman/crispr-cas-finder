@@ -67,40 +67,45 @@ fn copy_metadata(hmm: &Hmm, profile: &mut Profile) {
 fn configure_model_composition(hmm: &Hmm, background: &BackgroundModel, profile: &mut Profile) {
     profile.model_composition.fill(COMPOSITION_UNSET);
     let canonical_size = hmm.alphabet.canonical_size.min(MAX_CANONICAL_ALPHABET);
+    let usable = |composition: &[f32]| {
+        let sum: f32 = composition.iter().sum();
+        sum.is_finite()
+            && sum > 0.0
+            && composition
+                .iter()
+                .all(|value| value.is_finite() && *value >= 0.0)
+    };
 
     if let Some(composition) = hmm
         .model_composition
         .as_deref()
         .filter(|composition| composition.len() >= canonical_size)
+        .filter(|composition| usable(&composition[..canonical_size]))
     {
+        // A model's own composition is used as it is: HMMER does not
+        // normalise it, and the bias filter's scores depend on its last bits.
         profile.model_composition[..canonical_size].copy_from_slice(&composition[..canonical_size]);
-    } else {
-        let (occupancy, _) = hmm.calculate_occupancy();
-        let occupancy_sum: f32 = occupancy[1..=hmm.num_nodes].iter().sum();
-
-        if occupancy_sum > 0.0 {
-            for residue in 0..canonical_size {
-                let weighted_sum: f32 = (1..=hmm.num_nodes)
-                    .map(|node| occupancy[node] * hmm.match_emissions(node)[residue])
-                    .sum();
-                profile.model_composition[residue] = weighted_sum / occupancy_sum;
-            }
-        } else {
-            profile.model_composition[..canonical_size]
-                .copy_from_slice(&background.residue_frequencies[..canonical_size]);
-        }
+        return;
     }
 
-    // Keep small text-format rounding errors from changing the HMM's total
-    // probability mass, and fall back safely if the supplied vector is bad.
+    // No composition, or an unusable one: derive it from the match states,
+    // weighted by their occupancy, and fall back on the background.
+    let (occupancy, _) = hmm.calculate_occupancy();
+    let occupancy_sum: f32 = occupancy[1..=hmm.num_nodes].iter().sum();
+    if occupancy_sum > 0.0 {
+        for residue in 0..canonical_size {
+            let weighted_sum: f32 = (1..=hmm.num_nodes)
+                .map(|node| occupancy[node] * hmm.match_emissions(node)[residue])
+                .sum();
+            profile.model_composition[residue] = weighted_sum / occupancy_sum;
+        }
+    } else {
+        profile.model_composition[..canonical_size]
+            .copy_from_slice(&background.residue_frequencies[..canonical_size]);
+    }
     let composition = &mut profile.model_composition[..canonical_size];
-    let sum: f32 = composition.iter().sum();
-    if sum.is_finite()
-        && sum > 0.0
-        && composition
-            .iter()
-            .all(|value| value.is_finite() && *value >= 0.0)
-    {
+    if usable(composition) {
+        let sum: f32 = composition.iter().sum();
         composition.iter_mut().for_each(|value| *value /= sum);
     } else {
         composition.copy_from_slice(&background.residue_frequencies[..canonical_size]);
@@ -124,18 +129,22 @@ fn configure_local_entry_scores(hmm: &Hmm, profile: &mut Profile) {
     let model_length = hmm.num_nodes;
     let (occupancy, _) = hmm.calculate_occupancy();
 
-    let occupancy_sum: f32 = occupancy[1..=model_length]
-        .iter()
-        .enumerate()
-        .map(|(index, &occupancy_at_node)| occupancy_at_node * (model_length - index) as f32) // index here == k-1, so (M - k + 1) == (M - index)
-        .sum();
+    // HMMER's arithmetic, so that the rounded scores of its filters come out
+    // the same: the sum in single precision, each product fused with it (its
+    // arm64 build; see `background::fused_mul_add`), and the logarithms in
+    // double precision.
+    let mut occupancy_sum = 0.0f32;
+    for (index, &occupancy_at_node) in occupancy[1..=model_length].iter().enumerate() {
+        // index here == k-1, so (M - k + 1) == (M - index)
+        occupancy_sum = occupancy_at_node.mul_add((model_length - index) as f32, occupancy_sum);
+    }
 
     if occupancy_sum > 0.0 {
         for (node_index, &occupancy_at_node) in
             occupancy.iter().enumerate().skip(1).take(model_length)
         {
             profile.transition_scores_for_node_mut(node_index)[PTsc::BeginToMatch.idx()] =
-                (occupancy_at_node / occupancy_sum).ln();
+                f64::from(occupancy_at_node / occupancy_sum).ln() as f32;
         }
     } else {
         // Uniform fallback when all occupancies are zero.
@@ -249,7 +258,10 @@ fn match_emission_scores(
         let emission_probability = match_probabilities[residue_index];
         let background_frequency = background.residue_frequencies[residue_index];
         if emission_probability > 0.0 && background_frequency > 0.0 {
-            *score = (emission_probability / background_frequency).ln();
+            // The ratio and its logarithm in double precision, as
+            // `p7_ProfileConfig()` takes them.
+            *score =
+                (f64::from(emission_probability) / f64::from(background_frequency)).ln() as f32;
         }
         // else stays NEG_INFINITY (covers both zero-emission and zero-background cases)
     }
@@ -291,6 +303,8 @@ fn degen_expected_score(
     let degenerate_row = alphabet.degen_row(residue_index);
     let background_frequencies = &background.residue_frequencies;
 
+    // `esl_abc_FExpectScore()`, each product fused with the running sum as
+    // in HMMER's arm64 build (see `background::fused_mul_add`).
     let (weighted_sum, normalization) = degenerate_row
         .iter()
         .zip(background_frequencies.iter())
@@ -299,7 +313,7 @@ fn degen_expected_score(
         .fold(
             (0.0f32, 0.0f32),
             |(sum, normalizer), ((_, &frequency), &score)| {
-                (sum + frequency * score, normalizer + frequency)
+                (score.mul_add(frequency, sum), normalizer + frequency)
             },
         );
 
@@ -342,9 +356,15 @@ fn configure_insert_emissions(profile: &mut Profile, full_alphabet_size: usize) 
     }
 }
 
+/// The logarithm of a transition probability, taken in double precision as
+/// `p7_ProfileConfig()` does.
 #[inline]
 fn safe_ln(x: f32) -> f32 {
-    if x > 0.0 { x.ln() } else { f32::NEG_INFINITY }
+    if x > 0.0 {
+        f64::from(x).ln() as f32
+    } else {
+        f32::NEG_INFINITY
+    }
 }
 
 /// Configure the length model for a target of length L.

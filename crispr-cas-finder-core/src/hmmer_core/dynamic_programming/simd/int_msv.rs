@@ -708,6 +708,44 @@ where
     })
 }
 
+/// The largest cell of the recurrence without any growth term,
+///
+///   U(i,k) = U(i-1,k-1) + units(x_i,k),
+///
+/// saturating, the floor being the begin state: in units above the begin
+/// state, or `None` when a cell reached the top of its range. `units` holds
+/// `kp` rows of `q` vectors of `N` lanes, striped as a [`Table`] is.
+///
+/// This is the recurrence of HMMER's SSV filter (msv_filter.rs), which adds
+/// one signed byte to each cell and lets the saturation at the bottom stand
+/// for the begin state; it runs on the kernels of the bounds above, which do
+/// the same with one more table for the rows where their delta grows.
+pub fn largest_cell<T, const N: usize, K>(
+    dsq: &[u8],
+    units: &[T],
+    kp: usize,
+    q: usize,
+    m_row: &mut Vec<T>,
+) -> Option<i64>
+where
+    T: Unit,
+    K: Kernels,
+    Simd<T, N>: SimdInt<Scalar = T> + SimdOrd,
+{
+    let (vectors, _) = units.as_chunks::<N>();
+    assert!(vectors.len() >= kp * q, "emission table too short");
+    let emissions = Emissions {
+        vectors,
+        vectors_plus_one: vectors,
+        kp,
+        q,
+        delta_step: 0,
+        raise_after: false,
+        growth_vector: false,
+    };
+    K::best_segment_of::<T, N>(dsq, 0..dsq.len(), None, &emissions, m_row, None)
+}
+
 /// Collects the block-wise results of a pass.
 pub struct Recorder<'a, T: Unit> {
     blocks: &'a mut Blocks<T>,
