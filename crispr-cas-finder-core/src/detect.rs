@@ -20,10 +20,16 @@ pub fn at_percent(seq: &[u8]) -> f64 {
 
 /// Infer the orientation of a CRISPR array from flanking AT% content.
 ///
-/// Uses the same heuristic as the original Perl CRISPRCasFinder:
-/// - If left_AT > right_AT AND left_AT > global_AT → Forward (+)
-/// - If right_AT > left_AT AND right_AT > global_AT → Reverse (-)
-/// - Otherwise → Unknown
+/// The rule of CRISPRCasFinder: the leader is on the side whose flank is
+/// richer in A and T, when that flank is also richer than the sequence as a
+/// whole.
+/// - left_AT > right_AT and left_AT > global_AT → Forward (+)
+/// - right_AT > left_AT and right_AT > global_AT → Reverse (-)
+/// - otherwise → Unknown
+///
+/// As there, a flank counts only when all `flank_len` bases of it exist, and
+/// a flank without a single A or T, such as a run of N, says nothing: the
+/// orientation is then Unknown.
 pub fn infer_orientation(
     seq: &[u8],
     array_start: usize,
@@ -42,41 +48,17 @@ pub fn infer_orientation_with_global_at(
     flank_len: usize,
     global_at: f64,
 ) -> Orientation {
-    // Left flanking region (before the array)
-    let left_start = if array_start > flank_len + 1 {
-        array_start - flank_len - 1
-    } else {
-        0
-    };
-    let left_end = array_start.saturating_sub(1);
-    let left_flank = if left_start < left_end {
-        &seq[left_start..left_end]
-    } else {
-        &[]
-    };
+    // `array_start` and `array_end` are 1-based and inclusive. The left flank
+    // is the `flank_len` bases before the array; CRISPRCasFinder wants its
+    // first base to exist, and the right flank to end before the last base
+    // of the sequence.
+    if flank_len == 0 || array_start <= flank_len || array_end + flank_len >= seq.len() {
+        return Orientation::Unknown;
+    }
+    let left_at = at_percent(&seq[array_start - 1 - flank_len..array_start - 1]);
+    let right_at = at_percent(&seq[array_end..array_end + flank_len]);
 
-    // Right flanking region (after the array)
-    let right_start = if array_end < seq.len() {
-        array_end
-    } else {
-        seq.len()
-    };
-    let right_end = if right_start + flank_len <= seq.len() {
-        right_start + flank_len
-    } else {
-        seq.len()
-    };
-    let right_flank = if right_start < right_end {
-        &seq[right_start..right_end]
-    } else {
-        &[]
-    };
-
-    let left_at = at_percent(left_flank);
-    let right_at = at_percent(right_flank);
-
-    if left_flank.is_empty() || right_flank.is_empty() || (left_at - right_at).abs() < f64::EPSILON
-    {
+    if left_at == 0.0 || right_at == 0.0 || (left_at - right_at).abs() < f64::EPSILON {
         return Orientation::Unknown;
     }
 
@@ -805,15 +787,44 @@ mod tests {
     }
 
     #[test]
-    fn orientation_accepts_gc_only_flank_as_real_measurement() {
-        let sequence = b"GGGGCCCCATAT";
-        assert_eq!(infer_orientation(sequence, 5, 8, 4), Orientation::Reverse);
+    fn orientation_follows_the_flank_richer_in_at() {
+        // Array at 6..=9, flanks of four bases, one spare base on each side.
+        assert_eq!(
+            infer_orientation(b"GATATGGGGGCACG", 6, 9, 4),
+            Orientation::Forward
+        );
+        assert_eq!(
+            infer_orientation(b"GGCACGGGGATATG", 6, 9, 4),
+            Orientation::Reverse
+        );
     }
 
     #[test]
-    fn orientation_is_unknown_when_a_flank_is_empty() {
-        let sequence = b"CCCCATAT";
-        assert_eq!(infer_orientation(sequence, 1, 4, 4), Orientation::Unknown);
+    fn orientation_is_unknown_when_a_flank_has_no_a_or_t() {
+        // CRISPRCasFinder reads a flank at 0% AT, a run of N for instance, as
+        // no measurement at all.
+        assert_eq!(
+            infer_orientation(b"GNNNNGGGGGATATG", 6, 9, 4),
+            Orientation::Unknown
+        );
+    }
+
+    #[test]
+    fn orientation_is_unknown_when_a_flank_is_cut_short() {
+        // Left flank: its first base must exist. Right flank: it must end
+        // before the last base of the sequence.
+        assert_eq!(
+            infer_orientation(b"ATATGGGGGCACG", 5, 8, 4),
+            Orientation::Forward
+        );
+        assert_eq!(
+            infer_orientation(b"TATGGGGGCACG", 4, 7, 4),
+            Orientation::Unknown
+        );
+        assert_eq!(
+            infer_orientation(b"GATATGGGGGCAC", 6, 9, 4),
+            Orientation::Unknown
+        );
     }
 
     // ── is_hamming_distance_within ───────────────────────────────────────────

@@ -6,8 +6,8 @@
 // exact score, so nearly everything it lets through is a real MSV hit. Only
 // the exact filter policy runs it (pipeline/search.rs): the 8-bit bound of
 // i8_msv.rs runs first, and this one looks at the blocks of rows that bound
-// could not settle. The default policy decides with the 8-bit lower bound
-// alone.
+// could not settle. The default policy decides on the score of HMMER's own
+// MSV filter instead (msv_filter.rs).
 
 use super::int_msv::{
     self, Blocks, Kernels, Table, Unit, dispatch, msv_lower_bound as lower_bound,

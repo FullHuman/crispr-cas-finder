@@ -4,10 +4,10 @@
 // recurrence of f32_viterbi.rs: 16-bit cells, every score rounded up and
 // every clamp going upward, so the result is never below the exact Viterbi
 // filter score. A sequence whose over-estimate fails the Viterbi threshold
-// is dropped without running the exact filter. By default a finite
-// over-estimate also stands in for the score of a sequence that passes; the
-// exact filter runs when the bound saturates and, for every sequence the
-// bound lets through, with `FilterPolicy::exact`.
+// is dropped without running the exact filter, which scores every sequence
+// the bound lets through. Only `FilterPolicy::exact` runs it; the default
+// policy decides on the score of HMMER's own Viterbi filter
+// (viterbi_filter.rs).
 //
 // The N, C and J self-loops share one score, tloop. Subtracting i·tloop from
 // every state of row i removes them and leaves delta = -tloop to add for

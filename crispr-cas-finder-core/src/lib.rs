@@ -11,8 +11,8 @@ use anyhow::Result;
 use log::info;
 use rayon::prelude::*;
 use std::borrow::Cow;
-use std::cell::OnceCell;
 use std::path::Path;
+use std::sync::OnceLock;
 
 pub mod annotation;
 pub mod association;
@@ -25,6 +25,7 @@ pub mod detect;
 mod dna;
 pub mod io;
 pub mod macsy;
+pub mod muscle5;
 pub mod repeat_db;
 pub mod report;
 pub mod types;
@@ -134,7 +135,7 @@ pub fn reclassify_small_arrays(arrays: &mut [CrisprArray]) {
 struct SearchedSequence<'a> {
     id: &'a str,
     bases: &'a [u8],
-    global_at: OnceCell<f64>,
+    global_at: OnceLock<f64>,
 }
 
 impl SearchedSequence<'_> {
@@ -174,22 +175,27 @@ fn detect_crisprs_for_sequence(
     let searched = SearchedSequence {
         id: seq_id,
         bases: seq,
-        global_at: OnceCell::new(),
+        global_at: OnceLock::new(),
     };
-    let mut arrays = Vec::new();
-    for cluster in cluster_repeats(&hits, GAP_THRESHOLD) {
-        // Hits are sorted by position.
-        let first = hits.partition_point(|hit| hit.pos1 < cluster.0);
-        let after = hits.partition_point(|hit| hit.pos1 <= cluster.1);
-        arrays.extend(process_cluster(
-            &searched,
-            &hits[first..after],
-            cluster,
-            &occurrences,
-            params,
-            min_repeat_count,
-        ));
-    }
+    // The loci do not depend on one another, and aligning the spacers of a
+    // large one takes long enough for the others to be worth doing meanwhile.
+    let arrays_by_cluster: Vec<Vec<CrisprArray>> = cluster_repeats(&hits, GAP_THRESHOLD)
+        .par_iter()
+        .map(|&cluster| {
+            // Hits are sorted by position.
+            let first = hits.partition_point(|hit| hit.pos1 < cluster.0);
+            let after = hits.partition_point(|hit| hit.pos1 <= cluster.1);
+            process_cluster(
+                &searched,
+                &hits[first..after],
+                cluster,
+                &occurrences,
+                params,
+                min_repeat_count,
+            )
+        })
+        .collect();
+    let mut arrays: Vec<CrisprArray> = arrays_by_cluster.into_iter().flatten().collect();
 
     if matches!(uppercase, Cow::Owned(_)) {
         for array in &mut arrays {
@@ -294,11 +300,20 @@ fn process_cluster(
         .iter()
         .map(|(spacer, _)| spacer_sequence(spacer))
         .collect();
+    // The alignment of the spacers of the locus, kept for the scores of the
+    // array when the locus turns out to be one array.
+    let mut spacer_alignment = None;
     let spacers_rule_it_out = match spacer_sequences.as_slice() {
         [spacer] => !check_short_crispr(consensus, spacer),
         _ => {
-            let alignment = conservation::align_shifted_copies(&spacer_sequences);
-            conservation::aligned_residue_identity(&alignment) >= params.spacer_similarity_threshold
+            let alignment = conservation::align_sequences(&spacer_sequences);
+            let too_alike = conservation::aligned_residue_identity(&alignment)
+                >= params.spacer_similarity_threshold;
+            spacer_alignment = Some(conservation::SpacerAlignment {
+                spacers: spacer_sequences.clone(),
+                rows: alignment,
+            });
+            too_alike
         }
     };
     if spacers_rule_it_out || mismatch_share > params.repeat_mismatch_percent / 100.0 {
@@ -322,7 +337,15 @@ fn process_cluster(
             repeats.push(repeat_at(region_start + last.start + last.length));
             (repeats.len() >= min_repeat_count).then_some(repeats)
         })
-        .filter_map(|repeats| build_array(searched, consensus.to_string(), repeats, params))
+        .filter_map(|repeats| {
+            build_array(
+                searched,
+                consensus.to_string(),
+                repeats,
+                spacer_alignment.as_ref(),
+                params,
+            )
+        })
         .collect()
 }
 
@@ -334,6 +357,7 @@ fn build_array(
     searched: &SearchedSequence<'_>,
     best_consensus: String,
     mut best_refined: Vec<RepeatHit>,
+    locus_spacers: Option<&conservation::SpacerAlignment<'_>>,
     params: &DetectionParams,
 ) -> Option<CrisprArray> {
     let (seq_id, seq) = (searched.id, searched.bases);
@@ -363,8 +387,12 @@ fn build_array(
         .iter()
         .map(|spacer| spacer.sequence.as_str())
         .collect();
-    let statistics =
-        conservation::array_statistics(&best_consensus, &repeat_sequences, &spacer_sequences);
+    let statistics = conservation::array_statistics_with(
+        &best_consensus,
+        &repeat_sequences,
+        &spacer_sequences,
+        locus_spacers,
+    );
 
     let evidence_level = conservation::evidence_level(spacers.len(), &statistics);
 
@@ -387,15 +415,18 @@ fn build_array(
         .map(|h| h.pos1 + h.repeat_length - 1)
         .unwrap_or(0);
 
-    let orientation = infer_orientation_with_global_at(
-        seq,
-        array_start,
-        array_end,
-        params.flank,
-        searched.global_at(),
-    );
-
     let db_entry = repeat_db::lookup_repeat(&best_consensus);
+    // An orientation recorded for the repeat goes before the one the flanks
+    // suggest, as in CRISPRCasFinder.
+    let orientation = db_entry.expert_orientation.unwrap_or_else(|| {
+        infer_orientation_with_global_at(
+            seq,
+            array_start,
+            array_end,
+            params.flank,
+            searched.global_at(),
+        )
+    });
 
     Some(CrisprArray {
         id: String::new(),

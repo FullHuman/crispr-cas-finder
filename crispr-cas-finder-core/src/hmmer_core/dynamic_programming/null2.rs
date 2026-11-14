@@ -2,7 +2,9 @@
 //
 // Port of src/generic_null2.c
 
+use crate::hmmer_core::alphabet::Alphabet;
 use crate::hmmer_core::config::*;
+use crate::hmmer_core::dynamic_programming::simd::oprofile::OptimizedProfile;
 use crate::hmmer_core::profile::Profile;
 use crate::hmmer_core::score_matrix::{
     C_STATE, INSERT_CELL, J_STATE, MATCH_CELL, N_STATE, ScoreMatrix,
@@ -86,6 +88,43 @@ pub fn null2_by_expectation(profile: &Profile, posterior_matrix: &ScoreMatrix) -
     null2
 }
 
+/// Null2 odds ratios of one domain of a sampled path: `p7_Null2_ByTrace()`
+/// of HMMER's vector implementations (src/impl_*/null2.c), operation for
+/// operation.
+///
+/// `usage` holds, in the striped layout of `om` (node `k` at
+/// `((k - 1) % q) * 4 + (k - 1) / q`), how many residues of the domain each
+/// node emitted, and `emitted` their total. HMMER counts a residue emitted
+/// by the insert state of a node as one emitted by its match state; the
+/// caller does the same. `usage` is scaled in place to frequencies, and the
+/// odds ratio of every symbol of the alphabet is written to `null2`.
+pub fn null2_by_trace(
+    om: &OptimizedProfile,
+    alphabet: &Alphabet,
+    usage: &mut [f32],
+    emitted: usize,
+    null2: &mut [f32],
+) {
+    use std::simd::prelude::*;
+
+    let norm = f32x4::splat(1.0 / emitted as f32);
+    let (usage, _) = usage.as_chunks_mut::<4>();
+    for stripe in usage.iter_mut() {
+        *stripe = (f32x4::from_array(*stripe) * norm).to_array();
+    }
+    for (x, null2_x) in null2[..alphabet.canonical_size].iter_mut().enumerate() {
+        let (emissions, _) = om.rfv[x].as_chunks::<4>();
+        let mut sum = f32x4::splat(0.0);
+        for (stripe, emission) in usage.iter().zip(emissions) {
+            sum += f32x4::from_array(*stripe) * f32x4::from_array(*emission);
+        }
+        // The horizontal sum of the vector implementations is pairwise.
+        let sum = sum.to_array();
+        *null2_x = (sum[0] + sum[1]) + (sum[2] + sum[3]);
+    }
+    set_degenerate_odds(alphabet, null2);
+}
+
 /// Equivalent to Easel's `esl_abc_FAvgScVec()`: ambiguous symbols get the
 /// arithmetic mean of the canonical odds they represent. Gap, nonresidue,
 /// and missing-data symbols are neutral under null2.
@@ -112,7 +151,6 @@ fn set_degenerate_odds(alphabet: &crate::hmmer_core::alphabet::Alphabet, odds: &
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hmmer_core::alphabet::Alphabet;
 
     #[test]
     fn degenerate_odds_match_hmmer_averaging() {
@@ -129,5 +167,39 @@ mod tests {
         assert_eq!(odds[alphabet.canonical_size], 1.0); // gap
         assert_eq!(odds[alphabet.full_size - 2], 1.0); // nonresidue
         assert_eq!(odds[alphabet.full_size - 1], 1.0); // missing
+    }
+
+    /// The null2 model of a sampled domain is the average, over the residues
+    /// it emits, of the match emission odds of the nodes emitting them.
+    #[test]
+    fn null2_by_trace_averages_the_emissions_of_the_nodes_used() {
+        use crate::hmmer_core::rng::XorShift64;
+        use crate::hmmer_core::test_helpers::setup_profile;
+
+        let alphabet = Alphabet::amino();
+        let mut rng = XorShift64::new(11);
+        let m = 23;
+        let (_, _, profile) = setup_profile(&mut rng, m, 100, &alphabet, SearchMode::Local);
+        let om = OptimizedProfile::from_profile(&profile);
+        let q = om.q4;
+        let striped = |k: usize| ((k - 1) % q) * 4 + (k - 1) / q;
+
+        // Node 3 emits three residues, node 20 one.
+        let mut usage = vec![0.0f32; q * 4];
+        usage[striped(3)] = 3.0;
+        usage[striped(20)] = 1.0;
+        let mut null2 = vec![0.0f32; alphabet.full_size];
+        null2_by_trace(&om, &alphabet, &mut usage, 4, &mut null2);
+
+        for (x, &odds) in null2[..alphabet.canonical_size].iter().enumerate() {
+            let expected = 0.75 * om.rfv[x][striped(3)] + 0.25 * om.rfv[x][striped(20)];
+            assert!(
+                (odds - expected).abs() <= 1e-6 * expected,
+                "{odds} vs {expected}"
+            );
+        }
+        assert_eq!(null2[alphabet.canonical_size], 1.0);
+        assert_eq!(null2[21], (null2[2] + null2[11]) / 2.0); // B = mean(D, N)
+        assert_eq!(usage[striped(3)], 0.75);
     }
 }

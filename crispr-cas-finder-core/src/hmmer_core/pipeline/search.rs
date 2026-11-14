@@ -17,7 +17,9 @@ use crate::hmmer_core::dynamic_programming::simd::i8_msv;
 use crate::hmmer_core::dynamic_programming::simd::i16_msv;
 use crate::hmmer_core::dynamic_programming::simd::i16_viterbi;
 use crate::hmmer_core::dynamic_programming::simd::int_msv;
+use crate::hmmer_core::dynamic_programming::simd::msv_filter;
 use crate::hmmer_core::dynamic_programming::simd::oprofile::OptimizedProfile;
+use crate::hmmer_core::dynamic_programming::simd::viterbi_filter;
 use crate::hmmer_core::errors::HmmerError;
 use crate::hmmer_core::evalues;
 use crate::hmmer_core::forward_backward;
@@ -138,10 +140,10 @@ pub struct FilterPolicy {
     pub forward_threshold: f64,
     /// Decide the MSV and bias filters with the exact single-precision MSV
     /// score and the Viterbi filter with the exact Viterbi score. Otherwise
-    /// the MSV filters use an 8-bit lower bound on the MSV score, within
-    /// about half a nat of it, and the Viterbi filter its 16-bit upper
-    /// bound: a little less sensitive at the MSV stage, a little more at the
-    /// Viterbi stage, and much faster.
+    /// every filter is decided on the score HMMER's own filter returns, in
+    /// bytes for the MSV and bias filters and in 16-bit words for the
+    /// Viterbi filter, with HMMER's tests: the same sequences pass each
+    /// stage as in `hmmsearch`, and much faster.
     pub exact: bool,
 }
 
@@ -241,7 +243,9 @@ impl SearchQuery {
             profile.num_nodes,
             &profile.model_composition[..canonical_size],
         )?;
-        let optimized_template = OptimizedProfile::from_profile(&profile);
+        // The tables of the exact filters are built when a plan asks for
+        // them (see `SearchPlanBuilder::build`).
+        let optimized_template = OptimizedProfile::for_hmmer_filters(&profile);
         Ok(Self {
             profile_template: profile,
             background_template: background,
@@ -304,8 +308,13 @@ impl SearchPlanBuilder {
         self
     }
 
-    pub fn build(self) -> Result<SearchPlan, HmmerError> {
+    pub fn build(mut self) -> Result<SearchPlan, HmmerError> {
         self.filters.validate()?;
+        if self.filters.exact || self.filters.max_mode {
+            self.query
+                .optimized_template
+                .build_exact_filter_tables(&self.query.profile_template);
+        }
         Ok(SearchPlan {
             inner: Arc::new(SearchPlanInner {
                 query: self.query,
@@ -347,17 +356,26 @@ pub struct SearchTrace {
     pub sequence_length: usize,
     pub null_score: Option<f32>,
     pub bias_filter_score: Option<f32>,
-    /// Exact MSV score. `None` when the integer bounds alone settled the
-    /// MSV and bias filters; see `msv_score_bound` and `msv_score_lower_bound`.
+    /// What HMMER's MSV filter returns, the score the default policy decides
+    /// the MSV and bias filters on: plus infinity when its bytes overflowed.
+    /// `None` with `FilterPolicy::exact` or `max_mode`.
+    pub msv_filter_score: Option<f32>,
+    /// What HMMER's Viterbi filter returns, the score the default policy
+    /// decides the Viterbi filter on: plus infinity when its words
+    /// overflowed. `None` with `FilterPolicy::exact` or `max_mode`, and when
+    /// the filter did not run: the sequence stopped earlier, or its MSV
+    /// score already met the Viterbi threshold.
+    pub viterbi_filter_score: Option<f32>,
+    /// Exact MSV score, with `FilterPolicy::exact` or `max_mode`. `None`
+    /// when the integer bounds alone settled the MSV and bias filters; see
+    /// `msv_score_bound` and `msv_score_lower_bound`.
     pub msv_raw_score: Option<f32>,
     /// Upper bound on the MSV score from the integer pre-filters, when they
     /// ran: infinite when they could not bound it.
     pub msv_score_bound: Option<f32>,
     /// Lower bound on the MSV score from the integer pre-filters, when known.
     pub msv_score_lower_bound: Option<f32>,
-    /// Viterbi filter score: exact with `FilterPolicy::exact`, otherwise the
-    /// 16-bit upper bound that decided the filter, or the exact score when
-    /// that bound saturated and could not decide.
+    /// Exact Viterbi score, with `FilterPolicy::exact` or `max_mode`.
     pub viterbi_raw_score: Option<f32>,
     pub forward_raw_score: Option<f32>,
     pub domain_count: usize,
@@ -577,53 +595,103 @@ impl<'w, 's> TargetRun<'w, 's, Prepared> {
         score
     }
 
-    /// The MSV and bias filters decided by the 8-bit lower bound on the MSV
-    /// score, which stands in for the score itself: a sequence passes when
-    /// the bound passes. Then the Viterbi and forward filters as usual.
-    fn run_fast_msv_filters(
-        mut self,
-    ) -> ControlFlow<SearchReport, TargetRun<'w, 's, PassedFilters>> {
-        let msv_threshold = self.worker.engine.msv_threshold;
-        let om = self.worker.engine.oprofile.as_ref().unwrap();
-        let lower_bound = i8_msv::msv_lower_bound_with(
-            &self.sequence.residues,
-            self.sequence_length,
+    /// The filter cascade of `p7_Pipeline()`, each stage decided on the
+    /// number HMMER decides it on: the scores its MSV and Viterbi filters
+    /// return (msv_filter.rs, viterbi_filter.rs), the null and bias filter
+    /// scores in its arithmetic, and its P-values, compared as it compares
+    /// them. The same sequences then pass each stage as in `hmmsearch`.
+    ///
+    /// An overflowed filter score is plus infinity, whose P-value is zero:
+    /// the sequence passes. A sequence whose MSV score, against the bias
+    /// filter score, already meets the Viterbi threshold skips the Viterbi
+    /// filter, as in HMMER.
+    fn run_hmmer_filters(mut self) -> ControlFlow<SearchReport, TargetRun<'w, 's, PassedFilters>> {
+        let engine = &mut self.worker.engine;
+        let ev_params = &self.worker.state.profile.ev_params;
+        let residues = &self.sequence.residues;
+        let length = self.sequence_length;
+        let om = engine.oprofile.as_ref().unwrap();
+
+        let msv_score = msv_filter::msv_filter_with(
+            residues,
+            length,
             om,
-            &mut self.worker.engine.msv_bound_row8,
+            &mut engine.msv_bound_row8,
+            &mut engine.msv_filter_row,
         );
-        self.trace.msv_score_lower_bound = lower_bound;
-        let Some(msv_score) = lower_bound else {
-            // No cell rose above the begin state: far below any threshold.
-            return ControlFlow::Break(self.trace.into_filtered_report(FilterReason::Msv));
+        self.trace.msv_filter_score = Some(msv_score);
+        let msv_pvalue = |reference: f32| {
+            evalues::gumbel_survival(
+                evalues::filter_bit_score(msv_score, reference),
+                ev_params[EvParam::MsvMu.idx()],
+                ev_params[EvParam::MsvLambda.idx()],
+            )
         };
-        // A saturated score passes both filters, as in HMMER: the sequence
-        // scores higher than the cells can count.
-        if msv_score.is_finite() && self.msv_pvalue_of(msv_score, self.null_score) > msv_threshold {
+        let mut pvalue = msv_pvalue(self.null_score);
+        if pvalue > engine.msv_threshold {
             return ControlFlow::Break(self.trace.into_filtered_report(FilterReason::Msv));
         }
-        self.worker.engine.stats.sequences_past_msv += 1;
-        self.worker.engine.stats.residues_past_msv += self.sequence_length as u64;
+        engine.stats.sequences_past_msv += 1;
+        engine.stats.residues_past_msv += length as u64;
 
-        let filter_score = if self.worker.engine.do_biasfilter {
-            let score = self
-                .worker
-                .state
-                .background
-                .filter_score(&self.sequence.residues, self.sequence_length);
+        let filter_score = if engine.do_biasfilter {
+            let score = self.worker.state.background.filter_score(residues, length);
             self.trace.bias_filter_score = Some(score);
-            if msv_score.is_finite() && self.msv_pvalue_of(msv_score, score) > msv_threshold {
+            pvalue = msv_pvalue(score);
+            if pvalue > engine.msv_threshold {
                 return ControlFlow::Break(self.trace.into_filtered_report(FilterReason::Bias));
             }
             score
         } else {
             self.null_score
         };
-        if !filter_score.is_finite() {
-            return ControlFlow::Break(self.trace.into_filtered_report(FilterReason::Bias));
+        engine.stats.sequences_past_bias += 1;
+        engine.stats.residues_past_bias += length as u64;
+
+        if pvalue > engine.viterbi_threshold {
+            let viterbi_score = viterbi_filter::viterbi_filter_with(
+                residues,
+                length,
+                om,
+                &mut engine.viterbi_filter_rows,
+            );
+            self.trace.viterbi_filter_score = Some(viterbi_score);
+            let pvalue = evalues::gumbel_survival(
+                evalues::filter_bit_score(viterbi_score, filter_score),
+                ev_params[EvParam::ViterbiMu.idx()],
+                ev_params[EvParam::ViterbiLambda.idx()],
+            );
+            if pvalue > engine.viterbi_threshold {
+                return ControlFlow::Break(self.trace.into_filtered_report(FilterReason::Viterbi));
+            }
         }
-        self.worker.engine.stats.sequences_past_bias += 1;
-        self.worker.engine.stats.residues_past_bias += self.sequence_length as u64;
-        self.run_late_filters(filter_score)
+        engine.stats.sequences_past_viterbi += 1;
+        engine.stats.residues_past_viterbi += length as u64;
+
+        let forward_raw_score = simd_fwd::forward_filter(residues, length, om).score;
+        self.trace.forward_raw_score = Some(forward_raw_score);
+        let pvalue = evalues::exponential_survival(
+            evalues::filter_bit_score(forward_raw_score, filter_score),
+            ev_params[EvParam::ForwardTau.idx()],
+            ev_params[EvParam::ForwardLambda.idx()],
+        );
+        if pvalue > engine.forward_threshold {
+            return ControlFlow::Break(self.trace.into_filtered_report(FilterReason::Forward));
+        }
+        engine.stats.sequences_past_forward += 1;
+        engine.stats.residues_past_forward += length as u64;
+
+        ControlFlow::Continue(TargetRun {
+            worker: self.worker,
+            sequence: self.sequence,
+            sequence_length: self.sequence_length,
+            null_score: self.null_score,
+            forward_raw_score,
+            domain_result: None,
+            hit: None,
+            trace: self.trace,
+            _phase: PhantomData,
+        })
     }
 
     /// The Viterbi and forward filters.
@@ -678,7 +746,7 @@ impl<'w, 's> TargetRun<'w, 's, Prepared> {
         // skipped; the whole-sequence bound is tighter when it matters.
         let mut upper_bound_is_windowed = false;
         if !do_max && !self.worker.engine.exact {
-            return self.run_fast_msv_filters();
+            return self.run_hmmer_filters();
         }
         if !do_max {
             let om = self.worker.engine.oprofile.as_ref().unwrap();
@@ -933,6 +1001,16 @@ struct SearchEngine {
     // Emission and transition odds for probability-space decoding
     odds_tables: OddsTables,
 
+    // DP rows of HMMER's own MSV and Viterbi filters, reused across
+    // sequences; the single-segment pass of the MSV filter shares the row of
+    // the 8-bit bound
+    msv_filter_row: Vec<u8>,
+    viterbi_filter_rows: viterbi_filter::Rows,
+
+    // The null score of the last target length, which depends on nothing
+    // else
+    null_score_of_length: Option<(usize, f32)>,
+
     // DP rows of the integer over-estimates, reused across sequences
     msv_bound_row8: Vec<i8>,
     msv_blocks8: int_msv::Blocks<i8>,
@@ -963,6 +1041,9 @@ impl SearchEngine {
             domain_workspace: DomainWorkspace::new(),
             oprofile: None,
             odds_tables: OddsTables::default(),
+            msv_filter_row: Vec::new(),
+            viterbi_filter_rows: viterbi_filter::Rows::default(),
+            null_score_of_length: None,
             msv_bound_row8: Vec::new(),
             msv_blocks8: int_msv::Blocks::default(),
             msv_bound_row16: Vec::new(),
@@ -1155,7 +1236,14 @@ impl SearchEngine {
             om.reconfigure_length(sequence_length);
         }
 
-        background.null_one(digital_sequence, sequence_length)
+        match self.null_score_of_length {
+            Some((length, score)) if length == sequence_length => score,
+            _ => {
+                let score = background.null_one(digital_sequence, sequence_length);
+                self.null_score_of_length = Some((sequence_length, score));
+                score
+            }
+        }
     }
 
     fn run_viterbi_filter(
@@ -1179,12 +1267,6 @@ impl SearchEngine {
                 let p_bound = Self::viterbi_pvalue(profile, (bound - null_score) / LOG2);
                 if p_bound > self.viterbi_threshold {
                     return None;
-                }
-                if !self.exact {
-                    // The bound stands in for the score: the sequence passes.
-                    self.stats.sequences_past_viterbi += 1;
-                    self.stats.residues_past_viterbi += sequence_length as u64;
-                    return Some(bound);
                 }
             }
         }
@@ -1511,12 +1593,8 @@ mod tests {
         let report = worker.search(&sequence).unwrap();
         assert_eq!(report.trace.sequence_length, 32);
         assert!(report.trace.null_score.is_some());
-        assert!(
-            report.trace.msv_raw_score.is_some()
-                || report.trace.msv_score_bound.is_some()
-                || report.trace.msv_score_lower_bound.is_some()
-                || report.trace.filter_reason == Some(FilterReason::Msv)
-        );
+        // The default policy scores every sequence with HMMER's MSV filter.
+        assert!(report.trace.msv_filter_score.is_some());
         match report.outcome {
             SearchOutcome::Filtered(_) | SearchOutcome::Hit(_) => {}
         }
@@ -1630,13 +1708,17 @@ mod tests {
             &sequence,
         );
 
-        // The default policy decides the MSV filters with the 8-bit lower
-        // bound and never computes the exact MSV score; the exact policy
-        // records the upper bound it starts from.
-        assert!(fast.trace.msv_score_lower_bound.is_some());
+        // The default policy decides the MSV filters on the score of
+        // HMMER's MSV filter and never computes the exact MSV score or a
+        // bound on it; the exact policy records the upper bound it starts
+        // from, and never runs HMMER's filter.
+        assert!(fast.trace.msv_filter_score.is_some());
+        assert!(fast.trace.msv_score_lower_bound.is_none());
         assert!(fast.trace.msv_score_bound.is_none());
         assert!(fast.trace.msv_raw_score.is_none());
         assert!(exact.trace.msv_score_bound.is_some());
+        assert!(exact.trace.msv_filter_score.is_none());
+        assert!(exact.trace.viterbi_filter_score.is_none());
 
         let (SearchOutcome::Hit(fast_hit), SearchOutcome::Hit(exact_hit)) =
             (fast.outcome, exact.outcome)

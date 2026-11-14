@@ -6,12 +6,12 @@
 // sequence whose bound fails the MSV threshold would fail the exact filter
 // too. With them going downward it is a lower bound: a sequence whose bound
 // passes would pass the exact filter too. The search pipeline
-// (pipeline/search.rs) uses the bounds two ways. By default the 8-bit lower
-// bound stands in for the score and decides the MSV and bias filters, as
-// HMMER's own rounded filter does, and the exact filter never runs. With
-// `FilterPolicy::exact` the bounds settle only the sequences they can, and
-// the exact filter scores the rest, so the decisions are those of the exact
-// score.
+// (pipeline/search.rs) uses the bounds with `FilterPolicy::exact`: they
+// settle the sequences they can, and the exact filter scores the rest, so
+// the decisions are those of the exact score. By default the pipeline
+// decides on the score of HMMER's own MSV filter instead, whose
+// single-segment pass is the plain recurrence below with HMMER's table
+// (`largest_cell`, msv_filter.rs).
 //
 // Single segments. An MSV path visits the model in one or more segments,
 // diagonal runs of match states. With tloop the N/C/J self-loop score,
@@ -48,9 +48,10 @@
 // processor overlaps consecutive rows freely.
 //
 // Plain rows. With 8-bit cells the cumulative delta grows by at most one
-// unit a row for all but the shortest sequences, and the bound the search
-// decides its first filter with needs neither a starting row nor a record
-// of blocks. Such rows have kernels of their own, pared down to the
+// unit a row for all but the shortest sequences, and HMMER's single-segment
+// pass, which the search decides its first filter with, has no delta at
+// all; neither it nor a lower bound needs a starting row or a record of
+// blocks. Such rows have kernels of their own, pared down to the
 // additions and maxima: a cursor finds the emissions of a row in four
 // instructions, a row of up to 24 vectors is updated in its registers from
 // the last vector down, so that no cell has to be moved aside, and a longer
@@ -708,6 +709,44 @@ where
     })
 }
 
+/// The largest cell of the recurrence without any growth term,
+///
+///   U(i,k) = U(i-1,k-1) + units(x_i,k),
+///
+/// saturating, the floor being the begin state: in units above the begin
+/// state, or `None` when a cell reached the top of its range. `units` holds
+/// `kp` rows of `q` vectors of `N` lanes, striped as a [`Table`] is.
+///
+/// This is the recurrence of HMMER's SSV filter (msv_filter.rs), which adds
+/// one signed byte to each cell and lets the saturation at the bottom stand
+/// for the begin state; it runs on the kernels of the bounds above, which do
+/// the same with one more table for the rows where their delta grows.
+pub fn largest_cell<T, const N: usize, K>(
+    dsq: &[u8],
+    units: &[T],
+    kp: usize,
+    q: usize,
+    m_row: &mut Vec<T>,
+) -> Option<i64>
+where
+    T: Unit,
+    K: Kernels,
+    Simd<T, N>: SimdInt<Scalar = T> + SimdOrd,
+{
+    let (vectors, _) = units.as_chunks::<N>();
+    assert!(vectors.len() >= kp * q, "emission table too short");
+    let emissions = Emissions {
+        vectors,
+        vectors_plus_one: vectors,
+        kp,
+        q,
+        delta_step: 0,
+        raise_after: false,
+        growth_vector: false,
+    };
+    K::best_segment_of::<T, N>(dsq, 0..dsq.len(), None, &emissions, m_row, None)
+}
+
 /// Collects the block-wise results of a pass.
 pub struct Recorder<'a, T: Unit> {
     blocks: &'a mut Blocks<T>,
@@ -1193,9 +1232,15 @@ impl<T: Unit, const N: usize> Emissions<'_, T, N> {
     /// sequences are, with 8-bit cells; [`RowCursor`] then finds a row's
     /// emissions in a few instructions.
     fn plain_rows(&self, dsq: &[u8]) -> bool {
+        // The largest residue code, not `all`: this runs for every sequence
+        // and every profile, and a reduction is vectorised where a search
+        // that stops at the first match is not.
+        let largest = dsq
+            .iter()
+            .fold(0u8, |largest, &residue| largest.max(residue));
         !self.growth_vector
             && self.delta_step < 1 << DELTA_FRACTION_BITS
-            && dsq.iter().all(|&residue| usize::from(residue) < self.kp)
+            && usize::from(largest) < self.kp
     }
 }
 

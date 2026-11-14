@@ -55,6 +55,50 @@ impl BiasFilterHmm {
     }
 }
 
+/// `a * b + c` with a single rounding.
+///
+/// HMMER writes its null-model arithmetic as plain C expressions, which a
+/// compiler may contract: the arm64 build of HMMER 3.4 (Homebrew) fuses the
+/// products that feed a sum, an x86-64 build without FMA does not, and the
+/// two differ in the last bit of some scores. This port follows the arm64
+/// build, as striped_forward.rs does, and gives the same bits on every
+/// target. Where the baseline has no fused instruction, the product is taken
+/// exactly in double precision and the sum rounded to odd before it is
+/// narrowed, which is the correctly rounded single-precision result (Boldo
+/// and Melquiond, "Emulation of a FMA and correctly rounded sums", 2008) at
+/// a fraction of the cost of a software `fmaf`.
+#[inline(always)]
+pub fn fused_mul_add(a: f32, b: f32, c: f32) -> f32 {
+    if cfg!(target_arch = "aarch64") {
+        a.mul_add(b, c)
+    } else {
+        fused_mul_add_by_odd_rounding(a, b, c)
+    }
+}
+
+/// [`fused_mul_add`] without a fused instruction.
+#[inline(always)]
+fn fused_mul_add_by_odd_rounding(a: f32, b: f32, c: f32) -> f32 {
+    // Exact: two 24-bit significands make at most 48 bits.
+    let product = f64::from(a) * f64::from(b);
+    let addend = f64::from(c);
+    let sum = product + addend;
+    // The error of the sum, exactly (Knuth's two-sum).
+    let rest = sum - product;
+    let error = (product - (sum - rest)) + (addend - rest);
+    let mut bits = sum.to_bits();
+    if error != 0.0 && sum.is_finite() && bits & 1 == 0 {
+        // The exact sum lies between `sum` and its neighbour on the side of
+        // the error; of the two, the neighbour has the odd significand.
+        if (error > 0.0) == (sum > 0.0) {
+            bits += 1;
+        } else {
+            bits -= 1;
+        }
+    }
+    f64::from_bits(bits) as f32
+}
+
 /// The null (background) model.
 ///
 /// Corresponds to P7_BG in the C code.
@@ -112,10 +156,16 @@ impl BackgroundModel {
     }
 
     /// Set the geometric null model length distribution to mean of L residues.
+    ///
+    /// As `p7_bg_SetLength()`, this sets both transitions out of the normal
+    /// state of the bias filter: the chance of entering a biased stretch
+    /// follows the target length too.
     pub fn set_length(&mut self, sequence_length: usize) {
         self.null1_transition_prob = sequence_length as f32 / (sequence_length as f32 + 1.0);
         self.bias_filter_hmm
             .set_transition(0, 0, self.null1_transition_prob);
+        self.bias_filter_hmm
+            .set_transition(0, 1, 1.0 - self.null1_transition_prob);
     }
 
     /// Calculate the null1 lod score for a digital sequence.
@@ -123,9 +173,13 @@ impl BackgroundModel {
     /// Because the residue composition in null1 background is the same as the
     /// background used to calculate residue scores in profiles, all we
     /// have to do here is score null model transitions.
+    ///
+    /// `p7_bg_NullOne()` works this out in double precision, the product and
+    /// the sum fused in HMMER's arm64 build (see [`fused_mul_add`]), and
+    /// rounds the result to single precision.
     pub fn null_one(&self, _digital_sequence: &[Dsq], sequence_length: usize) -> f32 {
-        sequence_length as f32 * self.null1_transition_prob.ln()
-            + (1.0 - self.null1_transition_prob).ln()
+        let p1 = f64::from(self.null1_transition_prob);
+        f64::from(sequence_length as f32).mul_add(p1.ln(), (1.0 - p1).ln()) as f32
     }
 
     /// Set the bias filter model using model composition.
@@ -175,15 +229,15 @@ impl BackgroundModel {
         self.bias_filter_hmm.set_transition(1, 2, 1.0);
         self.bias_filter_hmm.initial_state_probs = [0.999, 0.001];
 
-        // Configure canonical emission odds relative to the null1 background.
+        // `esl_hmm_Configure()`: emission odds relative to the null1
+        // background. HMMER takes the composition as the profile gives it,
+        // without normalising it.
         for (residue, &composition_probability) in compo.iter().take(canonical_size).enumerate() {
             let background = self.residue_frequencies[residue];
-            let normal_odds = if background > 0.0 { 1.0 } else { 0.0 };
-            let biased_probability = composition_probability / composition_sum;
-            let biased_odds = if background > 0.0 {
-                biased_probability / background
+            let (normal_odds, biased_odds) = if background > 0.0 {
+                (1.0, composition_probability / background)
             } else {
-                0.0
+                (0.0, 0.0)
             };
             self.bias_filter_hmm
                 .set_emission_odds(0, residue, normal_odds);
@@ -202,25 +256,20 @@ impl BackgroundModel {
             self.bias_filter_hmm.set_emission_odds(state, missing, 1.0);
         }
 
-        // Configure ambiguous residues from their canonical expansions.
+        // Ambiguous residues: the summed probability of their canonical
+        // residues, in each state, over their summed background.
         for residue in (canonical_size + 1)..nonresidue {
             let degeneracy = self.alphabet.degen_row(residue);
-            let denominator: f32 = degeneracy
-                .iter()
-                .zip(self.residue_frequencies.iter())
-                .filter_map(|(&included, &frequency)| included.then_some(frequency))
-                .sum();
-            for state in 0..BIAS_FILTER_STATES {
-                let numerator: f32 = degeneracy
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(canonical, &included)| {
-                        included.then_some(
-                            self.bias_filter_hmm.emission_odds(state, canonical as Dsq)
-                                * self.residue_frequencies[canonical],
-                        )
-                    })
-                    .sum();
+            let mut denominator = 0.0f32;
+            let mut numerators = [0.0f32; BIAS_FILTER_STATES];
+            for (canonical, &included) in degeneracy.iter().take(canonical_size).enumerate() {
+                if included {
+                    numerators[0] += self.residue_frequencies[canonical];
+                    numerators[1] += compo[canonical];
+                    denominator += self.residue_frequencies[canonical];
+                }
+            }
+            for (state, numerator) in numerators.into_iter().enumerate() {
                 self.bias_filter_hmm.set_emission_odds(
                     state,
                     residue,
@@ -240,6 +289,14 @@ impl BackgroundModel {
     ///
     /// The HMM itself is conditional on sequence length, so the same geometric
     /// length term as null1 is added after the Forward calculation.
+    ///
+    /// The bias filter compares this score with a threshold many real hits
+    /// sit at, so the arithmetic is HMMER's, operation for operation:
+    /// `esl_hmm_Forward()` on single-precision cells, each row divided by
+    /// its largest cell, whose logarithm is taken in double precision and
+    /// summed in single precision, then the length term of
+    /// `p7_bg_FilterScore()`. Products that feed a sum are fused, as in
+    /// HMMER's arm64 build (see [`fused_mul_add`]).
     pub fn filter_score(&self, digital_sequence: &[Dsq], sequence_length: usize) -> f32 {
         if sequence_length == 0 {
             return self.null_one(digital_sequence, sequence_length);
@@ -248,45 +305,59 @@ impl BackgroundModel {
             sequence_length <= digital_sequence.len(),
             "sequence length exceeds digital sequence storage"
         );
+        let hmm = &self.bias_filter_hmm;
+        let ln = |value: f32| f64::from(value).ln() as f32;
+        // HMMER divides by a largest cell of zero and carries the resulting
+        // NaN through the filters, which then let the sequence pass; minus
+        // infinity does the same here.
+        let usable = |scale: f32| scale > 0.0 && scale.is_finite();
 
         let first = digital_sequence[0];
         let mut previous = [
-            self.bias_filter_hmm.initial_state_probs[0]
-                * self.bias_filter_hmm.emission_odds(0, first),
-            self.bias_filter_hmm.initial_state_probs[1]
-                * self.bias_filter_hmm.emission_odds(1, first),
+            hmm.emission_odds(0, first) * hmm.initial_state_probs[0],
+            hmm.emission_odds(1, first) * hmm.initial_state_probs[1],
         ];
         let mut scale = previous[0].max(previous[1]);
-        if scale <= 0.0 || !scale.is_finite() {
+        if !usable(scale) {
             return f32::NEG_INFINITY;
         }
         previous.iter_mut().for_each(|value| *value /= scale);
-        let mut forward_score = scale.ln();
+        let mut forward_score = ln(scale);
 
+        // Transitions into each state, from the normal and the biased one.
+        let into = [
+            [hmm.transition(0, 0), hmm.transition(1, 0)],
+            [hmm.transition(0, 1), hmm.transition(1, 1)],
+        ];
         for &residue in &digital_sequence[1..sequence_length] {
             let mut current = [0.0f32; BIAS_FILTER_STATES];
             for (state, value) in current.iter_mut().enumerate() {
-                *value = (previous[0] * self.bias_filter_hmm.transition(0, state)
-                    + previous[1] * self.bias_filter_hmm.transition(1, state))
-                    * self.bias_filter_hmm.emission_odds(state, residue);
+                let [from_normal, from_biased] = into[state];
+                *value = fused_mul_add(previous[1], from_biased, previous[0] * from_normal)
+                    * hmm.emission_odds(state, residue);
             }
 
             scale = current[0].max(current[1]);
-            if scale <= 0.0 || !scale.is_finite() {
+            if !usable(scale) {
                 return f32::NEG_INFINITY;
             }
             current.iter_mut().for_each(|value| *value /= scale);
-            forward_score += scale.ln();
+            forward_score += ln(scale);
             previous = current;
         }
 
-        let end_probability = previous[0] * self.bias_filter_hmm.transition(0, 2)
-            + previous[1] * self.bias_filter_hmm.transition(1, 2);
-        if end_probability <= 0.0 || !end_probability.is_finite() {
+        let end_probability = fused_mul_add(
+            previous[1],
+            hmm.transition(1, 2),
+            previous[0] * hmm.transition(0, 2),
+        );
+        if !usable(end_probability) {
             return f32::NEG_INFINITY;
         }
+        forward_score += ln(end_probability);
 
-        forward_score + end_probability.ln() + self.null_one(digital_sequence, sequence_length)
+        let p1 = self.null1_transition_prob;
+        fused_mul_add(sequence_length as f32, p1.ln(), forward_score) + (1.0 - p1).ln()
     }
 
     /// Dump the background model for debugging.
@@ -344,13 +415,89 @@ mod tests {
         background
             .set_filter(80, &background.residue_frequencies.clone())
             .unwrap();
-        let switch_probability = background.bias_filter_hmm.transition(0, 1);
         background.set_length(400);
         assert!((background.null1_transition_prob - 400.0 / 401.0).abs() < 1e-6);
         assert!((background.bias_filter_hmm.transition(0, 0) - 400.0 / 401.0).abs() < 1e-6);
+        // `p7_bg_SetLength()` sets both transitions out of the normal state.
+        background.set_length(99);
+        assert_eq!(background.bias_filter_hmm.transition(0, 0), 0.99);
+        assert_eq!(background.bias_filter_hmm.transition(0, 1), 1.0 - 0.99f32);
+        assert!((background.bias_filter_hmm.transition(1, 1) - 10.0 / 11.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_fused_mul_add_by_odd_rounding_is_the_fused_result() {
+        let mut rng = crate::hmmer_core::rng::XorShift64::new(11);
+        let mut draw = |spread: i32| {
+            let sign = if rng.roll(2) == 0 { 1.0f32 } else { -1.0 };
+            let significand = 1.0 + rng.roll(1 << 23) as f32 / (1u32 << 23) as f32;
+            sign * significand * 2.0f32.powi(rng.roll(2 * spread as usize + 1) as i32 - spread)
+        };
+        for round in 0..200_000 {
+            // Near-cancelling sums and far-apart exponents both occur.
+            let spread = if round % 2 == 0 { 2 } else { 40 };
+            let (a, b, c) = (draw(spread), draw(spread), draw(spread));
+            let c = if round % 4 == 0 { -(a * b) } else { c };
+            assert_eq!(
+                fused_mul_add_by_odd_rounding(a, b, c).to_bits(),
+                a.mul_add(b, c).to_bits(),
+                "{a:e} * {b:e} + {c:e}"
+            );
+        }
+        // Halfway cases of the double-precision sum: the product's low bits
+        // decide which way the single-precision result rounds.
+        for (a, b, c) in [
+            (1.0 + f32::EPSILON, 1.0 + f32::EPSILON, 0.5 * f32::EPSILON),
+            (1.0 + f32::EPSILON, 1.0 - f32::EPSILON, -1.0),
+            (3.0, 1.0 / 3.0, -1.0),
+            (0.1, 10.0, -1.0),
+        ] {
+            assert_eq!(
+                fused_mul_add_by_odd_rounding(a, b, c).to_bits(),
+                a.mul_add(b, c).to_bits()
+            );
+        }
+    }
+
+    /// The bias filter score in HMMER's order of operations, written out
+    /// for a three-residue sequence.
+    #[test]
+    fn test_filter_score_follows_the_operations_of_esl_hmm_forward() {
+        let abc = Alphabet::amino();
+        let mut background = BackgroundModel::new(&abc);
+        let mut composition = background.residue_frequencies.clone();
+        composition[0] *= 1.5;
+        composition[1] *= 0.5;
+        background.set_filter(120, &composition).unwrap();
+        let sequence = [0u8, 1, 0];
+        background.set_length(sequence.len());
+
+        let hmm = &background.bias_filter_hmm;
+        let odds = |state: usize, residue: u8| hmm.emission_odds(state, residue);
+        let ln = |value: f32| f64::from(value).ln() as f32;
+        let mut cells = [0.999f32 * odds(0, 0), 0.001f32 * odds(1, 0)];
+        let mut score = 0.0f32;
+        for &residue in &sequence[1..] {
+            let scale = cells[0].max(cells[1]);
+            score += ln(scale);
+            cells = [cells[0] / scale, cells[1] / scale];
+            cells = [
+                cells[1].mul_add(hmm.transition(1, 0), cells[0] * hmm.transition(0, 0))
+                    * odds(0, residue),
+                cells[1].mul_add(hmm.transition(1, 1), cells[0] * hmm.transition(0, 1))
+                    * odds(1, residue),
+            ];
+        }
+        let scale = cells[0].max(cells[1]);
+        score += ln(scale);
+        score += ln(cells[1] / scale + cells[0] / scale);
+        let p1 = 0.75f32;
+        let expected = 3.0f32.mul_add(p1.ln(), score) + (1.0 - p1).ln();
+
+        assert_eq!(hmm.transition(0, 1), 0.25);
         assert_eq!(
-            background.bias_filter_hmm.transition(0, 1),
-            switch_probability
+            background.filter_score(&sequence, sequence.len()).to_bits(),
+            expected.to_bits()
         );
     }
 

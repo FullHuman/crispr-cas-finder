@@ -101,6 +101,25 @@ The alignment that tells a tandem repeat from an array
 substitution scores and gap penalties MUSCLE 3.8 applies to nucleotides, which
 are the BLASTZ defaults. No MUSCLE or EMBOSS code is included.
 
+## MUSCLE portions
+
+The module crispr-cas-finder-core/src/muscle5 is a Rust port of the `-align`
+command of MUSCLE 5.3, which CRISPRCasFinder runs to align the repeats and the
+spacers of a locus: reading and dereplication of the sequences, the pair
+hidden Markov model and the posterior probabilities of every pair, the guide
+tree, the consistency transformation, the progressive alignment and its
+refinement. The module names the source file each part follows. The scores of
+the pair model and the rounding of each operation are those of the released
+binary `muscle 5.3.osxarm64`.
+
+Source: https://github.com/rcedgar/muscle
+Reference revision: 6d49a2f (MUSCLE 5.3)
+License: GNU General Public License version 3 (see LICENSE).
+
+```text
+MUSCLE (C) Copyright 2004-2021 Robert C. Edgar.
+```
+
 ## HMMER and Easel portions
 
 The internal modules src/hmmer_core and src/hmmer_io include Rust ports of

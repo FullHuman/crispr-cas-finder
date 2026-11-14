@@ -2,9 +2,11 @@
 
 This is an independent experimental Rust implementation inspired by
 CRISPRCasFinder. APIs and detection behavior may change. Tests establish
-specific regression cases and consistency across runtimes, and a first
-comparison with CRISPRCasFinder on 72 inputs is summarised below. Sensitivity
-and specificity against an independent truth set have not been measured.
+specific regression cases and consistency across runtimes, and a comparison
+with CRISPRCasFinder on 72 inputs is summarised below: on those inputs the two
+report the same arrays and the same Cas systems, apart from the differences
+listed here as deliberate. Sensitivity and specificity against an independent
+truth set have not been measured.
 
 ## Supported behavior and known differences
 
@@ -30,14 +32,33 @@ and specificity against an independent truth set have not been measured.
 - Repeats within 1.5 kb of each other form one locus and are searched with one
   consensus repeat, so of two unrelated arrays that close only one is reported.
   This is also what CRISPRCasFinder does.
-- Whether the spacers of a locus are too alike is decided on an alignment made
-  with the scores MUSCLE gives nucleotides, counting only bases that face each
-  other, as BioPerl does for CRISPRCasFinder. For a locus of two spacers the
-  result is that of MUSCLE 3.8, on all 144 such loci of the comparison. With
-  more spacers the alignment is a center-star alignment, not MUSCLE's
-  progressive one: of the 509 such loci, 8 fall on the other side of the 60%
-  limit. The test for a single spacer replaces EMBOSS `needle` and gave its
-  verdict on all 301 repeat and spacer pairs of the comparison.
+- CRISPRCasFinder aligns the spacers and the repeats of a locus with MUSCLE
+  and reads off those alignments whether the spacers are too alike for an
+  array (60% identity, counting only bases that face each other, as BioPerl
+  does) and the scores behind the evidence levels. The alignments here are
+  those of MUSCLE 5.3, the version CRISPRCasFinder 4.3.2 asks for, computed by
+  a Rust port of its `-align` command: the same rows as the binary
+  `muscle 5.3.osxarm64` writes for all 975 alignments the comparison below
+  triggers and for about 6,000 generated ones. The version matters: with
+  MUSCLE 3.8 on its path the original reports 448 arrays on those inputs, with
+  MUSCLE 5.3 it reports 485, because MUSCLE 5 finds the spacers of borderline
+  loci less alike. So does the C library: MUSCLE draws the partitions of its
+  refinement from `rand()` without seeding it, and the port follows the
+  sequence of the macOS library. A MUSCLE built for Linux draws another
+  sequence and may align a few inputs in a hundred differently; no Linux
+  binary was compared. The test for a single spacer replaces EMBOSS `needle`
+  and gave its verdict on all 301 repeat and spacer pairs of the comparison.
+- Aligning as MUSCLE does costs what MUSCLE's method costs. The time grows
+  with the square of the number of distinct spacers of a locus for their
+  pairwise alignments, and with its cube for the consistency step. On an M1
+  Max an array of a hundred spacers takes about 1.3 s on one thread and 0.2 s
+  on ten: Saccharolobus solfataricus P2, with six such arrays, is searched for
+  arrays in 0.8 s where version 0.1.0 took 0.06 s, and E. coli K-12 in 0.08 s
+  as before. Three hundred spacers take about 23 s on one thread and 3.5 s on
+  ten. The sums of the method are fused multiply-adds; where the processor
+  instruction is not available to the build, in WebAssembly and in x86-64
+  builds made without `+fma`, they are computed exactly another way and the
+  alignment takes about three times as long.
 - Only A, C, G and T match between copies of a repeat. N and the other
   ambiguity codes match nothing, so a run of N is never a repeat.
 - Case is ignored: a sequence gives the same arrays in uppercase, in lowercase
@@ -45,12 +66,20 @@ and specificity against an independent truth set have not been measured.
   them in, as CRISPRCasFinder does; the consensus repeat is in uppercase.
 - Evidence levels follow the CRISPRCasFinder rules: level 1 for at most three
   spacers, level 2 when repeat conservation is below 70, level 3 when more than
-  8% of aligned spacer columns are identical, and level 4 otherwise. Spacers are
-  aligned by an internal center-star aligner, not MUSCLE, and the repeats of an
-  array, which all have the same length, are compared without gaps. Scores near
-  a threshold can therefore differ from upstream: unrelated spacers that MUSCLE
-  lines up by chance leave an array at level 4 here and level 3 there, and a
-  repeat carrying an insertion or deletion lowers repeat conservation more here.
+  8% of aligned spacer columns are identical, and level 4 otherwise. Repeats
+  and spacers are aligned as above, the repeats too although they all have one
+  length, so the two scores are those of the original: on the 485 arrays of
+  the comparison, the same level and the same two scores to the two decimals
+  it prints.
+- The orientation of an array follows CRISPRCasFinder: an orientation recorded
+  for the repeat in `Repeat_List.csv` goes first; otherwise the leader is on
+  the side whose 100 bp flank is richer in A and T, when that flank is also
+  richer than the sequence as a whole. A flank counts only when all its bases
+  exist, and a flank without an A or a T, a run of N for instance, leaves the
+  orientation unknown. One thing is not followed: when the identifier of a
+  sequence ends in a range, as in `NC_000913.3:1-4641652`, BioPerl takes the
+  range for coordinates, the original finds no right flank and reports every
+  array of that sequence as of unknown orientation.
 - `--force-detection` and `--better-detect-truncated` are reimplemented rather
   than copied: fostered start/end patterns are IUPAC codes (`.` = any base), and
   truncated detection adds at most one terminal repeat per side.
@@ -58,25 +87,47 @@ and specificity against an independent truth set have not been measured.
   than 100 kb are predicted in metagenomic mode, as in CRISPRCasFinder;
   `--auto-metagenome-below 0` disables this. A GFF3 annotation and protein FASTA
   can be supplied instead (`--gff`, `--faa`). Prokka is not supported.
-- Cas detection uses an internal Rust HMMER implementation. Bit scores can
-  differ from HMMER 3.4 by a few tenths of a bit and, rarely, one domain is
-  reported where `hmmsearch` reports two. Either can matter for a hit sitting
-  exactly on a threshold, and the second can change which of two related
-  profiles is a protein's best match, which in turn can change the systems
-  found around it.
-- By default the HMM search decides its MSV and bias filters with an 8-bit
-  lower bound on the MSV score (within about half a nat of it), its Viterbi
-  filter with a 16-bit upper bound on the Viterbi score, and decodes posterior
-  probabilities in probability space, as HMMER itself does. A sequence whose
-  exact MSV score sits within half a nat of the filter threshold can be
-  dropped that HMMER's own filter would also round away, and bit scores can
-  move by a few tenths of a percent through the composition correction.
-  `--exact-filters` restores the exact single-precision filter scores and the
-  log-space decoder of earlier versions: identical hits on the 28 genomes
-  checked, at about 1.8 times the search time. On the E. coli K-12 proteome
-  (4318 proteins) and the 535 CasFinder 3.1 profiles, one thread of an M1 Max
-  searches in 7.9 s against 9.8 s for `hmmsearch` 3.4 and 13.9 s with
-  `--exact-filters`; with every core, 1.6 s of wall time against 5.3 s for
+- Cas detection uses an internal Rust HMMER implementation, which follows
+  `hmmsearch` 3.4 stage by stage. It decides the MSV, bias and Viterbi filters
+  on the scores HMMER's own filters return, in bytes and 16-bit words with
+  their rounding and overflow rules, computes the profile, the null score and
+  the bias filter score in HMMER's arithmetic, and resolves a stretch of a
+  protein that may hold several domains the way HMMER does, by clustering 200
+  tracebacks sampled with HMMER's random number generator and seed. On the
+  proteins of E. coli K-12 and of the 21 genomes of `benchmarks/panel.tsv`,
+  searched with the 535 CasFinder 3.1 profiles, as many sequences pass each of
+  the four filters as in `hmmsearch` for every profile and every proteome
+  (11,770 searches), and the two report the same 7727 protein and profile
+  pairs, with the same number of domains, the same alignment coordinates, and
+  domain scores within 0.06 bit of the ones `hmmsearch` prints to a tenth of a
+  bit. One pair differs beyond that, a hit of -36.7 bits that no threshold
+  keeps: its envelope ends two residues later and its domain scores 0.6 bit
+  more. With seed 7 in both tools, the 439 pairs of Thermococcus kodakarensis
+  agree in the same way.
+- That comparison is with the arm64 build of HMMER on macOS, and it holds on
+  that platform. Where a score hangs on the last bit of a single-precision
+  number, HMMER itself depends on how it was built: its arm64 build fuses some
+  multiplications with the addition that follows, which this implementation
+  does on every platform, and it reads profiles and scores the bias filter
+  with the C library's `expf` and `logf`, which macOS does not round as other
+  systems do. On another system a profile's probabilities can differ in their
+  last bit from those `hmmsearch` computes on macOS, and a hit sitting exactly
+  on a threshold can fall on the other side of it.
+- By default the HMM search decodes posterior probabilities in probability
+  space, as HMMER itself does. `--exact-filters` decides the MSV, bias and
+  Viterbi filters on exact single-precision scores instead of the scores of
+  HMMER's filters and decodes in log space, as earlier versions did. It takes
+  about twice the time and does not give the hits of `hmmsearch`: exact
+  scores let other sequences through, and the log-space decoder rounds
+  posterior probabilities differently, so that a region can begin or end a
+  residue away from HMMER's and is then sampled differently. On the 22
+  proteomes above it reports 7757 pairs, 7592 of them among the 7727 of
+  `hmmsearch`; 8 of those differ in their number of domains and 514 in a
+  domain score by more than 0.05 bit. On E. coli K-12 (4318 proteins) with the
+  535 CasFinder 3.1 profiles, a run of the tool on one thread of an M1 Max
+  takes 6.6 s, gene prediction and array detection included, against 9.1 s
+  for `hmmsearch` 3.4 on the proteins alone, and 13.1 s with
+  `--exact-filters`; with every core, 1.0 s of wall time against 4.6 s for
   `hmmsearch --cpu 10`.
 - Two generations of Cas models are supported. The bundled default is CasFinder
   2.0.3. CasFinder 3 packages (MacSyFinder 2 format) are loaded from a directory
@@ -97,6 +148,10 @@ and specificity against an independent truth set have not been measured.
   MacSyFinder in unordered mode for metagenomes and for sequences shorter than
   100 kb, which does not produce the file it reads Cas systems from; this
   project reports Cas systems on those sequences.
+- CRISPRCasFinder reads the systems of MacSyFinder's best solution by number,
+  from 1 to their count, while MacSyFinder numbers them among all its
+  candidates: a solution holding systems 1, 3 and 4 is reported as system 1
+  and an empty entry. This project reports every system of the solution.
 - An array is reported near a Cas system when the distance between them is at
   most `--vicinity` bp. Upstream instead tests whether the array boundary
   shifted by the vicinity falls inside the system, so the two lists can differ.
@@ -124,10 +179,11 @@ and specificity against an independent truth set have not been measured.
 | --- | --- | --- | --- |
 | E. coli NC_000913.3 arrays | Tracked `crispr-cas-finder-cli/data/ecoli.fasta`; default detection options; the five arrays CRISPRCasFinder 4.2.30 reports, four of which CRISPRCasFinder's `CRISPR_crisprdb.csv` lists for NC_000913 with the same coordinates | Exact consensus repeat, evidence level, end and start of every repeat of each array, and that nothing else is reported | One genome; frozen expectations, not a fresh upstream run |
 | Repeat search versus Vmatch 2.3.1 | The 72 inputs of the comparison below; `benchmarks/vmatch_oracle.py` | Every repeat of every sequence: same two copies, none missing, none added (5,922 repeats) | Run locally, not in CI, where Vmatch is not available. Unit tests freeze Vmatch's output for small synthetic cases |
-| Spacer tests versus MUSCLE and EMBOSS | Spacer sets and repeat and spacer pairs taken from the genomes of the comparison | Spacer identity as MUSCLE 3.8 and BioPerl give it for three loci; share of gaps as EMBOSS `needle` 6.6 gives it for four pairs | Frozen values in unit tests. The wider agreement was measured locally: the same identity for all 144 loci of two spacers, the same side of the limit for 501 of 509 loci with three spacers or more, and the same verdict for 301 of 301 single-spacer pairs |
+| Alignments versus MUSCLE 5.3 | 52 sets of repeats or spacers frozen in `crispr-cas-finder-core/src/muscle5/frozen_cases.txt`; with `MUSCLE5_BIN` set, generated inputs against the binary | Every row of every alignment, with and without hardware fused multiply-add | The frozen cases run in CI. The wider agreement was measured locally against `muscle 5.3.osxarm64 [6d49a2f]`: all 975 alignments of the comparison below and about 6,000 generated inputs of 2 to 80 sequences, 500 of them also in a WebAssembly build. Not compared with a Linux or x86-64 build of MUSCLE |
+| Single-spacer test versus EMBOSS | Repeat and spacer pairs taken from the genomes of the comparison | Share of gaps as EMBOSS `needle` 6.6 gives it for four pairs | Frozen values in unit tests. The wider agreement was measured locally: the same verdict for 301 of 301 pairs |
 | E. coli native/browser comparison | Same FASTA; genetic code 11; circular topology; SubTyping definitions; bundled CasFinder 2.0.3 | Report equality across CLI, Chromium, WebKit, threaded and sequential search, with a 1e-4 relative tolerance on floating-point values between native and browser; baseline five arrays and one type I-E system | Agreement among builds of this implementation on one genome |
 | CasFinder 3.1.0 versus MacSyFinder 2.1.6 | Eight bacterial genomes (E. coli K-12, three Erwinia amylovora, four other Enterobacterales, up to six sequences each); proteins predicted by this project; MacSyFinder run with the options CRISPRCasFinder passes | Identical systems: model, proteins, matched profiles, score and wholeness. HMM hits identical except one domain boundary | Run locally, not in CI, because the models cannot be redistributed. One genus-level clade; six systems of type I-E or I and two genomes without a system. An opt-in test (`CASFINDER3_DIR`) repeats the E. coli case |
-| Comparison with CRISPRCasFinder 4.3.2 | 51 inputs of 1 to 376 contigs (E. coli K-12, an Acetobacter plasmid and 49 enterobacterial assemblies) and 21 reference genomes of bacteria and archaea (`benchmarks/panel.tsv`); both tools with CasFinder 3.1.0; scripts and method in `benchmarks/` | Arrays and Cas systems of the two outputs, paired by overlap | Run locally on 2026-10-13, not in CI, the original with MacSyFinder 2.1.6 and HMMER 3.4. Of the original's 448 arrays, 439 are reported, each with the same start and the same number of spacers: all 161 of level 4, all 8 of level 3, all 7 of level 2 and 263 of 272 of level 1. For 421 the end is the same too; the other 18 are first parts of a divided locus, which the original reports one base too long. Nine level-1 arrays of the original are not reported and three level-2 arrays are reported here only; all twelve are loci of three spacers or more on the other side of the spacer similarity limit. The level differs for nine arrays: eight of level 3 are level 4 here and one of level 4 is level 2. Of the 48 Cas systems in the original's report, 47 are reported with the same subtype, 46 with the same genes at the same coordinates and 42 with every gene matched to the same profile; a type I-B system of T. kodakarensis is missed because of the domain difference described above |
+| Comparison with CRISPRCasFinder 4.3.2 | 51 inputs of 1 to 376 contigs (E. coli K-12, an Acetobacter plasmid and 49 enterobacterial assemblies) and 21 reference genomes of bacteria and archaea (`benchmarks/panel.tsv`); both tools with CasFinder 3.1.0; scripts and method in `benchmarks/` | Arrays and Cas systems of the two outputs, paired by overlap | Run locally, not in CI: the arrays of the original on 2026-11-14 with MUSCLE 5.3, its Cas systems on 2026-10-13 with MacSyFinder 2.1.6 and HMMER 3.4. The original reports 485 arrays, 303 of level 1, 14 of level 2, one of level 3 and 167 of level 4. All 485 are reported here and no other, each with the same start, consensus repeat, spacers, evidence level, conservation scores, repeat identifier and CRISPRDirection. For 455 the end is the same too; the other 30 are first parts of a divided locus, which the original reports one base past its last repeat. The orientation is the same for 482; the other three are the arrays of E. coli K-12, whose identifier in the tracked file ends in a range (see above). The original reports 48 Cas systems; all 48 are reported here with the same subtype, the same genes at the same coordinates and every gene matched to the same profile. Thirteen more are reported here: nine that MacSyFinder finds inside the original and its Perl script then loses, and four on sequences under 100 kb |
 | HMMER Cas5 oracle | HMMER 3.4 `hmmsearch` frozen output; TIGR01868/Cas5_0_IE versus CP014688.1_298 | Sequence/domain scores, coordinates, bias, and alignment accuracy, with the default and with the exact HMM filters | One independently generated HMM/sequence oracle |
 | HMM filter references | Synthetic profiles and sequences in `hmmer-core/tests/filter_reference.rs` | SIMD filters compared with independent scalar calculations | Algorithmic regression cases, not biological prevalence or accuracy |
 | Python API | Synthetic repeat array and invalid inputs | Installed-wheel file/string API agreement and errors | Binding behavior, not additional biological validation |
@@ -159,6 +215,7 @@ Linux may need Playwright's `--with-deps` option.
 
 The comparison covers twelve Cas subtypes and four genomes without a
 CRISPR-Cas system. It is still small: type IV, most type V and type VI
-subtypes, metagenomes and genomes above 9 Mb are not in it, and it measures
-agreement with CRISPRCasFinder, not accuracy. State the hardware and the
+subtypes, metagenomes and genomes above 9 Mb are not in it, it was run with
+the default options of both tools only, and it measures agreement with
+CRISPRCasFinder, not accuracy. State the hardware and the
 options next to any run time taken from it.

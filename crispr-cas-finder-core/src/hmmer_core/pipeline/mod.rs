@@ -3,6 +3,7 @@ pub use search::FilterPolicy;
 pub mod domain;
 pub mod domaindef;
 pub mod search;
+pub mod spensemble;
 
 // Re-export key types at the pipeline module level
 pub use search::FilterReason;

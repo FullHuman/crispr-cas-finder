@@ -418,13 +418,20 @@ impl Hmm {
         let node_zero_transitions = self.transitions(0);
         mocc[1] = node_zero_transitions[HTransition::MatchToMatch.idx()]
             + node_zero_transitions[HTransition::MatchToInsert.idx()];
-        for canonical_size in 2..=self.num_nodes {
-            let node_transitions = self.transitions(canonical_size - 1);
-            mocc[canonical_size] = mocc[canonical_size - 1]
+        // As `p7_hmm_CalculateOccupancy()`: the first product in single
+        // precision, the second in double precision and fused with the sum
+        // (HMMER's arm64 build; see `background::fused_mul_add`), the result
+        // rounded to single precision. The begin scores of a profile, and
+        // through them the words of the Viterbi filter, follow from these.
+        for node in 2..=self.num_nodes {
+            let node_transitions = self.transitions(node - 1);
+            let stayed = mocc[node - 1]
                 * (node_transitions[HTransition::MatchToMatch.idx()]
-                    + node_transitions[HTransition::MatchToInsert.idx()])
-                + (1.0 - mocc[canonical_size - 1])
-                    * node_transitions[HTransition::DeleteToMatch.idx()];
+                    + node_transitions[HTransition::MatchToInsert.idx()]);
+            mocc[node] = (1.0 - f64::from(mocc[node - 1])).mul_add(
+                f64::from(node_transitions[HTransition::DeleteToMatch.idx()]),
+                f64::from(stayed),
+            ) as f32;
         }
 
         for canonical_size in 1..=self.num_nodes {

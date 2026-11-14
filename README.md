@@ -236,7 +236,11 @@ adds `-cpuM 10`. The speed-up compares the two tools at their defaults, the
 original on one worker and this project on every core. Each figure is one run,
 or the median of three for E. coli K-12 and three other inputs. The scripts,
 every row and the caveats are in [benchmarks/README.md](benchmarks/README.md);
-the Rust rows are of the build at `f6e326f` (2026-11-11).
+the Rust rows are of the build at `f6e326f` (2026-11-11), from before repeats
+and spacers were aligned as MUSCLE 5 aligns them. That adds time on genomes
+with large arrays and has not been measured across the set yet: Saccharolobus
+solfataricus P2, with six arrays of about a hundred spacers, now takes 1.92 s
+on every core where the table says 1.08 s, and E. coli K-12 is unchanged.
 
 **Arrays and Cas systems** (`--cas`), a selection of the 40 genomes:
 
@@ -281,23 +285,26 @@ the number of threads:
 set take 6.1 minutes one after another with the original and 3.2 s here; the
 21 of the panel take 2.3 minutes and 1.2 s.
 
-**Agreement with the original.** Of the original's 448 arrays on these 72
-inputs, 439 are reported here with the same start and the same number of
-spacers: all of evidence levels 2, 3 and 4 and 263 of the 272 of level 1. The
-nine arrays of the original not reported and the three reported only here are
-loci of three spacers or more on the other side of the 60% spacer similarity
-limit. Of the original's 48 Cas systems, 47 are reported with the same
-subtype; 13 more are reported here, 9 of them found by MacSyFinder inside the
-original and then lost by its Perl script, and 4 on sequences under 100 kb,
-where the original reports none. [LIMITATIONS.md](LIMITATIONS.md) goes through
-every difference.
+**Agreement with the original.** With MUSCLE 5.3 on its path, which version
+4.3.2 asks for, the original reports 485 arrays on these 72 inputs. All 485
+are reported here and no other, each with the same start, repeats, spacers,
+evidence level and conservation scores; for 30 of them the original gives an
+end one base past its last repeat. The original reports 48 Cas systems; all 48
+are reported here with the same subtype and the same genes, each matched to
+the same profile. Thirteen more are reported here, 9 of them found by
+MacSyFinder inside the original and then lost by its Perl script, and 4 on
+sequences under 100 kb, where the original reports none.
+[LIMITATIONS.md](LIMITATIONS.md) goes through every difference.
 
 Things to keep in mind:
 
 - Agreement with the original is not accuracy; no independent truth set was
   used.
 - The original ran with MacSyFinder 2.1.6 and HMMER 3.4 rather than the 2.1.2
-  and 3.3.2 it documents, and with Vmatch compiled from source for ARM.
+  and 3.3.2 it documents, and with Vmatch compiled from source for ARM. Its
+  arrays depend on the MUSCLE it finds: with MUSCLE 3.8 it reports 448 of the
+  485, and a MUSCLE built for Linux may align a few loci differently from the
+  macOS one used here.
 - Most figures are single runs on one machine. On Apple silicon the HMM
   kernels run their portable code path; the SSE4.1, AVX2 and AVX-512 paths
   used on x86-64 are not measured here.
