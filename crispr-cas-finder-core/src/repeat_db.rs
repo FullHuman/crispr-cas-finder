@@ -14,6 +14,8 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
+use crate::types::Orientation;
+
 /// Raw `Repeat_List.csv` embedded at compile time.
 static REPEAT_LIST_CSV: &str = include_str!("../data/Repeat_List.csv");
 
@@ -26,6 +28,8 @@ static EMBEDDED: OnceLock<RepeatDatabase> = OnceLock::new();
 struct RepeatEntry {
     id: String,
     crisprdb_count: usize,
+    /// Orientation an expert recorded for this repeat (fourth column).
+    expert_orientation: Option<Orientation>,
 }
 
 /// Known consensus repeats with their IDs, CRISPRdb counts and directions.
@@ -64,9 +68,20 @@ impl RepeatDatabase {
                 .get(2)
                 .and_then(|count| count.trim().parse().ok())
                 .unwrap_or(0);
-            database
-                .by_sequence
-                .insert(sequence, RepeatEntry { id, crisprdb_count });
+            // CRISPRCasFinder reads the orientation off the first letter.
+            let expert_orientation = match columns.get(3).map(|column| column.trim().as_bytes()) {
+                Some([b'F', ..]) => Some(Orientation::Forward),
+                Some([b'R', ..]) => Some(Orientation::Reverse),
+                _ => None,
+            };
+            database.by_sequence.insert(
+                sequence,
+                RepeatEntry {
+                    id,
+                    crisprdb_count,
+                    expert_orientation,
+                },
+            );
         }
         for line in directions.lines() {
             let Some((id, direction)) = line.split_once('\t') else {
@@ -117,6 +132,7 @@ impl RepeatDatabase {
                 repeat_id: entry.id.clone(),
                 crispr_direction: direction_of(entry),
                 crisprdb_count: entry.crisprdb_count,
+                expert_orientation: entry.expert_orientation.clone(),
             };
         }
         // The detector may report the reverse complement of the stored
@@ -128,12 +144,15 @@ impl RepeatDatabase {
                 repeat_id: entry.id.clone(),
                 crispr_direction: flipped_direction_symbol(&direction_of(entry)),
                 crisprdb_count: entry.crisprdb_count,
+                // CRISPRCasFinder looks the repeat up as it is reported only.
+                expert_orientation: None,
             };
         }
         RepeatLookup {
             repeat_id: "Unknown".to_string(),
             crispr_direction: "ND".to_string(),
             crisprdb_count: 0,
+            expert_orientation: None,
         }
     }
 }
@@ -147,6 +166,9 @@ pub struct RepeatLookup {
     pub crispr_direction: String,
     /// Number of CRISPRdb arrays sharing this repeat; 0 if not found.
     pub crisprdb_count: usize,
+    /// Orientation an expert recorded for exactly this sequence, which
+    /// CRISPRCasFinder reports in place of the one read off the flanks.
+    pub expert_orientation: Option<Orientation>,
 }
 
 /// Flip a normalised direction symbol: `"+"` ↔ `"-"`, `"ND"` stays `"ND"`.
@@ -321,18 +343,27 @@ mod tests {
     #[test]
     fn lookup_reports_the_crisprdb_count() {
         let database = RepeatDatabase::parse(
-            "#header\nACGTAC ;R1;7;\nGGGTTT;R2;x;\n",
+            "#header\nACGTAC ;R1;7;\nGGGTTT;R2;x;\nCCCGGA;R3;2;Reverse\n",
             "R1\tF [0.3,0 Confidence: HIGH]\nR2\tR [0,0.3]\n",
         );
-        assert_eq!(database.len(), 2);
+        assert_eq!(database.len(), 3);
         assert_eq!(
             database.lookup("acgtac"),
             RepeatLookup {
                 repeat_id: "R1".into(),
                 crispr_direction: "+".into(),
                 crisprdb_count: 7,
+                expert_orientation: None,
             }
         );
+        // An orientation in the fourth column is read off its first letter,
+        // and only for the sequence as it is listed.
+        assert_eq!(
+            database.lookup("CCCGGA").expert_orientation,
+            Some(Orientation::Reverse)
+        );
+        assert_eq!(database.lookup("TCCGGG").repeat_id, "R3");
+        assert_eq!(database.lookup("TCCGGG").expert_orientation, None);
         // Reverse complement of GGGTTT, stored as reverse: flipped to "+".
         assert_eq!(database.lookup("AAACCC").crispr_direction, "+");
         assert_eq!(database.lookup("AAACCC").crisprdb_count, 0);

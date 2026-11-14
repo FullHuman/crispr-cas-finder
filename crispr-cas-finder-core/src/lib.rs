@@ -387,15 +387,18 @@ fn build_array(
         .map(|h| h.pos1 + h.repeat_length - 1)
         .unwrap_or(0);
 
-    let orientation = infer_orientation_with_global_at(
-        seq,
-        array_start,
-        array_end,
-        params.flank,
-        searched.global_at(),
-    );
-
     let db_entry = repeat_db::lookup_repeat(&best_consensus);
+    // An orientation recorded for the repeat goes before the one the flanks
+    // suggest, as in CRISPRCasFinder.
+    let orientation = db_entry.expert_orientation.unwrap_or_else(|| {
+        infer_orientation_with_global_at(
+            seq,
+            array_start,
+            array_end,
+            params.flank,
+            searched.global_at(),
+        )
+    });
 
     Some(CrisprArray {
         id: String::new(),
