@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-14
+
 On the 72 genomes of the comparison in `benchmarks/`, this version and
 CRISPRCasFinder 4.3.2 now report the same 485 arrays and the same 48 Cas
 systems, down to the spacers, the evidence levels and the profile each gene is
@@ -100,6 +102,18 @@ base too far, and thirteen Cas systems the original loses.
   reported with the same subtype, the same genes at the same coordinates and
   every gene matched to the same profile; version 0.1.0 reported 47 with the
   same subtype and 42 with every gene on the same profile.
+
+### Library
+
+- The command line options, the output files and the Python functions are
+  those of 0.1.0. The Rust API changes in a few places: `muscle5::align` is
+  new, `conservation::align_sequences` returns its alignment and
+  `conservation::align_shifted_copies` is gone; `conservation::array_statistics_with`
+  takes an alignment of the spacers already made; `repeat_db::RepeatLookup`
+  has a new field, `expert_orientation`; in the HMM search, `DomainConfig` has
+  a `seed`, `SearchTrace` has `msv_filter_score` and `viterbi_filter_score`,
+  and `FilterPolicy::exact` now stands against HMMER's own filter scores, not
+  against integer bounds.
 
 ## [0.1.0] - 2026-11-14
 

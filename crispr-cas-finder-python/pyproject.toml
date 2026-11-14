@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "crispr-cas-finder"
-version = "0.1.0"
+version = "0.2.0"
 description = "Detection of CRISPR arrays and Cas systems in prokaryotic genomes"
 readme = "README.md"
 requires-python = ">=3.8"
