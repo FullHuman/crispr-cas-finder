@@ -3,10 +3,13 @@ name = "crispr-cas-finder-cli"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
-description = "CLI for CRISPR-Cas detection"
+description = "Command-line tool that finds CRISPR arrays and Cas systems in prokaryotic genomes"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/FullHuman/crispr-cas-finder"
+homepage = "https://crisprcasfinder.full-human.com"
 readme = "../README.md"
+keywords = ["crispr", "cas", "bioinformatics", "genomics", "cli"]
+categories = ["science::bioinformatics::genomics", "command-line-utilities"]
 
 [dependencies]
 anyhow = "1"

@@ -5,7 +5,7 @@ build-backend = "maturin"
 [project]
 name = "crispr-cas-finder"
 version = "0.1.0"
-description = "Python bindings for crispr-cas-finder-core"
+description = "Detection of CRISPR arrays and Cas systems in prokaryotic genomes"
 readme = "README.md"
 requires-python = ">=3.8"
 license = "GPL-3.0-or-later"
@@ -13,10 +13,19 @@ license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
 authors = [{ name = "crispr-cas-finder contributors" }]
 keywords = ["crispr", "cas", "bioinformatics", "genomics"]
 classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
     "Programming Language :: Python :: 3",
     "Programming Language :: Rust",
     "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "Typing :: Typed",
 ]
+
+[project.urls]
+Homepage = "https://crisprcasfinder.full-human.com"
+Repository = "https://github.com/FullHuman/crispr-cas-finder"
+Issues = "https://github.com/FullHuman/crispr-cas-finder/issues"
+Changelog = "https://github.com/FullHuman/crispr-cas-finder/blob/main/CHANGELOG.md"
 
 [tool.maturin]
 module-name = "crispr_cas_finder"

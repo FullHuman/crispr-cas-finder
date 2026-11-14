@@ -3,10 +3,14 @@ name = "crispr-cas-finder-core"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
-description = "Core library for CRISPR-Cas detection"
+description = "Detection of CRISPR arrays and Cas systems in prokaryotic genomes"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/FullHuman/crispr-cas-finder"
+homepage = "https://crisprcasfinder.full-human.com"
+documentation = "https://docs.rs/crispr-cas-finder-core"
 readme = "../README.md"
+keywords = ["crispr", "cas", "bioinformatics", "genomics", "hmmer"]
+categories = ["science::bioinformatics::genomics", "science::bioinformatics::sequence-analysis"]
 
 [features]
 hmmer-serde = []
