@@ -16,8 +16,8 @@
 //! (GCC 11 with `-O3 -ffast-math` fused multiplications into additions,
 //! turned a division into a multiplication by a reciprocal and reordered
 //! one sum; these were read off the binary's machine code), the pair-HMM
-//! scores the binary computes at start-up ([`tables`]), and the `expf` and
-//! `rand` of the C library it runs against ([`expf`], [`LibcRand`]).
+//! scores the binary computes at start-up (`tables`), and the `expf` and
+//! `rand` of the C library it runs against (`expf`, `LibcRand`).
 //!
 //! The stages, and the MUSCLE source files each follows:
 //!

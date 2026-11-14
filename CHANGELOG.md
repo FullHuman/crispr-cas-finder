@@ -2,6 +2,42 @@
 
 ## [Unreleased]
 
+On the 72 genomes of the comparison in `benchmarks/`, this version and
+CRISPRCasFinder 4.3.2 now report the same 485 arrays and the same 48 Cas
+systems, down to the spacers, the evidence levels and the profile each gene is
+matched to. What still differs is listed in `LIMITATIONS.md` and is deliberate:
+the end of the first part of a divided locus, which the original reports one
+base too far, and thirteen Cas systems the original loses.
+
+### Array detection
+
+- The repeats and the spacers of a locus are aligned as MUSCLE 5.3 aligns
+  them, by a Rust port of its `-align` command (`muscle5`), in place of the
+  center-star alignment used until now. CRISPRCasFinder reads off those
+  alignments whether the spacers of a locus are too alike for an array and the
+  two scores behind evidence levels 2 to 4, so a locus near a threshold now
+  falls on the side the original puts it. The port returns the rows the binary
+  `muscle 5.3.osxarm64` writes for all 975 alignments the 72 genomes trigger
+  and for about 6,000 generated ones.
+- The comparison of 2026-10-13 ran the original with MUSCLE 3.8, although
+  version 4.3.2 asks for MUSCLE 5.1 or later. With MUSCLE 5.3 the original
+  reports 485 arrays on the 72 genomes, not 448, and 8 other evidence levels.
+  Against that, version 0.1.0 reported 442 of the 485, with one level
+  different; this version reports all 485 and no other, each with the same
+  repeats, spacers, level and conservation scores.
+- Results change for loci near a threshold: 43 arrays are reported on the 72
+  genomes that 0.1.0 dropped as tandem repeats, and the evidence level of one
+  changes.
+- The price is the time MUSCLE's method takes on large arrays, which grows
+  with the square and the cube of the number of distinct spacers. The loci of
+  a sequence are processed in parallel and the alignment made to test the
+  spacers of a locus is reused for the scores of its array.
+- The orientation of an array is decided as in CRISPRCasFinder: an orientation
+  recorded for the repeat in `Repeat_List.csv` goes first, a flank counts only
+  when all its 100 bases exist, and a flank without an A or a T leaves the
+  orientation unknown. Six arrays of the 72 genomes change, to what the
+  original reports.
+
 ### Cas detection
 
 - A stretch of a protein that may hold several domains is resolved as HMMER
@@ -22,6 +58,10 @@
   another profile or one gene more, and the type I-B system of Thermococcus
   kodakarensis was missed. Hits without such a region are unchanged. E. coli
   K-12 takes 6.54 s on one thread of an M1 Max where it took 6.50 s.
+- With that, the 48 Cas systems the original reports on the 72 genomes are all
+  reported with the same subtype, the same genes at the same coordinates and
+  every gene matched to the same profile; version 0.1.0 reported 47 with the
+  same subtype and 42 with every gene on the same profile.
 
 ## [0.1.0] - 2026-11-14
 

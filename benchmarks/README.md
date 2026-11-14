@@ -62,8 +62,12 @@ models. Three things differ from an upstream installation and are worth
 stating next to any number taken from here:
 
 - MacSyFinder 2.1.6 and HMMER 3.4 instead of 2.1.2 and 3.3.2.
-- MUSCLE 3.8 behind a wrapper that translates the MUSCLE 5 options upstream
-  passes.
+- MUSCLE: the runs of 2026-10-13 used MUSCLE 3.8 behind a wrapper that
+  translates the MUSCLE 5 options upstream passes. Version 4.3.2 asks for
+  MUSCLE 5.1 or later, and the arrays it reports depend on it (see the results
+  of 2026-11-14 below). Put a `muscle` that runs MUSCLE 5 in
+  `vendor/upstream-native/bin/`, which is first on the path `bench.py` gives
+  the original.
 - Vmatch built with `-O3` by Apple clang from source instead of the vendor
   binary.
 
@@ -97,6 +101,36 @@ results/summary.md`) and `results/panel/summary.md` (panel).
   comparison led to; at `b7fb24d`, before the repeat search became a port of
   Vmatch's; and at `8fa28f5`, before the HMM search was made faster. The
   measurements of the original are the same throughout.
+
+## Results of 2026-11-14: the original with MUSCLE 5
+
+The original was run again on the 72 inputs, without `-cas`, with MUSCLE 5.3
+(`muscle 5.3.osxarm64 [6d49a2f]`) on its path. It reports 485 arrays where it
+reported 448 with MUSCLE 3.8: 37 more, and another evidence level for 8,
+because MUSCLE 5 finds the spacers of borderline loci less alike, so fewer
+loci are dropped as tandem repeats. MUSCLE does not enter the Cas search, so
+the Cas systems of the original are those of 2026-10-13.
+
+`results/muscle5/` holds that comparison in the layout `compare.py` reads: for
+each input, the `result.json` of the MUSCLE 5 run next to the `Cas_REPORT.tsv`
+of 2026-10-13 under `upstream/`, and the output of this project under
+`rust-all/`. `python3 benchmarks/compare.py benchmarks/results/muscle5` gives
+485 arrays reported by both and by neither alone, and 48 Cas systems reported
+by both with the same genes and profiles, plus 13 reported here only.
+`LIMITATIONS.md` has the details.
+
+The timings were not measured again. The Rust rows of `results/timing/` and
+`results/panel/` are those of 2026-11-11 (`f6e326f`), from before this project
+started aligning repeats and spacers as MUSCLE 5 does, which adds time on
+genomes with large arrays: measured apart, three runs each on a quiet machine,
+Saccharolobus solfataricus P2 with Cas detection takes 1.92 s where it took
+1.12 s, and E. coli K-12 0.96 s where it took 0.99 s. A run of the whole Rust
+matrix on 2026-11-14 was discarded because the machine gave erratic
+multi-threaded timings that afternoon, for the released binary too; its rows
+are in `results/discarded-2026-11-14/`. The rows of the original are those of
+2026-10-13, timed with MUSCLE 3.8, and `arrays.csv`, `cas_systems.csv` and
+`genomes.csv` in those two directories still compare with the MUSCLE 3.8
+outputs kept there.
 
 Things to state next to any number taken from here:
 
