@@ -67,8 +67,8 @@ base too far, and thirteen Cas systems the original loses.
   with the same genes and profiles, 13 by this tool only. Seven weak hits
   enter `annotation/cas_hits.tsv`, one of 35.9 bits that `hmmsearch` drops
   leaves it, none of them in a system, and the third digit of 14 E-values
-  moves by one. E. coli K-12 takes 6.59 s on one thread of an M1 Max where it
-  took 6.39 s, and 1.00 s on all its cores where it took 0.98 s: HMMER's
+  moves by one. E. coli K-12 takes 6.57 s on one thread of an M1 Max where it
+  took 6.38 s, and 1.01 s on all its cores where it took 0.99 s: HMMER's
   filters let more sequences through to the Viterbi filter than the bounds
   did.
 - `--exact-filters` still decides the filters on exact scores, and its bias
