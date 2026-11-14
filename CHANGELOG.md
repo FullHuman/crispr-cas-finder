@@ -1,5 +1,28 @@
 # Changelog
 
+## [Unreleased]
+
+### Cas detection
+
+- A stretch of a protein that may hold several domains is resolved as HMMER
+  3.4 resolves it. The Forward matrix of the region is filled with the
+  multihit model, 200 tracebacks are sampled from it with Easel's generator
+  and HMMER's seed, the domains they contain are clustered into envelopes, the
+  composition correction of the region comes from the same tracebacks, and
+  each envelope is scored on its own; before, such a region was scored as one
+  domain. On E. coli K-12 and the 21 genomes of the panel, with the 535
+  CasFinder 3.1 profiles, 1759 of the 7187 protein and profile pairs reported
+  by both tools differed from `hmmsearch` 3.4 in their number of domains (850)
+  or in a domain score by more than 0.05 bit; none differs in its number of
+  domains now, and the 4 that still differ in a score do so by less than 0.06
+  bit, against scores `hmmsearch` prints to a tenth of a bit. With
+  `--exact-filters`, 2217 of 7327 pairs differed and 505 do. The 35 Cas
+  systems the original pipeline reports on the panel are all found with every
+  gene matched to the same profile, where 29 were, five had a gene matched to
+  another profile or one gene more, and the type I-B system of Thermococcus
+  kodakarensis was missed. Hits without such a region are unchanged. E. coli
+  K-12 takes 6.54 s on one thread of an M1 Max where it took 6.50 s.
+
 ## [0.1.0] - 2026-11-14
 
 The first release: the crates `crispr-cas-finder-core` and

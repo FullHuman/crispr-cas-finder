@@ -58,12 +58,28 @@ and specificity against an independent truth set have not been measured.
   than 100 kb are predicted in metagenomic mode, as in CRISPRCasFinder;
   `--auto-metagenome-below 0` disables this. A GFF3 annotation and protein FASTA
   can be supplied instead (`--gff`, `--faa`). Prokka is not supported.
-- Cas detection uses an internal Rust HMMER implementation. Bit scores can
-  differ from HMMER 3.4 by a few tenths of a bit and, rarely, one domain is
-  reported where `hmmsearch` reports two. Either can matter for a hit sitting
-  exactly on a threshold, and the second can change which of two related
-  profiles is a protein's best match, which in turn can change the systems
-  found around it.
+- Cas detection uses an internal Rust HMMER implementation. A stretch of a
+  protein that may hold several domains is resolved the way HMMER 3.4 resolves
+  it, by clustering 200 tracebacks sampled with HMMER's random number
+  generator and seed. On the proteins of E. coli K-12 and of the 21 genomes of
+  `benchmarks/panel.tsv`, searched with the 535 CasFinder 3.1 profiles, the
+  7187 protein and profile pairs that this implementation and `hmmsearch` 3.4
+  both report have the same number of domains, the same alignment coordinates,
+  and domain scores within 0.06 bit of the ones `hmmsearch` prints to a tenth
+  of a bit; in two of them an envelope starts one or two residues away, and
+  the sequence score of one of the two is 0.13 bit lower. The likely cause of
+  those two is the last bit of single-precision numbers: HMMER computes a
+  profile's probabilities with its own approximation of the exponential, and
+  when a random number falls within that last bit of a boundary, a sampled
+  traceback takes another path. A weak domain found in just a quarter of the
+  tracebacks, the share HMMER requires, can then be reported or not: sampling
+  the proteins of Thermococcus kodakarensis with seed 7 in both tools, one of
+  126 such pairs lacked a domain of -2.5 bits that `hmmsearch` reported. With
+  `--exact-filters` the log-space decoder rounds posterior probabilities
+  differently from HMMER, so a region can begin or end a residue away from
+  HMMER's and is then sampled differently: of 7327 pairs, 8 differ in their
+  number of domains and 497 in a domain score by more than 0.05 bit. A hit
+  sitting exactly on a threshold can still fall on the other side of it.
 - By default the HMM search decides its MSV and bias filters with an 8-bit
   lower bound on the MSV score (within about half a nat of it), its Viterbi
   filter with a 16-bit upper bound on the Viterbi score, and decodes posterior
