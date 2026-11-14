@@ -30,8 +30,11 @@ base too far, and thirteen Cas systems the original loses.
   changes.
 - The price is the time MUSCLE's method takes on large arrays, which grows
   with the square and the cube of the number of distinct spacers. The loci of
-  a sequence are processed in parallel and the alignment made to test the
-  spacers of a locus is reused for the scores of its array.
+  a sequence are processed in parallel, the alignment made to test the
+  spacers of a locus is reused for the scores of its array, and a locus
+  dropped for the mismatches of its repeats is not aligned at all. Memory
+  grows with the square of the number of spacers: a generated array of 800
+  takes 49 s on ten cores and 2.8 GB.
 - The orientation of an array is decided as in CRISPRCasFinder: an orientation
   recorded for the repeat in `Repeat_List.csv` goes first, a flank counts only
   when all its 100 bases exist, and a flank without an A or a T leaves the

@@ -55,7 +55,11 @@ truth set have not been measured.
   on ten: Saccharolobus solfataricus P2, with six such arrays, is searched for
   arrays in 0.8 s where version 0.1.0 took 0.06 s, and E. coli K-12 in 0.08 s
   as before. Three hundred spacers take about 23 s on one thread and 3.5 s on
-  ten. The sums of the method are fused multiply-adds; where the processor
+  ten. Memory grows with the square of the number of spacers: a generated
+  array of 400 spacers takes 6 s on ten cores and 0.7 GB, one of 800 spacers
+  49 s and 2.8 GB, where version 0.1.0 took 0.02 s and 12 MB for either. No
+  locus is refused for its size, so an array of many hundreds of spacers can
+  exhaust the memory of a browser tab. The sums of the method are fused multiply-adds; where the processor
   instruction is not available to the build, in WebAssembly and in x86-64
   builds made without `+fma`, they are computed exactly another way and the
   alignment takes about three times as long.
