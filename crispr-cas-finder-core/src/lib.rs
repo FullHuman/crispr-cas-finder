@@ -300,6 +300,12 @@ fn process_cluster(
         .iter()
         .map(|(spacer, _)| spacer_sequence(spacer))
         .collect();
+    // A locus whose repeats differ too much is dropped whatever its spacers
+    // look like: decided first, it spares the alignment of the spacers, which
+    // takes long for a locus with hundreds of them.
+    if mismatch_share > params.repeat_mismatch_percent / 100.0 {
+        return Vec::new();
+    }
     // The alignment of the spacers of the locus, kept for the scores of the
     // array when the locus turns out to be one array.
     let mut spacer_alignment = None;
@@ -316,7 +322,7 @@ fn process_cluster(
             too_alike
         }
     };
-    if spacers_rule_it_out || mismatch_share > params.repeat_mismatch_percent / 100.0 {
+    if spacers_rule_it_out {
         return Vec::new();
     }
 

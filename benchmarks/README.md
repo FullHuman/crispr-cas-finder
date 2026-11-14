@@ -119,18 +119,32 @@ of 2026-10-13 under `upstream/`, and the output of this project under
 by both with the same genes and profiles, plus 13 reported here only.
 `LIMITATIONS.md` has the details.
 
-The timings were not measured again. The Rust rows of `results/timing/` and
-`results/panel/` are those of 2026-11-11 (`f6e326f`), from before this project
-started aligning repeats and spacers as MUSCLE 5 does, which adds time on
-genomes with large arrays: measured apart, three runs each on a quiet machine,
-Saccharolobus solfataricus P2 with Cas detection takes 1.92 s where it took
-1.12 s, and E. coli K-12 0.96 s where it took 0.99 s. A run of the whole Rust
-matrix on 2026-11-14 was discarded because the machine gave erratic
-multi-threaded timings that afternoon, for the released binary too; its rows
-are in `results/discarded-2026-11-14/`. The rows of the original are those of
-2026-10-13, timed with MUSCLE 3.8, and `arrays.csv`, `cas_systems.csv` and
-`genomes.csv` in those two directories still compare with the MUSCLE 3.8
-outputs kept there.
+The Rust rows of `results/timing/` and `results/panel/` were measured again
+on 2026-11-14 with the build at `db259be`, which aligns repeats and spacers as
+MUSCLE 5 does and decides the HMM filters as HMMER does; the rows before that
+are under `results/at-f6e326f/`. Aligning as MUSCLE does adds time on genomes
+with large arrays: Saccharolobus solfataricus P2 takes 1.67 s with Cas
+detection where it took 1.08 s, and 0.85 s for its arrays alone where it took
+0.06 s; E. coli K-12 takes 1.04 s where it took 0.97 s. The released 0.1.0,
+timed on E. coli before and after the run as a control, took 1.00 to 1.08 s
+where it took 0.97 s on 2026-11-11, so a few percent of every difference is
+the machine that day. An earlier run of the matrix on 2026-11-14 was discarded
+because the machine gave erratic multi-threaded timings that afternoon, for
+the released binary too; its rows are in `results/discarded-2026-11-14/`.
+
+The rows of the original are those of 2026-10-13, timed with MUSCLE 3.8, and
+`arrays.csv`, `cas_systems.csv` and `genomes.csv` in those two directories
+still compare with the MUSCLE 3.8 outputs kept there. The original was not
+timed again on the whole set. Four genomes timed with MUSCLE 5.3 on its path
+show it slower where arrays are large, so the stored rows understate its run
+time there:
+
+| genome | arrays only, MUSCLE 3.8 | arrays only, MUSCLE 5.3 | with Cas, MUSCLE 3.8 | with Cas, MUSCLE 5.3 |
+| --- | --- | --- | --- | --- |
+| Saccharolobus solfataricus P2 | 8.5 s | 22.4 s | 27.5 s | 41.8 s |
+| Clostridioides difficile 630 | 23.6 s | 25.1 s | 43.9 s | |
+| Methanocaldococcus jannaschii DSM 2661 | 8.7 s | 8.9 s | 37.0 s | |
+| Escherichia coli K-12 MG1655 | 4.0 s | 4.8 s | 23.8 s | 24.6 s |
 
 Things to state next to any number taken from here:
 
@@ -142,10 +156,9 @@ Things to state next to any number taken from here:
   3.3.2 it documents. The Cas systems it loses (see `compare.py`) were checked
   against MacSyFinder's own output for two genomes with these versions only.
 - Most timings are single runs on one machine.
-- The Rust rows with Cas detection are of the build at `eba5168`
-  (2026-10-21), which has the HMM search made more than three times as fast on
-  2026-10-17 (`7b763f2`) without changing the hits. The browser table, its
-  native rows included, is of 2026-10-13 at `8fa28f5`, so its Cas timings
+- The Rust rows are of the build at `db259be` (2026-11-14); those of the
+  original are of 2026-10-13, with MUSCLE 3.8 on its path. The browser table,
+  its native rows included, is of 2026-10-13 at `8fa28f5`, so its Cas timings
   overstate the current run time.
 
 ## Checking the repeat search against Vmatch
