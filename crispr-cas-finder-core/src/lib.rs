@@ -25,6 +25,7 @@ pub mod detect;
 mod dna;
 pub mod io;
 pub mod macsy;
+pub mod muscle5;
 pub mod repeat_db;
 pub mod report;
 pub mod types;
