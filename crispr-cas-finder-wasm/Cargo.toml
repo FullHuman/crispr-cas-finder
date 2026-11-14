@@ -2,7 +2,7 @@
 name = "crispr-cas-finder-wasm"
 # Built for the website, not released on crates.io.
 publish = false
-version = "0.1.0"
+version = "0.2.0"
 edition.workspace = true
 rust-version.workspace = true
 description = "WebAssembly bindings for crispr-cas-finder-core"
@@ -12,7 +12,7 @@ license = "GPL-3.0-or-later"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-crispr-cas-finder-core = { path = "../crispr-cas-finder-core", version = "0.1.0" }
+crispr-cas-finder-core = { path = "../crispr-cas-finder-core", version = "0.2.0" }
 orphos-core = "0.5.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

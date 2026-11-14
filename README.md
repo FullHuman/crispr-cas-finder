@@ -86,7 +86,7 @@ Then add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-crispr-cas-finder-core = "0.1.0"
+crispr-cas-finder-core = "0.2.0"
 ```
 
 ## 🏃 Quick Start
