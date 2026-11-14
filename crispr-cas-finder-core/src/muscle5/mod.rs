@@ -39,6 +39,15 @@
 //! warns above 1000). The time grows with the square of the number of
 //! distinct sequences times the product of their lengths (posteriors) plus
 //! the cube of that number times their length (consistency).
+//!
+//! With enough sequences the work is spread over the rayon thread pool, and
+//! the result is the same on any number of threads, because every sum is
+//! still made of the same terms in the same order: the posterior of a pair
+//! depends on nothing else; a consistency round reads only the matrices of
+//! the round before (MUSCLE spreads these two stages over its threads the
+//! same way); and the sum of posteriors that aligns two alignments, in the
+//! progressive stage and in each round of refinement, is split by rows of
+//! the sum. Small inputs stay on the calling thread.
 
 #![allow(clippy::needless_range_loop)]
 
@@ -48,6 +57,7 @@ mod tables;
 mod tests;
 
 use expf::expf;
+use rayon::prelude::*;
 use std::collections::HashMap;
 use std::simd::prelude::*;
 use std::simd::{StdFloat, f64x4, u64x4};
@@ -68,9 +78,45 @@ const MIN_SPARSE_SCORE: f32 = f32::from_bits(0xc093_5d8e);
 const CONSISTENCY_ITERS: usize = 2;
 const REFINE_ITERS: usize = 100;
 
+/// On the thread pool, a task of the posterior stage takes pairs of sequences
+/// whose forward and backward matrices have about this many cells in all, and
+/// a consistency task takes one Y and `CONSISTENCY_BLOCK` X: small enough
+/// that the cores share the work evenly whatever their speeds (and, for the
+/// consistency, that the sums of a task fit in the first-level cache).
+const POSTERIOR_TASK_CELLS: usize = 10_000;
+const CONSISTENCY_BLOCK: usize = 24;
+
 /// Whether the target multiplies and adds with a single rounding in one
 /// instruction; otherwise the same result is computed in double precision.
 const HARDWARE_FMA: bool = cfg!(any(target_arch = "aarch64", target_feature = "fma"));
+
+/// The choices that change how the alignment is computed and not what it is.
+#[derive(Clone, Copy)]
+struct Tuning {
+    /// Compute the consistency sums in double precision, as on a target
+    /// without the fused multiply-add.
+    soft_fma: bool,
+    /// The posteriors go to the thread pool from this many cells of forward
+    /// and backward matrix in all (the sum over the pairs of the product of
+    /// the two lengths); below, the pool would not shorten the few
+    /// milliseconds they take.
+    parallel_posterior_cells: usize,
+    /// The consistency rounds go to the pool from this number of sequences
+    /// cubed times their mean length.
+    parallel_consistency_work: usize,
+    /// The sum of posteriors that aligns two alignments goes to the pool
+    /// from this many pairs of sequences times their mean length.
+    parallel_sum_work: usize,
+}
+
+impl Tuning {
+    const DEFAULT: Self = Self {
+        soft_fma: !HARDWARE_FMA,
+        parallel_posterior_cells: 40_000,
+        parallel_consistency_work: 60_000,
+        parallel_sum_work: 200_000,
+    };
+}
 
 /// Rows of the multiple alignment MUSCLE 5.3 `-align` gives for these sequences,
 /// in the order the sequences were given, uppercase, padded with b'-'.
@@ -94,19 +140,19 @@ const HARDWARE_FMA: bool = cfg!(any(target_arch = "aarch64", target_feature = "f
 /// 400 million (21,000 by 21,000); nothing is refused here, the memory
 /// taken grows with that product.
 pub fn align(sequences: &[&[u8]]) -> Vec<Vec<u8>> {
-    align_with(sequences, !HARDWARE_FMA)
+    align_with(sequences, Tuning::DEFAULT)
 }
 
-/// [`align`], with the consistency sums computed in double precision when
-/// `soft_fma` is set (the result is the same either way).
-fn align_with(sequences: &[&[u8]], soft_fma: bool) -> Vec<Vec<u8>> {
+/// [`align`], computed as `tuning` says (the result is the same whatever it
+/// says).
+fn align_with(sequences: &[&[u8]], tuning: Tuning) -> Vec<Vec<u8>> {
     let input: Vec<Vec<u8>> = sequences.iter().map(|s| read_sequence(s)).collect();
     let filled: Vec<&[u8]> = input
         .iter()
         .filter(|seq| !seq.is_empty())
         .map(Vec::as_slice)
         .collect();
-    let mut rows = align_filled(&filled, soft_fma).into_iter();
+    let mut rows = align_filled(&filled, tuning).into_iter();
     let width = rows.as_slice().first().map_or(0, Vec::len);
     input
         .iter()
@@ -122,7 +168,7 @@ fn align_with(sequences: &[&[u8]], soft_fma: bool) -> Vec<Vec<u8>> {
 
 /// mpcflat.cpp `MPCFlat::Run` for sequences that are upper-case and not
 /// empty.
-fn align_filled(input: &[&[u8]], soft_fma: bool) -> Vec<Vec<u8>> {
+fn align_filled(input: &[&[u8]], tuning: Tuning) -> Vec<Vec<u8>> {
     if input.len() < 2 {
         return input.iter().map(|seq| seq.to_vec()).collect();
     }
@@ -145,7 +191,7 @@ fn align_filled(input: &[&[u8]], soft_fma: bool) -> Vec<Vec<u8>> {
     }
 
     let hmm = PairHmm::new(guess_is_nucleo(input));
-    let rows = Mpc::new(&hmm, &unique, soft_fma).run();
+    let rows = Mpc::new(&hmm, &unique, tuning).run();
     slots.iter().map(|&slot| rows[slot].clone()).collect()
 }
 
@@ -580,6 +626,40 @@ fn calc_post(fwd: &[f32], bwd: &[f32], lx: usize, ly: usize, post: &mut [f32]) {
     }
 }
 
+/// Working memory for the posterior of one pair, kept from one pair to the
+/// next.
+#[derive(Default)]
+struct PairBuffers {
+    fwd: Vec<f32>,
+    bwd: Vec<f32>,
+    post: Vec<f32>,
+    dp_row: Vec<f32>,
+}
+
+impl PairBuffers {
+    /// calcposteriorflat.cpp `MPCFlat::CalcPosterior`: the sparse posterior
+    /// of two encoded sequences and the expected accuracy of their
+    /// alignment.
+    fn posterior(&mut self, hmm: &PairHmm, x: &[u8], y: &[u8]) -> (SparseMx, f32) {
+        let (lx, ly) = (x.len(), y.len());
+        let grow = |buffer: &mut Vec<f32>, len: usize| {
+            if buffer.len() < len {
+                buffer.resize(len, 0.0);
+            }
+        };
+        grow(&mut self.fwd, STATES * (lx + 1) * (ly + 1));
+        grow(&mut self.bwd, STATES * (lx + 1) * (ly + 1));
+        grow(&mut self.post, lx * ly);
+        grow(&mut self.dp_row, ly + 1);
+        calc_fwd(hmm, x, y, &mut self.fwd);
+        calc_bwd(hmm, x, y, &mut self.bwd);
+        calc_post(&self.fwd, &self.bwd, lx, ly, &mut self.post);
+        let score = calc_aln_score(&self.post, lx, ly, &mut self.dp_row);
+        let ea = score / lx.min(ly) as f32;
+        (SparseMx::from_post(&self.post, lx, ly), ea)
+    }
+}
+
 /// mysparsemx.h `MySparseMx`: the cells of a posterior matrix that reached
 /// `MIN_SPARSE_PROB`, row by row.
 #[derive(Clone, Default)]
@@ -592,10 +672,14 @@ struct SparseMx {
 impl SparseMx {
     /// `MySparseMx::FromPost`.
     fn from_post(post: &[f32], lx: usize, ly: usize) -> Self {
+        let cells = post[..lx * ly]
+            .iter()
+            .filter(|&&p| p >= MIN_SPARSE_PROB)
+            .count();
         let mut mx = Self {
             offsets: Vec::with_capacity(lx + 1),
-            cols: Vec::new(),
-            probs: Vec::new(),
+            cols: Vec::with_capacity(cells),
+            probs: Vec::with_capacity(cells),
         };
         for i in 0..lx {
             mx.offsets.push(mx.cols.len() as u32);
@@ -812,7 +896,7 @@ impl SumRow<'_> {
     }
 }
 
-/// The sums of every pair (X, Y) with X before the current Y.
+/// The sums of the pairs (X, Y) for the current Y and a block of X.
 #[derive(Default)]
 struct Sums {
     values: Vec<f32>,
@@ -820,19 +904,19 @@ struct Sums {
     start: Vec<usize>,
     /// First column and one past the last column of each row.
     span: Vec<(u32, u32)>,
-    /// The first row of each X.
+    /// The first row of each X of the block.
     first_row: Vec<usize>,
 }
 
 impl Sums {
-    /// Starts the sums of the pairs (X, y), X < y, at twice their posterior
-    /// (the terms Z = X and Z = Y).
-    fn start(&mut self, mpc: &Mpc, y: usize) {
+    /// Starts the sums of the pairs (X, y), X in `xs`, at twice their
+    /// posterior (the terms Z = X and Z = Y).
+    fn start(&mut self, mpc: &Mpc, y: usize, xs: std::ops::Range<usize>) {
         self.values.clear();
         self.start.clear();
         self.span.clear();
         self.first_row.clear();
-        for x in 0..y {
+        for x in xs {
             self.first_row.push(self.span.len());
             let xy = &mpc.posts[mpc.pair_index(x, y)];
             for i in 0..xy.rows() {
@@ -861,6 +945,54 @@ impl Sums {
     }
 }
 
+/// One cell of a posterior matrix.
+#[derive(Clone, Copy)]
+struct Cell {
+    row: u32,
+    col: u32,
+    p: f32,
+}
+
+/// The final posteriors of every pair, cell after cell in one block of
+/// memory: what the sums that align two alignments walk through, pair after
+/// pair (`Mpc::build_post`).
+#[derive(Default)]
+struct Cells {
+    cells: Vec<Cell>,
+    /// Where the cells of each pair start; one more entry than pairs.
+    start: Vec<usize>,
+}
+
+impl Cells {
+    /// Takes the matrices, in the order of `Mpc::pair_index`, freeing each
+    /// as it goes.
+    fn from_posts(posts: Vec<SparseMx>) -> Self {
+        let total = posts.iter().map(|mx| mx.cols.len()).sum();
+        let mut all = Self {
+            cells: Vec::with_capacity(total),
+            start: Vec::with_capacity(posts.len() + 1),
+        };
+        for mx in posts {
+            all.start.push(all.cells.len());
+            for row in 0..mx.rows() {
+                for k in mx.row(row) {
+                    all.cells.push(Cell {
+                        row: row as u32,
+                        col: mx.cols[k],
+                        p: mx.probs[k],
+                    });
+                }
+            }
+        }
+        all.start.push(all.cells.len());
+        all
+    }
+
+    fn pair(&self, pair: usize) -> &[Cell] {
+        &self.cells[self.start[pair]..self.start[pair + 1]]
+    }
+}
+
 /// One row of an alignment under construction: which input sequence it is
 /// and its letters and gaps.
 #[derive(Clone)]
@@ -875,21 +1007,25 @@ type Msa = Vec<Row>;
 struct Mpc<'a> {
     hmm: &'a PairHmm,
     seqs: &'a [&'a [u8]],
-    /// Posterior of pair (i, j), i < j, at `pair_index(i, j)`.
+    /// Posterior of pair (i, j), i < j, at `pair_index(i, j)`, until the
+    /// consistency rounds are over.
     posts: Vec<SparseMx>,
+    /// The same afterwards.
+    cells: Cells,
     /// Expected accuracy of the alignment of each pair, n by n.
     dist: Vec<f32>,
-    soft_fma: bool,
+    tuning: Tuning,
 }
 
 impl<'a> Mpc<'a> {
-    fn new(hmm: &'a PairHmm, seqs: &'a [&'a [u8]], soft_fma: bool) -> Self {
+    fn new(hmm: &'a PairHmm, seqs: &'a [&'a [u8]], tuning: Tuning) -> Self {
         Self {
             hmm,
             seqs,
             posts: Vec::new(),
+            cells: Cells::default(),
             dist: Vec::new(),
-            soft_fma,
+            tuning,
         }
     }
 
@@ -909,6 +1045,7 @@ impl<'a> Mpc<'a> {
                 self.cons_iter();
             }
         }
+        self.cells = Cells::from_posts(std::mem::take(&mut self.posts));
         let (joins1, joins2) = join_order(n, &left, &right);
         let mut msa = self.progressive_align(&joins1, &joins2);
         if n >= 3 {
@@ -924,43 +1061,47 @@ impl<'a> Mpc<'a> {
         rows
     }
 
-    /// `MPCFlat::CalcPosteriors` / `CalcPosterior`.
+    /// `MPCFlat::CalcPosteriors`: the posterior and the expected accuracy of
+    /// every pair, each independent of the others.
     fn calc_posteriors(&mut self) {
         let n = self.seqs.len();
         let codes: Vec<Vec<u8>> = self.seqs.iter().map(|s| self.hmm.encode(s)).collect();
-        let max_len = codes.iter().map(Vec::len).max().unwrap_or(0);
-        let mut second_len = 0;
+        let pairs: Vec<(usize, usize)> = (0..n)
+            .flat_map(|i| (i + 1..n).map(move |j| (i, j)))
+            .collect();
+        let cells: usize = pairs
+            .iter()
+            .map(|&(i, j)| codes[i].len() * codes[j].len())
+            .sum();
+        let hmm = self.hmm;
+        let posterior = |buffers: &mut PairBuffers, &(i, j): &(usize, usize)| {
+            buffers.posterior(hmm, &codes[i], &codes[j])
+        };
+        let results: Vec<(SparseMx, f32)> = if pairs.len() > 1
+            && cells >= self.tuning.parallel_posterior_cells
+            && rayon::current_num_threads() > 1
         {
-            let mut seen_max = false;
-            for code in &codes {
-                if code.len() == max_len && !seen_max {
-                    seen_max = true;
-                } else {
-                    second_len = second_len.max(code.len());
-                }
-            }
-        }
-        let fb_size = STATES * (max_len + 1) * (second_len + 1);
-        let mut fwd = vec![0f32; fb_size];
-        let mut bwd = vec![0f32; fb_size];
-        let mut post = vec![0f32; max_len * second_len];
-        let mut dp_row = vec![0f32; max_len + 1];
+            let pairs_per_task = (POSTERIOR_TASK_CELLS * pairs.len() / cells.max(1)).max(1);
+            pairs
+                .par_iter()
+                .with_min_len(pairs_per_task)
+                .with_max_len(2 * pairs_per_task)
+                .map_init(PairBuffers::default, posterior)
+                .collect()
+        } else {
+            let mut buffers = PairBuffers::default();
+            pairs
+                .iter()
+                .map(|pair| posterior(&mut buffers, pair))
+                .collect()
+        };
 
         self.dist = vec![0f32; n * n];
-        self.posts = Vec::with_capacity(n * (n - 1) / 2);
-        for i in 0..n {
-            for j in i + 1..n {
-                let (x, y) = (&codes[i], &codes[j]);
-                let (lx, ly) = (x.len(), y.len());
-                calc_fwd(self.hmm, x, y, &mut fwd);
-                calc_bwd(self.hmm, x, y, &mut bwd);
-                calc_post(&fwd, &bwd, lx, ly, &mut post);
-                self.posts.push(SparseMx::from_post(&post, lx, ly));
-                let score = calc_aln_score(&post, lx, ly, &mut dp_row);
-                let ea = score / lx.min(ly) as f32;
-                self.dist[i * n + j] = ea;
-                self.dist[j * n + i] = ea;
-            }
+        self.posts = Vec::with_capacity(pairs.len());
+        for (&(i, j), (post, ea)) in pairs.iter().zip(results) {
+            self.posts.push(post);
+            self.dist[i * n + j] = ea;
+            self.dist[j * n + i] = ea;
         }
     }
 
@@ -1068,82 +1209,117 @@ impl<'a> Mpc<'a> {
     /// Y, then Z, then X, so that P(z~y) can be laid out densely once for
     /// all X; every cell still receives the same terms in the same order as
     /// in MUSCLE, and a term whose P(z~y) is zero leaves the sum as it is.
+    ///
+    /// A round reads the posteriors of the round before and nothing of its
+    /// own (MUSCLE writes into a second set of matrices and swaps the two
+    /// sets afterwards, consflat.cpp), so the pairs (X, Y) are computed
+    /// independently of one another, on the thread pool when there are
+    /// enough sequences.
     fn cons_iter(&mut self) {
         let n = self.seqs.len();
-        let soft = self.soft_fma;
+        let mean_len = self.seqs.iter().map(|seq| seq.len()).sum::<usize>() / n;
+        let parallel = n * n * n * mean_len >= self.tuning.parallel_consistency_work
+            && rayon::current_num_threads() > 1;
+        // One task per Y on the calling thread; per Y and block of X on the
+        // pool.
+        let block = if parallel { CONSISTENCY_BLOCK } else { n };
+        let tasks: Vec<(usize, usize)> = (1..n)
+            .flat_map(|y| (0..y).step_by(block).map(move |x| (y, x)))
+            .collect();
+        let this = &*self;
+        let relax = |(zy, sums): &mut (DenseRows, Sums), &(y, x): &(usize, usize)| {
+            this.cons_block(y, x..(x + block).min(y), zy, sums)
+        };
+        let updated: Vec<Vec<Vec<f32>>> = if parallel {
+            tasks
+                .par_iter()
+                .with_max_len(1)
+                .map_init(Default::default, relax)
+                .collect()
+        } else {
+            let mut buffers = Default::default();
+            tasks.iter().map(|task| relax(&mut buffers, task)).collect()
+        };
+        for (&(y, first), block) in tasks.iter().zip(updated) {
+            for (x, probs) in (first..).zip(block) {
+                let pair = self.pair_index(x, y);
+                self.posts[pair].probs = probs;
+            }
+        }
+    }
+
+    /// The new posteriors of the pairs (X, y) for the X of `xs`, all before
+    /// `y`, in the order of X: the values of the cells of each, in the order
+    /// of `SparseMx::probs`.
+    fn cons_block(
+        &self,
+        y: usize,
+        xs: std::ops::Range<usize>,
+        zy: &mut DenseRows,
+        sums: &mut Sums,
+    ) -> Vec<Vec<f32>> {
+        let n = self.seqs.len();
+        let soft = self.tuning.soft_fma;
         // The binary multiplies by the reciprocal of the sequence count.
         let scale = 1.0 / n as f32;
-        let mut zy = DenseRows::default();
-        let mut sums = Sums::default();
-        let mut updated: Vec<Vec<f32>> = vec![Vec::new(); self.posts.len()];
-
-        for y in 1..n {
-            sums.start(self, y);
-            for z in 0..n {
-                if z == y {
+        sums.start(self, y, xs.clone());
+        for z in 0..n {
+            if z == y {
+                continue;
+            }
+            if z < y {
+                zy.fill(&self.posts[self.pair_index(z, y)], self.seqs[y].len());
+            } else {
+                zy.fill_transposed(&self.posts[self.pair_index(y, z)], self.seqs[z].len());
+            }
+            for x in xs.clone() {
+                if x == z {
                     continue;
                 }
-                if z < y {
-                    zy.fill(&self.posts[self.pair_index(z, y)], self.seqs[y].len());
-                } else {
-                    zy.fill_transposed(&self.posts[self.pair_index(y, z)], self.seqs[z].len());
-                }
-                for x in 0..y {
-                    if x == z {
-                        continue;
-                    }
-                    let first_row = sums.first_row[x];
-                    if x < z {
-                        let xz = &self.posts[self.pair_index(x, z)];
-                        for pos_x in 0..xz.rows() {
-                            let entries = xz.row(pos_x);
-                            let mut row = sums.row(first_row + pos_x);
-                            if row.lo < row.hi && !entries.is_empty() {
-                                row.add_terms(
-                                    &xz.cols[entries.clone()],
-                                    &xz.probs[entries],
-                                    &zy,
-                                    soft,
-                                );
-                            }
+                let first_row = sums.first_row[x - xs.start];
+                if x < z {
+                    let xz = &self.posts[self.pair_index(x, z)];
+                    for pos_x in 0..xz.rows() {
+                        let entries = xz.row(pos_x);
+                        let mut row = sums.row(first_row + pos_x);
+                        if row.lo < row.hi && !entries.is_empty() {
+                            row.add_terms(&xz.cols[entries.clone()], &xz.probs[entries], zy, soft);
                         }
-                    } else {
-                        let zx = &self.posts[self.pair_index(z, x)];
-                        for pos_z in 0..zx.rows() {
-                            let span = zy.span[pos_z];
-                            if span.0 >= span.1 {
-                                continue;
-                            }
-                            let source = zy.row(pos_z);
-                            let entries = zx.row(pos_z);
-                            for (&pos_x, &p) in
-                                zx.cols[entries.clone()].iter().zip(&zx.probs[entries])
-                            {
-                                sums.row(first_row + pos_x as usize)
-                                    .add_term(p, source, span, soft);
-                            }
+                    }
+                } else {
+                    let zx = &self.posts[self.pair_index(z, x)];
+                    for pos_z in 0..zx.rows() {
+                        let span = zy.span[pos_z];
+                        if span.0 >= span.1 {
+                            continue;
+                        }
+                        let source = zy.row(pos_z);
+                        let entries = zx.row(pos_z);
+                        for (&pos_x, &p) in zx.cols[entries.clone()].iter().zip(&zx.probs[entries])
+                        {
+                            sums.row(first_row + pos_x as usize)
+                                .add_term(p, source, span, soft);
                         }
                     }
                 }
             }
+        }
 
-            // `MySparseMx::UpdateFromPost`: same cells, new values.
-            for x in 0..y {
-                let pair = self.pair_index(x, y);
-                let xy = &self.posts[pair];
-                let new = &mut updated[pair];
-                new.reserve_exact(xy.probs.len());
+        // `MySparseMx::UpdateFromPost`: same cells, new values.
+        xs.clone()
+            .map(|x| {
+                let xy = &self.posts[self.pair_index(x, y)];
+                let first_row = sums.first_row[x - xs.start];
+                let mut new = Vec::with_capacity(xy.probs.len());
                 for i in 0..xy.rows() {
-                    let row = sums.row(sums.first_row[x] + i);
+                    let row = sums.row(first_row + i);
                     for k in xy.row(i) {
                         new.push(row.cells[xy.cols[k] as usize - row.lo] * scale);
                     }
                 }
-            }
-        }
-        for (mx, probs) in self.posts.iter_mut().zip(updated) {
-            mx.probs = probs;
-        }
+                new
+            })
+            .collect()
     }
 
     /// `MPCFlat::ProgressiveAlign`.
@@ -1204,40 +1380,108 @@ impl<'a> Mpc<'a> {
     /// buildpostflat.cpp `MPCFlat::BuildPost`: sum of the pairwise posteriors
     /// over every sequence of one alignment against every sequence of the
     /// other, in alignment columns.
+    ///
+    /// A cell of the sum takes at most one term from each pair of sequences,
+    /// and takes them in MUSCLE's order: the sequences of the first
+    /// alignment in turn, and for each the sequences of the second. With
+    /// enough pairs the work goes to the thread pool in two steps that keep
+    /// that order: the terms of each sequence of the first alignment are
+    /// collected (which cell, how much), sorted into bands of rows of the
+    /// sum; then each band adds its terms, sequence after sequence.
     fn build_post(&self, msa1: &Msa, msa2: &Msa, cols2: usize, post: &mut [f32]) {
-        let pos_to_col = |row: &Row| -> Vec<u32> {
-            row.chars
-                .iter()
-                .enumerate()
-                .filter(|&(_, &c)| c != b'-')
-                .map(|(col, _)| col as u32)
-                .collect()
+        let cols_of_2: Vec<Vec<u32>> = msa2.iter().map(|row| letter_columns(row, 1)).collect();
+        let mean_len = self.seqs.iter().map(|seq| seq.len()).sum::<usize>() / self.seqs.len();
+        let threads = if msa1.len() * msa2.len() * mean_len >= self.tuning.parallel_sum_work {
+            rayon::current_num_threads()
+        } else {
+            1
         };
-        let cols_of_2: Vec<Vec<u32>> = msa2.iter().map(pos_to_col).collect();
-        for row1 in msa1 {
-            let pos_to_col1 = pos_to_col(row1);
-            for (row2, pos_to_col2) in msa2.iter().zip(&cols_of_2) {
-                if row1.seq < row2.seq {
-                    let mx = &self.posts[self.pair_index(row1.seq, row2.seq)];
-                    for i in 0..mx.rows() {
-                        let base = pos_to_col1[i] as usize * cols2;
-                        for k in mx.row(i) {
-                            post[base + pos_to_col2[mx.cols[k] as usize] as usize] += mx.probs[k];
-                        }
-                    }
-                } else {
-                    let mx = &self.posts[self.pair_index(row2.seq, row1.seq)];
-                    for i in 0..mx.rows() {
-                        let col2 = pos_to_col2[i] as usize;
-                        for k in mx.row(i) {
-                            post[pos_to_col1[mx.cols[k] as usize] as usize * cols2 + col2] +=
-                                mx.probs[k];
-                        }
+        if threads == 1 {
+            for row1 in msa1 {
+                self.post_terms(row1, msa2, &cols_of_2, cols2, |cell, p| {
+                    post[cell as usize] += p;
+                });
+            }
+            return;
+        }
+
+        // More bands than threads, so that the cores share them evenly
+        // whatever their speeds.
+        let band = (post.len() / cols2).div_ceil(4 * threads).max(1) * cols2;
+        let bands = post.len().div_ceil(band);
+        let collected: Vec<Vec<Vec<(u32, f32)>>> = msa1
+            .par_iter()
+            .with_max_len(1)
+            .map(|row1| {
+                let terms: usize = msa2
+                    .iter()
+                    .map(|row2| {
+                        let (first, second) = (row1.seq.min(row2.seq), row1.seq.max(row2.seq));
+                        self.cells.pair(self.pair_index(first, second)).len()
+                    })
+                    .sum();
+                let mut by_band: Vec<Vec<(u32, f32)>> = (0..bands)
+                    .map(|_| Vec::with_capacity(terms / bands * 5 / 4 + 16))
+                    .collect();
+                self.post_terms(row1, msa2, &cols_of_2, cols2, |cell, p| {
+                    by_band[cell as usize / band].push((cell, p));
+                });
+                by_band
+            })
+            .collect();
+        post.par_chunks_mut(band)
+            .with_max_len(1)
+            .enumerate()
+            .for_each(|(index, cells)| {
+                let first = index * band;
+                for by_band in &collected {
+                    for &(cell, p) in &by_band[index] {
+                        cells[cell as usize - first] += p;
                     }
                 }
+            });
+    }
+
+    /// The terms of `build_post` for one sequence of the first alignment
+    /// against every sequence of the second, in order: the cell of the sum
+    /// and the posterior to add to it.
+    #[inline(always)]
+    fn post_terms(
+        &self,
+        row1: &Row,
+        msa2: &Msa,
+        cols_of_2: &[Vec<u32>],
+        cols2: usize,
+        mut add: impl FnMut(u32, f32),
+    ) {
+        let starts1 = letter_columns(row1, cols2);
+        for (row2, cols2) in msa2.iter().zip(cols_of_2) {
+            // The posterior has the earlier sequence in its rows. (Slices,
+            // not vectors: the loop below must not look their place up again
+            // after every addition.)
+            let (pair, in_rows, in_cols): (usize, &[u32], &[u32]) = if row1.seq < row2.seq {
+                (self.pair_index(row1.seq, row2.seq), &starts1, cols2)
+            } else {
+                (self.pair_index(row2.seq, row1.seq), cols2, &starts1)
+            };
+            for cell in self.cells.pair(pair) {
+                add(
+                    in_rows[cell.row as usize] + in_cols[cell.col as usize],
+                    cell.p,
+                );
             }
         }
     }
+}
+
+/// The column of each letter of a row, in order, times `scale`.
+fn letter_columns(row: &Row, scale: usize) -> Vec<u32> {
+    row.chars
+        .iter()
+        .enumerate()
+        .filter(|&(_, &c)| c != b'-')
+        .map(|(col, _)| (col * scale) as u32)
+        .collect()
 }
 
 /// calcalnscoreflat.cpp `CalcAlnScoreFlat`: the score of the best path

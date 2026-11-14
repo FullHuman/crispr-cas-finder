@@ -37,12 +37,12 @@ fn frozen_cases() -> Vec<Frozen> {
     cases
 }
 
-fn check_frozen(soft_fma: bool) {
+fn check_frozen(tuning: Tuning) {
     let cases = frozen_cases();
     assert!(cases.len() >= 50, "{} cases", cases.len());
     for case in cases {
         let input: Vec<&[u8]> = case.rows.iter().map(|&(input, _)| input).collect();
-        let rows = align_with(&input, soft_fma);
+        let rows = align_with(&input, tuning);
         assert_eq!(rows.len(), input.len(), "{}", case.name);
         for (index, (row, &(_, expected))) in rows.iter().zip(&case.rows).enumerate() {
             assert_eq!(
@@ -57,14 +57,42 @@ fn check_frozen(soft_fma: bool) {
 
 #[test]
 fn frozen_alignments_are_those_of_muscle() {
-    check_frozen(!HARDWARE_FMA);
+    check_frozen(Tuning::DEFAULT);
 }
 
 /// The two ways of computing the consistency sums, with the fused
 /// multiply-add instruction and without, give the same alignments.
 #[test]
 fn frozen_alignments_hold_with_either_fma() {
-    check_frozen(HARDWARE_FMA);
+    check_frozen(Tuning {
+        soft_fma: HARDWARE_FMA,
+        ..Tuning::DEFAULT
+    });
+}
+
+/// The stages that can be spread over the thread pool give the same
+/// alignments spread or not, and on any number of threads: as `align` runs
+/// them (only the largest cases are spread), and with every case spread,
+/// however small.
+#[test]
+fn frozen_alignments_hold_on_any_number_of_threads() {
+    let always = Tuning {
+        parallel_posterior_cells: 0,
+        parallel_consistency_work: 0,
+        parallel_sum_work: 0,
+        ..Tuning::DEFAULT
+    };
+    for threads in [1, 2, 5] {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .expect("a thread pool")
+            .install(|| {
+                assert_eq!(rayon::current_num_threads(), threads);
+                check_frozen(Tuning::DEFAULT);
+                check_frozen(always);
+            });
+    }
 }
 
 #[test]
@@ -280,7 +308,16 @@ fn rows_spell_the_sequences() {
             let letters: Vec<u8> = row.iter().copied().filter(|&c| c != b'-').collect();
             assert_eq!(letters, seq.to_ascii_uppercase());
         }
-        assert_eq!(align_with(&refs, true), align_with(&refs, false));
+        let with = |soft_fma| {
+            align_with(
+                &refs,
+                Tuning {
+                    soft_fma,
+                    ..Tuning::DEFAULT
+                },
+            )
+        };
+        assert_eq!(with(true), with(false));
     }
 }
 
