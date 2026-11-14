@@ -2,6 +2,7 @@ use crispr_cas_finder_core::hmmer_core::{
     alphabet::Alphabet,
     background::BackgroundModel,
     config::SearchMode,
+    hit::Hit,
     modelconfig,
     pipeline::search::{
         CapacityHints, FilterPolicy, SearchOutcome, SearchPlan, SearchQuery, SearchReport,
@@ -11,15 +12,20 @@ use crispr_cas_finder_core::hmmer_core::{
 };
 use crispr_cas_finder_core::hmmer_io::HmmFile;
 
-/// TIGR01868 (Cas5_0_IE) searched against E. coli Cas5 (CP014688.1_298)
-/// with `filters`.
-fn search_cas5(filters: FilterPolicy) -> SearchReport {
+/// Search `sequence` with the bundled CasFinder 2.0.3 profile
+/// `profile_file` and `filters`.
+fn search_bundled_profile(
+    profile_file: &str,
+    name: &str,
+    sequence: &[u8],
+    filters: FilterPolicy,
+) -> SearchReport {
     let profile_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../crispr-cas-finder-cli/data/CasFinder-2.0.3/CASprofiles-2.0.3/Cas5_0_IE.hmm");
+        .join("../crispr-cas-finder-cli/data/CasFinder-2.0.3/CASprofiles-2.0.3")
+        .join(profile_file);
     let mut hmm_file = HmmFile::open(profile_path.to_str().unwrap(), None).unwrap();
     let (alphabet, hmm) = hmm_file.read().unwrap();
-    let sequence = b"MRSYLILRLAGPMQAWGQPTFEGTRPTGRFPTRSGLLGLLGACLGIQRDDTSSLQALSESVQFAVRCDELILDDRRVSVTGLRDYHTVLGAREDYRGLKSHETIQTWREYLCDASFTVALWLTPHATMVISELEKAVLKPRYTPYLGRRSCPLTHPLFLGTCQASDPQKALLNYEPVGGDIYSEESVTGHHLKFTARDEPMITLPRQFASREWYVIKGGMDVSQ";
-    let target = DigitalSequence::from_bytes("CP014688.1_298", "", sequence, &alphabet);
+    let target = DigitalSequence::from_bytes(name, "", sequence, &alphabet);
 
     let background = BackgroundModel::new(&Alphabet::amino());
     let mut profile = Profile::new(hmm.num_nodes, &alphabet);
@@ -38,6 +44,20 @@ fn search_cas5(filters: FilterPolicy) -> SearchReport {
         })
         .unwrap();
     worker.search(&target).unwrap()
+}
+
+fn exact_filters() -> FilterPolicy {
+    FilterPolicy {
+        exact: true,
+        ..FilterPolicy::default()
+    }
+}
+
+/// TIGR01868 (Cas5_0_IE) searched against E. coli Cas5 (CP014688.1_298)
+/// with `filters`.
+fn search_cas5(filters: FilterPolicy) -> SearchReport {
+    let sequence = b"MRSYLILRLAGPMQAWGQPTFEGTRPTGRFPTRSGLLGLLGACLGIQRDDTSSLQALSESVQFAVRCDELILDDRRVSVTGLRDYHTVLGAREDYRGLKSHETIQTWREYLCDASFTVALWLTPHATMVISELEKAVLKPRYTPYLGRRSCPLTHPLFLGTCQASDPQKALLNYEPVGGDIYSEESVTGHHLKFTARDEPMITLPRQFASREWYVIKGGMDVSQ";
+    search_bundled_profile("Cas5_0_IE.hmm", "CP014688.1_298", sequence, filters)
 }
 
 /// The values HMMER 3.4 `hmmsearch` reports for that pair.
@@ -76,13 +96,240 @@ fn cas5_domain_null2_and_oa_match_hmmer_3_4() {
 /// The same values with the exact filters and the log-space decoder.
 #[test]
 fn cas5_matches_hmmer_3_4_with_exact_filters() {
-    let report = search_cas5(FilterPolicy {
-        exact: true,
-        ..FilterPolicy::default()
-    });
+    let report = search_cas5(exact_filters());
     assert!(
         report.trace.msv_score_bound.is_some(),
         "the exact policy starts from the integer upper bounds"
     );
     assert_matches_hmmer_3_4(report);
+}
+
+/// One line of `hmmsearch --domtblout`: bit score, bias, and the model,
+/// alignment and envelope coordinates.
+struct OracleDomain {
+    score: f32,
+    bias: f32,
+    hmm: (usize, usize),
+    alignment: (usize, usize),
+    envelope: (usize, usize),
+}
+
+/// `hmmsearch` prints scores to a tenth of a bit; half of that, and as much
+/// again for single-precision differences between the two implementations.
+const SCORE_TOLERANCE: f32 = 0.1;
+
+fn hit_of(report: SearchReport) -> Hit {
+    match report.outcome {
+        SearchOutcome::Hit(hit) => hit,
+        SearchOutcome::Filtered(reason) => panic!("HMMER 3.4 reports a hit, got {reason:?}"),
+    }
+}
+
+/// Compare the domains of `hit` with `expected`. `skip_envelope_of` names a
+/// domain whose envelope is not compared (see the test using it).
+fn assert_domains(hit: &Hit, expected: &[OracleDomain], skip_envelope_of: Option<usize>) {
+    assert_eq!(hit.domains.len(), expected.len(), "number of domains");
+    for (index, (domain, oracle)) in hit.domains.iter().zip(expected).enumerate() {
+        let n = index + 1;
+        assert!(
+            (domain.bitscore - oracle.score).abs() < SCORE_TOLERANCE,
+            "domain {n}: score {} for {}",
+            domain.bitscore,
+            oracle.score
+        );
+        let bias = domain.domain_bias / std::f32::consts::LN_2;
+        assert!(
+            (bias - oracle.bias).abs() < SCORE_TOLERANCE,
+            "domain {n}: bias {bias} for {}",
+            oracle.bias
+        );
+        assert_eq!((domain.hmm_from, domain.hmm_to), oracle.hmm, "domain {n}");
+        assert_eq!(
+            (domain.alignment_start, domain.alignment_end),
+            oracle.alignment,
+            "domain {n}"
+        );
+        if skip_envelope_of != Some(index) {
+            assert_eq!(
+                (domain.envelope_start, domain.envelope_end),
+                oracle.envelope,
+                "domain {n}"
+            );
+        }
+    }
+}
+
+/// TIGR01875 (Cas7_0_I) against the Cas7 of Thermococcus kodakarensis KOD1
+/// (NC_006624.1, gene 460 of the Prodigal prediction; 399 residues).
+fn search_cas7_two_domains(filters: FilterPolicy) -> Hit {
+    let sequence = b"MFLSVGVRFEANVEALNMVETAGNYGKHRRVPYLVEEDGKLKTVYVPAMSGESLAHAYQEHLVREALSAGLPVCDDCQRGEFYKSMDEVHFAPKLFNREEVFESVLANLSEVVDITISVLSSEIEKERNKKKQNEDKIKELEKFRGFMENLVKSEKPRDYILKNLSLASQVFGNYVIKKGILDLPPVKIEDIIVKSCVVEDVGGFLYTGSAPIRRSSAFQVSYALPVKSVALFATSEPQLHARHAQMDASSKKGNASEQMIYYVETGTALYGFTFNLDLDAIGVSAITSKPILDENEIKKRREASLKALFRMLSSSQFGAKLSRFFPVGGITELIVAVTDHPFVVTSPIYDDYIEKTQRRLKVLKSFGEESFLVVAGEEKVPEEALKEAIDYLHEKEAF";
+    hit_of(search_bundled_profile(
+        "Cas7_0_I.hmm",
+        "NC_006624.1_460",
+        sequence,
+        filters,
+    ))
+}
+
+/// HMMER 3.4 finds one region in that protein, resolves it by clustering
+/// sampled tracebacks, and reports two domains:
+///
+/// ```text
+/// #    score  bias  hmmfrom  hmm to  alifrom  ali to  envfrom  env to
+/// 1 !   34.9   0.0        2      74        4      89        3     107
+/// 2 !  103.0   0.1       88     239      192     342      110     343
+/// ```
+///
+/// with a sequence score of 140.5 and `reg clu ov env dom` = `1 1 0 2 2`.
+/// Scoring the region as one envelope, 3 to 343, gives one domain of 125.5
+/// bits instead.
+fn assert_cas7_matches_hmmer_3_4(hit: &Hit) {
+    assert!(
+        (hit.score - 140.5).abs() < SCORE_TOLERANCE,
+        "sequence score={}",
+        hit.score
+    );
+    assert_eq!(
+        (
+            hit.num_regions,
+            hit.num_clustered,
+            hit.num_overlaps,
+            hit.num_envelopes
+        ),
+        (1, 1, 0, 2)
+    );
+    assert_domains(
+        hit,
+        &[
+            OracleDomain {
+                score: 34.9,
+                bias: 0.0,
+                hmm: (2, 74),
+                alignment: (4, 89),
+                envelope: (3, 107),
+            },
+            OracleDomain {
+                score: 103.0,
+                bias: 0.1,
+                hmm: (88, 239),
+                alignment: (192, 342),
+                envelope: (110, 343),
+            },
+        ],
+        None,
+    );
+}
+
+#[test]
+fn two_domains_in_one_region_match_hmmer_3_4() {
+    assert_cas7_matches_hmmer_3_4(&search_cas7_two_domains(FilterPolicy::default()));
+}
+
+#[test]
+fn two_domains_in_one_region_match_hmmer_3_4_with_exact_filters() {
+    assert_cas7_matches_hmmer_3_4(&search_cas7_two_domains(exact_filters()));
+}
+
+/// Sampling restarts from the same seed at every region: searching the
+/// protein again, after another one, gives the same domains.
+#[test]
+fn a_multi_domain_region_is_resolved_the_same_way_every_time() {
+    let first = search_cas7_two_domains(FilterPolicy::default());
+    let _ = search_cas5(FilterPolicy::default());
+    let second = search_cas7_two_domains(FilterPolicy::default());
+    assert_eq!(first.domains.len(), second.domains.len());
+    for (a, b) in first.domains.iter().zip(&second.domains) {
+        assert_eq!(a.bitscore, b.bitscore);
+        assert_eq!(
+            (a.envelope_start, a.envelope_end),
+            (b.envelope_start, b.envelope_end)
+        );
+    }
+}
+
+/// TIGR03158 (Cas3_0_ID) against a helicase of T. kodakarensis KOD1
+/// (NC_006624.1, gene 457; 524 residues).
+fn search_cas3_overlapping_envelopes(filters: FilterPolicy) -> Hit {
+    let sequence = b"MRAFKKALQKLAEAKGFKPEKRPLLEEAFHFITPSENPPFLILQAPTGYGKTLLSFALAVHSLWDASIFDRVIHVLPMRSIIEDIQKTAEDAFGFSRTKMMGSSGEFLHLFPLNITTADTFTWDLLKLNTKKRHRIKAGLEFGYDYLTQASILTSLVIFDEAHFLLEDESMVTAFLSAIEFLTSQKVPIVVMTATLSEAHRGIFEKYAKKNGYNFYVLCPQEDDPFIERELKKEVEIEFREGNPLDFIEPGRRNAIIVNSVKRAVDLFNEAKNNPEIWPESERIMLIHGRMTPSHKRELIKRLREWTKKENFLLIGTQAVEAGVDFSVDLMITDRAPINSLLQRFGRVARYGSDMKANIFVLEDAPCGPYPKDKVEKTVNLMKEHQILPRVPDTYQAIVTEVHGKKPISVKKNVNRELKRTLLKLMSDPTKRAPHVLSSIERLTASGTPIMRGFLIPLSVGGEAVLISPSKLVELYYRGVVEIRGWKGNIRSLNDAYNVAKSVALGKNVEVVFIGEYDWERGIP";
+    hit_of(search_bundled_profile(
+        "Cas3_0_ID.hmm",
+        "NC_006624.1_457",
+        sequence,
+        filters,
+    ))
+}
+
+/// HMMER 3.4 finds two regions there. The first is a single envelope; the
+/// second is resolved into two envelopes of which the later starts inside
+/// the earlier, and both are scored:
+///
+/// ```text
+/// #    score  bias  hmmfrom  hmm to  alifrom  ali to  envfrom  env to
+/// 1 !   10.5   0.0       13      61       37      91       28     106
+/// 2 !    2.1   0.2      146     211      154     217      142     248
+/// 3 !   20.0   0.0      318     356      310     348      243     349
+/// ```
+///
+/// with a sequence score of 36.4 and `reg clu ov env dom` = `2 1 1 3 3`.
+fn assert_cas3_matches_hmmer_3_4(hit: &Hit, skip_envelope_of: Option<usize>) {
+    assert!(
+        (hit.score - 36.4).abs() < SCORE_TOLERANCE,
+        "sequence score={}",
+        hit.score
+    );
+    assert_eq!(
+        (
+            hit.num_regions,
+            hit.num_clustered,
+            hit.num_overlaps,
+            hit.num_envelopes
+        ),
+        (2, 1, 1, 3)
+    );
+    assert_domains(
+        hit,
+        &[
+            OracleDomain {
+                score: 10.5,
+                bias: 0.0,
+                hmm: (13, 61),
+                alignment: (37, 91),
+                envelope: (28, 106),
+            },
+            OracleDomain {
+                score: 2.1,
+                bias: 0.2,
+                hmm: (146, 211),
+                alignment: (154, 217),
+                envelope: (142, 248),
+            },
+            OracleDomain {
+                score: 20.0,
+                bias: 0.0,
+                hmm: (318, 356),
+                alignment: (310, 348),
+                envelope: (243, 349),
+            },
+        ],
+        skip_envelope_of,
+    );
+}
+
+#[test]
+fn overlapping_envelopes_of_one_region_match_hmmer_3_4() {
+    assert_cas3_matches_hmmer_3_4(
+        &search_cas3_overlapping_envelopes(FilterPolicy::default()),
+        None,
+    );
+}
+
+/// With the log-space decoder the first, single-envelope region ends one
+/// residue later than HMMER's (107 for 106): its posteriors, which decide
+/// where a region ends, are rounded differently. The region resolved by
+/// sampling comes out the same.
+#[test]
+fn overlapping_envelopes_of_one_region_match_hmmer_3_4_with_exact_filters() {
+    let hit = search_cas3_overlapping_envelopes(exact_filters());
+    assert_cas3_matches_hmmer_3_4(&hit, Some(0));
+    assert_eq!(hit.domains[0].envelope_start, 28);
 }
