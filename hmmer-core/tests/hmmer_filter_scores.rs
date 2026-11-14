@@ -395,13 +395,25 @@ fn edited_profile(
     (background, profile)
 }
 
+/// What takes a shortcut of the Viterbi filter away from a profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Oddity {
+    /// Delete-to-delete transitions so unlikely that the sum of two of them
+    /// does not fit a word.
+    DeleteStateWithoutSuccessor,
+    /// A bound for HMMER's lazy evaluation that does not fit the 16-bit
+    /// field HMMER keeps it in, so that HMMER tests a truncated one.
+    BeginTransitionNeverTaken,
+    /// A delete-to-delete "probability" above one, whose score is above
+    /// zero.
+    DeleteRunThatGains,
+}
+
 /// The Viterbi filter evaluates every delete-to-delete path, two vectors at
-/// a time, because that gives HMMER's score for any real profile. Two kinds
-/// of profile take that away, and the filter must notice: one with a
-/// delete-to-delete transition so unlikely that the sum of two of them does
-/// not fit a word, and one whose bound for HMMER's lazy evaluation does not
-/// fit the 16-bit field HMMER keeps it in, so that HMMER tests a truncated
-/// bound and may skip paths that count.
+/// a time, because that gives HMMER's score for any real profile. Some
+/// profiles take that away, and the filter must notice: it then goes one
+/// vector at a time, or runs HMMER's own recurrence, which may skip paths
+/// that count.
 #[test]
 fn viterbi_filter_follows_hmmer_where_its_shortcuts_do_not_hold() {
     let (m, l) = (120, 400);
@@ -409,19 +421,20 @@ fn viterbi_filter_follows_hmmer_where_its_shortcuts_do_not_hold() {
         hmm.transitions_mut(node)[kind as usize] = probability;
     };
     let mut rng = XorShift64::new(31);
-    for (name, pairs_exact, bound_exact) in [
-        ("a delete state that cannot be followed", false, true),
-        ("a begin transition that cannot be taken", true, false),
+    for oddity in [
+        Oddity::DeleteStateWithoutSuccessor,
+        Oddity::BeginTransitionNeverTaken,
+        Oddity::DeleteRunThatGains,
     ] {
-        let (background, profile) = edited_profile(&mut rng, m, l, |hmm| {
-            if !pairs_exact {
+        let (background, profile) = edited_profile(&mut rng, m, l, |hmm| match oddity {
+            Oddity::DeleteStateWithoutSuccessor => {
                 // Delete states that always return to a match state.
                 for node in [7, 8, 40, 77] {
                     transition(hmm, node, HTransition::DeleteToDelete, 0.0);
                     transition(hmm, node, HTransition::DeleteToMatch, 1.0);
                 }
             }
-            if !bound_exact {
+            Oddity::BeginTransitionNeverTaken => {
                 // Nothing but match states up to node 21, so that each is
                 // always visited; the match state of node 21 always deletes,
                 // so that of node 22 is never entered from B, and the delete
@@ -441,12 +454,19 @@ fn viterbi_filter_follows_hmmer_where_its_shortcuts_do_not_hold() {
                 transition(hmm, 21, HTransition::DeleteToMatch, 0.9999);
                 transition(hmm, 21, HTransition::DeleteToDelete, 0.0001);
             }
+            Oddity::DeleteRunThatGains => {
+                for node in [50, 51, 52] {
+                    transition(hmm, node, HTransition::DeleteToDelete, 1.5);
+                }
+            }
         });
+        let pairs_exact = oddity != Oddity::DeleteStateWithoutSuccessor;
+        let every_path_is_hmmer = oddity == Oddity::DeleteStateWithoutSuccessor;
         for isa in Isa::available() {
             let om = OptimizedProfile::for_hmmer_filters_with_isa(&profile, isa);
             let words = &om.viterbi_words;
-            assert_eq!(words.dd_pairs_are_exact, pairs_exact, "{name}");
-            assert_eq!(words.dd_bound_is_exact, bound_exact, "{name}");
+            assert_eq!(words.dd_pairs_are_exact, pairs_exact, "{oddity:?}");
+            assert_eq!(words.dd_bound_is_exact, every_path_is_hmmer, "{oddity:?}");
             // The bound as vf_conversion() leaves it: a running maximum
             // stored in 16 bits after every node.
             let (mut bound, mut largest_gain) = (i16::MIN, i32::MIN);
@@ -457,8 +477,12 @@ fn viterbi_filter_follows_hmmer_where_its_shortcuts_do_not_hold() {
                 largest_gain = largest_gain.max(gain);
                 bound = i32::from(bound).max(gain) as i16;
             }
-            assert_eq!(words.dd_bound, bound, "{name}");
-            assert_eq!(largest_gain <= i32::from(i16::MAX), bound_exact, "{name}");
+            assert_eq!(words.dd_bound, bound, "{oddity:?}");
+            assert_eq!(
+                largest_gain <= i32::from(i16::MAX),
+                oddity != Oddity::BeginTransitionNeverTaken,
+                "{oddity:?}"
+            );
             for round in 0..40 {
                 let random = random_digital_seq(
                     &mut rng,
@@ -483,17 +507,16 @@ fn viterbi_filter_follows_hmmer_where_its_shortcuts_do_not_hold() {
                 };
                 let (expected, _) = scalar_hmmer_viterbi(&seq, m, om.nj, words);
                 for (kernel, score) in viterbi_filters(&seq, &om) {
-                    // With a truncated bound nothing says that the paths
-                    // HMMER skips do not count, so evaluating all of them
-                    // need not give its score; the search runs HMMER's own
-                    // recurrence then.
-                    if !bound_exact && kernel.starts_with("with every") {
+                    // Where nothing says that the paths HMMER skips do not
+                    // count, evaluating all of them need not give its score;
+                    // the search runs HMMER's own recurrence then.
+                    if !every_path_is_hmmer && kernel.starts_with("with every") {
                         continue;
                     }
                     assert_eq!(
                         score.to_bits(),
                         expected.to_bits(),
-                        "{name}, {isa:?}, {kernel}: {score} != {expected}"
+                        "{oddity:?}, {isa:?}, {kernel}: {score} != {expected}"
                     );
                 }
             }

@@ -258,7 +258,7 @@ pub struct Cli {
     min_cas_score: f64,
     #[arg(
         long,
-        help = "Decide the HMM filters with exact scores instead of integer bounds, and decode in log space (slower)"
+        help = "Decide the HMM filters with exact scores instead of HMMER's rounded filter scores, and decode in log space (slower)"
     )]
     exact_filters: bool,
     #[arg(long = "cas-models-dir", value_name = "DIR")]

@@ -40,6 +40,41 @@ base too far, and thirteen Cas systems the original loses.
 
 ### Cas detection
 
+- The HMM search lets the same sequences through its filters as `hmmsearch`
+  3.4. HMMER decides its MSV and bias filters on the score its byte filter
+  returns and its Viterbi filter on the score of its 16-bit filter, each with
+  its own rounding, its own overflow rule and a constant in place of the N, C
+  and J loops; the search decided them on an 8-bit lower bound of the exact
+  MSV score and a 16-bit upper bound of the exact Viterbi score, up to a nat
+  away. It now computes HMMER's two filter scores and applies HMMER's tests:
+  an overflowed filter passes, and a sequence whose MSV score already meets
+  the Viterbi threshold skips the Viterbi filter. Three smaller differences
+  are gone with it: the bias filter kept one transition of its two-state
+  model fixed where HMMER sets it from the target length, a model's
+  composition was normalised where HMMER uses it as written, and the
+  profile's scores were computed in single precision where HMMER takes its
+  logarithms in double precision. On E. coli K-12 and the 21 genomes of the
+  panel, with the 535 CasFinder 3.1 profiles, as many sequences pass each of
+  the four filters as in `hmmsearch` in all 11,770 searches, where none
+  agreed, and the two tools report the same 7727 protein and profile pairs,
+  where 540 were reported by `hmmsearch` only, 45 of them of 20 bits or
+  more, and 1153 by this tool only, 18 of 20 bits or more. The two envelopes
+  that started a residue or two away from HMMER's are HMMER's now. The 7187
+  pairs reported before and still reported keep their coordinates otherwise;
+  709 scores move, 17 by more than a thousandth of a bit and none by more
+  than 0.014 bit.
+- On the 72 genomes the Cas systems do not change: 48 reported by both tools
+  with the same genes and profiles, 13 by this tool only. Seven weak hits
+  enter `annotation/cas_hits.tsv`, one of 35.9 bits that `hmmsearch` drops
+  leaves it, none of them in a system, and the third digit of 14 E-values
+  moves by one. E. coli K-12 takes 6.59 s on one thread of an M1 Max where it
+  took 6.39 s, and 1.00 s on all its cores where it took 0.98 s: HMMER's
+  filters let more sequences through to the Viterbi filter than the bounds
+  did.
+- `--exact-filters` still decides the filters on exact scores, and its bias
+  filter follows HMMER's too: on the 22 proteomes it reports 7757 pairs where
+  it reported 8666, 7592 of them among the 7727 of `hmmsearch` where 7327
+  were.
 - A stretch of a protein that may hold several domains is resolved as HMMER
   3.4 resolves it. The Forward matrix of the region is filled with the
   multihit model, 200 tracebacks are sampled from it with Easel's generator

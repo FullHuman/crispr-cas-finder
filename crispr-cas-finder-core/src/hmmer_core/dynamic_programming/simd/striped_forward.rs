@@ -17,10 +17,10 @@
 //
 // The cells can still differ from HMMER's in their last bit, because the
 // profile's odds ratios can: HMMER exponentiates the profile's scores with a
-// vectorised approximation of its own, this port with `f32::exp`. On the
-// 1,989 hits with a multi-domain region of the comparison with `hmmsearch`
-// 3.4 (22 genomes, the CasFinder 3.1 profiles), two came out with an
-// envelope one or two residues away.
+// vectorised approximation of its own, this port with `f32::exp`. Of the
+// 2,172 hits with a multi-domain region in the comparison with `hmmsearch`
+// 3.4 (22 genomes, the CasFinder 3.1 profiles), one comes out with an
+// envelope two residues away, a hit of -36.7 bits with seven domains.
 
 use super::oprofile::*;
 use crate::hmmer_core::rng::{EaselFastRng, normalize_probabilities};
@@ -37,7 +37,8 @@ use std::simd::prelude::*;
 /// special-state cells, which is enough for a traceback to take another
 /// path now and then: in the comparison with that `hmmsearch`, the plain
 /// form left three hits of 1,989 with a different envelope and the fused
-/// form two. This port follows the arm64 build, the one its regression
+/// form two (one of 2,172 since the profile's scores are computed in
+/// HMMER's arithmetic too). This port follows the arm64 build, the one its regression
 /// fixtures were generated with; `f32::mul_add` rounds once on every target,
 /// so the port's own results do not depend on the platform.
 const FUSED_SPECIALS: bool = true;

@@ -2,11 +2,11 @@
 //
 // The integer MSV bound of int_msv.rs on 8-bit cells, sixteen to sixty-four
 // lanes per vector depending on the processor (see `int_msv::Isa`), at half
-// the cost per cell of the 16-bit bound. By default its lower bound alone
-// decides the MSV and bias filters, standing in for the exact score
-// (pipeline/search.rs). With the exact filter policy its upper bound runs
-// first and, being coarser than the 16-bit bound, leaves what it lets
-// through to that one.
+// the cost per cell of the 16-bit bound. The exact filter policy runs its
+// upper bound first (pipeline/search.rs) and, as it is coarser than the
+// 16-bit bound, leaves what it lets through to that one. The default policy
+// does not bound the exact score: it decides on the score of HMMER's own
+// MSV filter (msv_filter.rs), which runs on the same kernels.
 
 use super::int_msv::{
     Blocks, Table, Unit, dispatch, msv_lower_bound as lower_bound, msv_upper_bound as upper_bound,

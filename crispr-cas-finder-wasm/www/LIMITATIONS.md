@@ -87,41 +87,47 @@ truth set have not been measured.
   than 100 kb are predicted in metagenomic mode, as in CRISPRCasFinder;
   `--auto-metagenome-below 0` disables this. A GFF3 annotation and protein FASTA
   can be supplied instead (`--gff`, `--faa`). Prokka is not supported.
-- Cas detection uses an internal Rust HMMER implementation. A stretch of a
-  protein that may hold several domains is resolved the way HMMER 3.4 resolves
-  it, by clustering 200 tracebacks sampled with HMMER's random number
-  generator and seed. On the proteins of E. coli K-12 and of the 21 genomes of
-  `benchmarks/panel.tsv`, searched with the 535 CasFinder 3.1 profiles, the
-  7187 protein and profile pairs that this implementation and `hmmsearch` 3.4
-  both report have the same number of domains, the same alignment coordinates,
-  and domain scores within 0.06 bit of the ones `hmmsearch` prints to a tenth
-  of a bit; in two of them an envelope starts one or two residues away, and
-  the sequence score of one of the two is 0.13 bit lower. The likely cause of
-  those two is the last bit of single-precision numbers: HMMER computes a
-  profile's probabilities with its own approximation of the exponential, and
-  when a random number falls within that last bit of a boundary, a sampled
-  traceback takes another path. A weak domain found in just a quarter of the
-  tracebacks, the share HMMER requires, can then be reported or not: sampling
-  the proteins of Thermococcus kodakarensis with seed 7 in both tools, one of
-  126 such pairs lacked a domain of -2.5 bits that `hmmsearch` reported. With
-  `--exact-filters` the log-space decoder rounds posterior probabilities
-  differently from HMMER, so a region can begin or end a residue away from
-  HMMER's and is then sampled differently: of 7327 pairs, 8 differ in their
-  number of domains and 497 in a domain score by more than 0.05 bit. A hit
-  sitting exactly on a threshold can still fall on the other side of it.
-- By default the HMM search decides its MSV and bias filters with an 8-bit
-  lower bound on the MSV score (within about half a nat of it), its Viterbi
-  filter with a 16-bit upper bound on the Viterbi score, and decodes posterior
-  probabilities in probability space, as HMMER itself does. A sequence whose
-  exact MSV score sits within half a nat of the filter threshold can be
-  dropped that HMMER's own filter would also round away, and bit scores can
-  move by a few tenths of a percent through the composition correction.
-  `--exact-filters` restores the exact single-precision filter scores and the
-  log-space decoder of earlier versions: identical hits on the 28 genomes
-  checked, at about 1.8 times the search time. On the E. coli K-12 proteome
-  (4318 proteins) and the 535 CasFinder 3.1 profiles, one thread of an M1 Max
-  searches in 7.9 s against 9.8 s for `hmmsearch` 3.4 and 13.9 s with
-  `--exact-filters`; with every core, 1.6 s of wall time against 5.3 s for
+- Cas detection uses an internal Rust HMMER implementation, which follows
+  `hmmsearch` 3.4 stage by stage. It decides the MSV, bias and Viterbi filters
+  on the scores HMMER's own filters return, in bytes and 16-bit words with
+  their rounding and overflow rules, computes the profile, the null score and
+  the bias filter score in HMMER's arithmetic, and resolves a stretch of a
+  protein that may hold several domains the way HMMER does, by clustering 200
+  tracebacks sampled with HMMER's random number generator and seed. On the
+  proteins of E. coli K-12 and of the 21 genomes of `benchmarks/panel.tsv`,
+  searched with the 535 CasFinder 3.1 profiles, as many sequences pass each of
+  the four filters as in `hmmsearch` for every profile and every proteome
+  (11,770 searches), and the two report the same 7727 protein and profile
+  pairs, with the same number of domains, the same alignment coordinates, and
+  domain scores within 0.06 bit of the ones `hmmsearch` prints to a tenth of a
+  bit. One pair differs beyond that, a hit of -36.7 bits that no threshold
+  keeps: its envelope ends two residues later and its domain scores 0.6 bit
+  more. With seed 7 in both tools, the 439 pairs of Thermococcus kodakarensis
+  agree in the same way.
+- That comparison is with the arm64 build of HMMER on macOS, and it holds on
+  that platform. Where a score hangs on the last bit of a single-precision
+  number, HMMER itself depends on how it was built: its arm64 build fuses some
+  multiplications with the addition that follows, which this implementation
+  does on every platform, and it reads profiles and scores the bias filter
+  with the C library's `expf` and `logf`, which macOS does not round as other
+  systems do. On another system a profile's probabilities can differ in their
+  last bit from those `hmmsearch` computes on macOS, and a hit sitting exactly
+  on a threshold can fall on the other side of it.
+- By default the HMM search decodes posterior probabilities in probability
+  space, as HMMER itself does. `--exact-filters` decides the MSV, bias and
+  Viterbi filters on exact single-precision scores instead of the scores of
+  HMMER's filters and decodes in log space, as earlier versions did. It takes
+  about twice the time and does not give the hits of `hmmsearch`: exact
+  scores let other sequences through, and the log-space decoder rounds
+  posterior probabilities differently, so that a region can begin or end a
+  residue away from HMMER's and is then sampled differently. On the 22
+  proteomes above it reports 7757 pairs, 7592 of them among the 7727 of
+  `hmmsearch`; 8 of those differ in their number of domains and 514 in a
+  domain score by more than 0.05 bit. On E. coli K-12 (4318 proteins) with the
+  535 CasFinder 3.1 profiles, a run of the tool on one thread of an M1 Max
+  takes 6.6 s, gene prediction and array detection included, against 9.1 s
+  for `hmmsearch` 3.4 on the proteins alone, and 13.1 s with
+  `--exact-filters`; with every core, 1.0 s of wall time against 4.6 s for
   `hmmsearch --cpu 10`.
 - Two generations of Cas models are supported. The bundled default is CasFinder
   2.0.3. CasFinder 3 packages (MacSyFinder 2 format) are loaded from a directory

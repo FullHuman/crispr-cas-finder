@@ -54,7 +54,8 @@ pub struct HitFiltering {
     /// Use the profile's gathering (GA) bit-score cutoffs when it has them.
     pub cut_ga: bool,
     /// Decide the MSV and Viterbi filters with their exact single-precision
-    /// scores rather than with integer bounds (see `FilterPolicy::exact`).
+    /// scores rather than with the scores HMMER's own filters return (see
+    /// `FilterPolicy::exact`).
     pub exact_filters: bool,
 }
 

@@ -284,8 +284,8 @@ pub struct CasFinderConfig {
     /// Directory containing CAS HMM profile files.
     pub cas_profiles_dir: Option<std::path::PathBuf>,
     /// Decide the HMM filters with exact single-precision scores instead of
-    /// integer bounds, and decode posteriors in log space; slower, and the
-    /// behaviour of versions before the fast pipeline.
+    /// the rounded scores of HMMER's own filters, and decode posteriors in
+    /// log space; slower, and not the sequences `hmmsearch` lets through.
     pub exact_filters: bool,
 }
 

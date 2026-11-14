@@ -59,10 +59,11 @@ pub struct ViterbiWords {
     /// `ddbound_w`: the most a delete-to-delete path can gain on the begin
     /// transition into the node it leads to.
     pub dd_bound: i16,
-    /// Whether that bound fits the 16-bit field HMMER keeps it in. It does
-    /// for any real profile; when it does not, HMMER's lazy evaluation of
-    /// the delete-to-delete paths tests a truncated bound, and only its own
-    /// recurrence reproduces what it then computes.
+    /// Whether that bound fits the 16-bit field HMMER keeps it in, and no
+    /// delete-to-delete transition scores above zero. Both hold for any real
+    /// profile; when one does not, HMMER's lazy evaluation of the
+    /// delete-to-delete paths may leave out paths that count, and only its
+    /// own recurrence reproduces what it then computes.
     pub dd_bound_is_exact: bool,
     /// For every second vector, the sum of its delete-to-delete transition
     /// and the next vector's, saturated: two steps of the delete chain in
@@ -164,13 +165,19 @@ impl ViterbiWords {
             dd_bound = largest as i16;
         }
 
+        // The other transitions are capped at zero above, as HMMER caps
+        // them; a delete-to-delete transition is not, and one above zero (a
+        // probability above one) would undo the argument for evaluating
+        // every path, which has scores only fall along a run of deletes.
+        let dd_start = NTSC_PER_Q * q * lanes;
+        dd_bound_is_exact &= transitions[dd_start..].iter().all(|&word| word <= 0);
+
         // Vectors 2j and 2j+1 hold, in lane z, the transitions out of nodes
         // k and k+1, k = 2j + 1 + z·q; their sum takes a delete cell from
         // node k to node k+2, which leads on to a match state when
         // k + 2 < M. Past that, no cell that counts follows.
         let mut dd_pairs = vec![i16::MIN; (q / 2) * lanes];
         let mut dd_pairs_are_exact = true;
-        let dd_start = NTSC_PER_Q * q * lanes;
         for pair in 0..q / 2 {
             for z in 0..lanes {
                 let first = i32::from(transitions[dd_start + 2 * pair * lanes + z]);

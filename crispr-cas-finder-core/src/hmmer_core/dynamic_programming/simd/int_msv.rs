@@ -6,12 +6,12 @@
 // sequence whose bound fails the MSV threshold would fail the exact filter
 // too. With them going downward it is a lower bound: a sequence whose bound
 // passes would pass the exact filter too. The search pipeline
-// (pipeline/search.rs) uses the bounds two ways. By default the 8-bit lower
-// bound stands in for the score and decides the MSV and bias filters, as
-// HMMER's own rounded filter does, and the exact filter never runs. With
-// `FilterPolicy::exact` the bounds settle only the sequences they can, and
-// the exact filter scores the rest, so the decisions are those of the exact
-// score.
+// (pipeline/search.rs) uses the bounds with `FilterPolicy::exact`: they
+// settle the sequences they can, and the exact filter scores the rest, so
+// the decisions are those of the exact score. By default the pipeline
+// decides on the score of HMMER's own MSV filter instead, whose
+// single-segment pass is the plain recurrence below with HMMER's table
+// (`largest_cell`, msv_filter.rs).
 //
 // Single segments. An MSV path visits the model in one or more segments,
 // diagonal runs of match states. With tloop the N/C/J self-loop score,
@@ -48,9 +48,10 @@
 // processor overlaps consecutive rows freely.
 //
 // Plain rows. With 8-bit cells the cumulative delta grows by at most one
-// unit a row for all but the shortest sequences, and the bound the search
-// decides its first filter with needs neither a starting row nor a record
-// of blocks. Such rows have kernels of their own, pared down to the
+// unit a row for all but the shortest sequences, and HMMER's single-segment
+// pass, which the search decides its first filter with, has no delta at
+// all; neither it nor a lower bound needs a starting row or a record of
+// blocks. Such rows have kernels of their own, pared down to the
 // additions and maxima: a cursor finds the emissions of a row in four
 // instructions, a row of up to 24 vectors is updated in its registers from
 // the last vector down, so that no cell has to be moved aside, and a longer
