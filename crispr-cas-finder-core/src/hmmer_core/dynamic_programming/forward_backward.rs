@@ -407,6 +407,10 @@ fn decode_posterior_row(
 ///
 /// A generic full Forward matrix is reconstructed here and checked against an
 /// independently computed SIMD Forward score before posterior decoding.
+///
+/// The search decodes in probability space
+/// ([`super::odds_decode::decode_odds_space`]) and does not call this
+/// function; it is the reference the tests compare that decoder with.
 pub fn backward_decode_log_space(
     digital_sequence: &[u8],
     profile: &Profile,
@@ -425,8 +429,8 @@ pub fn backward_decode_log_space(
 
 /// Compatibility wrapper for the former checkpoint-replay Backward API.
 ///
-/// The current decoder is log-space and only needs the checkpointed Forward
-/// score. New callers should use [`backward_decode_log_space`].
+/// It runs the log-space reference decoder, [`backward_decode_log_space`],
+/// which only needs the checkpointed Forward score.
 #[allow(clippy::too_many_arguments)]
 pub fn backward_decode_prob_space(
     digital_sequence: &[u8],

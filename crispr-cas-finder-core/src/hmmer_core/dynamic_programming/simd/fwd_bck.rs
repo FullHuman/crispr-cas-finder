@@ -1,9 +1,10 @@
 // simd/fwd_bck.rs — optional SIMD checkpointed Forward + segment replay
 //
 // Provides an odds-space f32x4 Farrar-striped checkpoint/replay implementation.
-// The current production posterior decoder uses a generic log-space Forward/
-// Backward implementation; these utilities remain useful for verification,
-// benchmarking, and a future memory-bounded SIMD Backward decoder.
+// The search decodes posteriors in probability space on full matrices
+// (odds_decode.rs) and does not use it; these utilities remain useful for
+// verification, benchmarking, and a future memory-bounded SIMD Backward
+// decoder.
 
 use super::oprofile::*;
 use crate::hmmer_core::dynamic_programming::forward_backward::ForwardCheckpoints;

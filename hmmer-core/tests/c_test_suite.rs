@@ -13,8 +13,6 @@ use hmmer_core::profile::Profile;
 use hmmer_core::rng::XorShift64;
 use hmmer_core::score_matrix::NUM_SPECIAL_STATES;
 use hmmer_core::score_matrix::*;
-use hmmer_core::simd::f32_msv;
-use hmmer_core::simd::f32_viterbi;
 use hmmer_core::simd::forward_filter;
 use hmmer_core::simd::fwd_bck;
 use hmmer_core::simd::oprofile::OptimizedProfile;
@@ -655,31 +653,6 @@ fn test_hmm_encode_decode_statetype() {
 // }
 
 // ===================================================================
-// generic_viterbi.c :: utest_viterbi()
-// ===================================================================
-
-#[test]
-fn test_generic_viterbi_random_seqs() {
-    let abc = Alphabet::amino();
-    let mut rng = XorShift64::new(42);
-    let m = 20;
-    let l = 50;
-
-    let hmm = hmm_sample(&mut rng, m, &abc);
-    let bg = BackgroundModel::new(&abc);
-    let mut gm = Profile::new(hmm.num_nodes, &abc);
-    hmmer_core::modelconfig::profile_config(&hmm, &bg, &mut gm, l, SearchMode::Local);
-    let mut om = OptimizedProfile::from_profile(&gm);
-    om.reconfigure_length(l);
-
-    for _ in 0..10 {
-        let dsq = random_digital_seq(&mut rng, &bg.residue_frequencies, abc.canonical_size, l);
-        let score = f32_viterbi::viterbi_filter_f32(&dsq, dsq.len(), &om);
-        assert!(!score.is_nan(), "Viterbi score is NaN");
-    }
-}
-
-// ===================================================================
 // generic_fwdback.c :: utest_forward()
 // ===================================================================
 
@@ -934,31 +907,6 @@ fn test_recompute_forward_segment() {
                 );
             }
         }
-    }
-}
-
-// ===================================================================
-// generic_msv.c :: utest_msv()
-// ===================================================================
-
-#[test]
-fn test_generic_msv_random_seqs() {
-    let abc = Alphabet::amino();
-    let mut rng = XorShift64::new(42);
-    let m = 20;
-    let l = 50;
-
-    let hmm = hmm_sample(&mut rng, m, &abc);
-    let bg = BackgroundModel::new(&abc);
-    let mut gm = Profile::new(hmm.num_nodes, &abc);
-    hmmer_core::modelconfig::profile_config(&hmm, &bg, &mut gm, l, SearchMode::Local);
-    let mut om = OptimizedProfile::from_profile(&gm);
-    om.reconfigure_length(l);
-
-    for _ in 0..10 {
-        let dsq = random_digital_seq(&mut rng, &bg.residue_frequencies, abc.canonical_size, l);
-        let score = f32_msv::msv_filter_f32(&dsq, dsq.len(), &om);
-        assert!(score.is_finite(), "MSV score not finite: {}", score);
     }
 }
 

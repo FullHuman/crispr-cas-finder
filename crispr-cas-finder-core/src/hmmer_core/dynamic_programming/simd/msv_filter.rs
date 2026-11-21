@@ -10,9 +10,9 @@
 // arithmetic from a base of 190, constant costs for the begin, exit and
 // J transitions, a constant -3 nats for the N, C and J loops, and plus
 // infinity as soon as a cell reaches the top of the byte. The result differs
-// from the exact score by up to a nat or so, and many real hits sit at the
-// thresholds, so the search pipeline (pipeline/search.rs) decides on this
-// number too: the same sequences then pass as in `hmmsearch`.
+// from the MSV score of the profile by up to a nat or so, and many real hits
+// sit at the thresholds, so the search pipeline (pipeline/search.rs) decides
+// on this number too: the same sequences then pass as in `hmmsearch`.
 //
 // The arithmetic is on integers, so the result does not depend on how the
 // cells are striped or on the width of the vectors.
@@ -20,8 +20,8 @@
 // Single segments first. `p7_SSVFilter()` drops the J state: cells are signed
 // bytes whose floor, -128, is the begin state, and one saturating addition
 // per cell replaces the maximum with the begin state, the bias and the cost.
-// That is the plain recurrence of int_msv.rs, and it runs on those kernels
-// with HMMER's table. Its result stands when no segment scores high enough
+// That is the recurrence of int_msv.rs, and it runs on those kernels with
+// HMMER's table. Its result stands when no segment scores high enough
 // to pay for a second one through J; otherwise, and whenever the constants
 // of the profile and the sequence length leave the shortcut unproven,
 // `p7_MSVFilter()`'s own recurrence runs, as in HMMER.

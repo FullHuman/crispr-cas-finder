@@ -5,20 +5,20 @@
 // Model positions 1..M are interleaved across Q SIMD vectors.
 // Position k maps to vector q = (k-1) % Q, lane z = (k-1) / Q.
 //
-// Two f32 precision tiers:
-//   Forward: f32  in 4-lane vectors  (Q4  = max(2, ceil((M-1)/4)  + 1)) — odds space
-//   Log:     f32  in 4-lane vectors  (Q4)  — log-space for MSV/Viterbi filters
+// Three sets of tables:
+//   Forward: f32 odds ratios in 4-lane vectors (Q4 = max(2, ceil((M-1)/4) + 1))
+//   MSV:     HMMER's byte costs (msv_filter.rs)
+//   Viterbi: HMMER's 16-bit words (viterbi_filter.rs)
 
-use super::int_msv::{Isa, Rounding};
+use super::int_msv::Isa;
 use super::msv_filter::MsvBytes;
 use super::viterbi_filter::ViterbiWords;
-use super::{i8_msv, i16_msv, i16_viterbi, int_msv};
 use crate::hmmer_core::config::*;
 use crate::hmmer_core::profile::Profile;
 
 // ---------- layout helpers ----------
 
-/// Number of f32x4 vectors for Forward / log-space tiers.
+/// Number of f32x4 vectors of the Forward tables.
 #[inline]
 pub fn nqf(m: usize) -> usize {
     2.max(m.saturating_sub(1) / 4 + 1)
@@ -61,45 +61,13 @@ pub struct OptimizedProfile {
     pub tfv: Vec<f32>,      // [(7*q4 + q4) * 4]
     pub xf: [[f32; 2]; NUM_XSTATES],
 
-    // --- Tables of the exact filters and of their integer bounds: the
-    // log-space scores and everything down to the Viterbi over-estimate.
-    // The default filter cascade reads none of them, so a search builds
-    // them only for `FilterPolicy::exact` and `max_mode` (see
-    // `for_hmmer_filters` and `build_exact_filter_tables`). ---
-    has_exact_filter_tables: bool,
-
-    // --- Log-space f32x4 (MSV/Viterbi exact scores) ---
-    pub rlv: Vec<Vec<f32>>, // [kp][q4 * 4] — match emission log-scores
-    pub tlv: Vec<f32>,      // [(7*q4 + q4) * 4] — transition log-scores
-
-    // --- Instruction set of the integer MSV bounds (see int_msv.rs) ---
+    // --- Instruction set of the integer kernels (see int_msv.rs) ---
     // Private: the kernels compiled for it may only run where it is
-    // available, which `from_profile_with_isa` checks.
+    // available, which `new_with_isa` checks.
     isa: Isa,
 
-    // --- 8-bit MSV over-estimate (see i8_msv.rs), isa.lanes::<i8>() lanes ---
-    pub q_msv8: usize,                     // vectors per DP row
-    pub msv_scale8: f64,                   // integer units per nat
-    pub msv_units8: Vec<i8>,               // [kp * q_msv8 * lanes] — match emissions, rounded up
-    pub msv_units8_plus_one: Vec<i8>,      // the same, one unit higher
-    pub msv_units8_down: Vec<i8>,          // match emissions rounded down, for the lower bound
-    pub msv_units8_down_plus_one: Vec<i8>, // the same, one unit higher
-
-    // --- 16-bit MSV over-estimate (see i16_msv.rs), isa.lanes::<i16>() lanes ---
-    pub q_msv16: usize,           // vectors per DP row
-    pub ssv_units: Vec<i16>, // [kp * q_msv16 * lanes] — match emissions at i16_msv::SCALE, rounded up
-    pub ssv_units_down: Vec<i16>, // the same, rounded down, for the lower bound
-
-    // --- 16-bit Viterbi over-estimate (see i16_viterbi.rs), isa.lanes::<i16>() lanes ---
-    pub q_vit: usize,             // vectors per DP row
-    pub msv_scale: f64,           // integer units per nat
-    pub msv_units: Vec<i16>,      // [kp * q_vit * lanes] — match emissions, rounded up
-    pub vit_units: Vec<i16>,      // [(7*q_vit + q_vit) * lanes] — transitions, rounded up
-    pub vit_min_begin_units: i16, // smallest finite begin transition
-
     // --- HMMER's own filter tables: the scores its MSV and Viterbi filters
-    // return decide the default filter cascade (msv_filter.rs,
-    // viterbi_filter.rs) ---
+    // return decide the filter cascade (msv_filter.rs, viterbi_filter.rs) ---
     pub msv_bytes: MsvBytes,
     pub viterbi_words: ViterbiWords,
 
@@ -117,17 +85,9 @@ impl OptimizedProfile {
         Self::new_with_isa(m, kp, Isa::for_model(m))
     }
 
-    /// [`OptimizedProfile::new`] for the integer MSV kernels of `isa`, or of
-    /// the portable kernels when this processor lacks it.
+    /// [`OptimizedProfile::new`] for the integer kernels of `isa`, or of the
+    /// portable kernels when this processor lacks it.
     pub fn new_with_isa(m: usize, kp: usize, isa: Isa) -> Self {
-        let mut om = Self::without_exact_filter_tables(m, kp, isa);
-        om.allocate_exact_filter_tables();
-        om
-    }
-
-    /// [`OptimizedProfile::new_with_isa`] without the tables of the exact
-    /// filters.
-    fn without_exact_filter_tables(m: usize, kp: usize, isa: Isa) -> Self {
         let isa = if isa.is_available() {
             isa
         } else {
@@ -145,24 +105,7 @@ impl OptimizedProfile {
             riv: vec![vec![0.0f32; q4 * 4]; kp],
             tfv: vec![0.0f32; (NTSC_PER_Q * q4 + q4) * 4],
             xf: [[0.0f32; 2]; NUM_XSTATES],
-            has_exact_filter_tables: false,
-            rlv: Vec::new(),
-            tlv: Vec::new(),
             isa,
-            q_msv8: isa.vector_count::<i8>(m),
-            msv_scale8: i8_msv::SCALE,
-            msv_units8: Vec::new(),
-            msv_units8_plus_one: Vec::new(),
-            msv_units8_down: Vec::new(),
-            msv_units8_down_plus_one: Vec::new(),
-            q_msv16: isa.vector_count::<i16>(m),
-            ssv_units: Vec::new(),
-            ssv_units_down: Vec::new(),
-            q_vit: isa.vector_count::<i16>(m),
-            msv_scale: i16_msv::scale_for(m),
-            msv_units: Vec::new(),
-            vit_units: Vec::new(),
-            vit_min_begin_units: 0,
             msv_bytes: MsvBytes::default(),
             viterbi_words: ViterbiWords::default(),
             ev_params: [EV_PARAM_UNSET; NUM_EV_PARAMS],
@@ -172,33 +115,18 @@ impl OptimizedProfile {
     }
 
     /// Build an OptimizedProfile from a generic Profile, for the instruction
-    /// set this processor runs a model of its length best with.
+    /// set this processor runs a model of its length best with: the Forward
+    /// tables and those of HMMER's MSV and Viterbi filters.
     pub fn from_profile(gm: &Profile) -> Self {
         Self::from_profile_with_isa(gm, Isa::for_model(gm.num_nodes))
     }
 
-    /// [`OptimizedProfile::from_profile`] with the integer MSV kernels of
-    /// `isa`, or of the portable kernels when this processor lacks it. The
-    /// bounds those kernels compute do not depend on the instruction set.
+    /// [`OptimizedProfile::from_profile`] for the integer kernels of `isa`,
+    /// or of the portable kernels when this processor lacks it. The scores
+    /// those kernels return do not depend on the instruction set.
     pub fn from_profile_with_isa(gm: &Profile, isa: Isa) -> Self {
-        let mut om = Self::for_hmmer_filters_with_isa(gm, isa);
-        om.build_exact_filter_tables(gm);
-        om
-    }
-
-    /// [`OptimizedProfile::from_profile`] with the tables of the default
-    /// search only: the Forward tables and those of HMMER's MSV and Viterbi
-    /// filters. The exact MSV and Viterbi filters and their integer bounds
-    /// need [`OptimizedProfile::build_exact_filter_tables`] first.
-    pub fn for_hmmer_filters(gm: &Profile) -> Self {
-        Self::for_hmmer_filters_with_isa(gm, Isa::for_model(gm.num_nodes))
-    }
-
-    /// [`OptimizedProfile::for_hmmer_filters`] for the kernels of `isa`, or
-    /// of the portable kernels when this processor lacks it.
-    pub fn for_hmmer_filters_with_isa(gm: &Profile, isa: Isa) -> Self {
         let kp = gm.alphabet.full_size;
-        let mut om = OptimizedProfile::without_exact_filter_tables(gm.num_nodes, kp, isa);
+        let mut om = OptimizedProfile::new_with_isa(gm.num_nodes, kp, isa);
         om.mode = gm.mode;
         om.l = gm.target_length;
         om.nj = gm.expected_j_uses;
@@ -212,50 +140,10 @@ impl OptimizedProfile {
         om
     }
 
-    /// Build the tables of the exact MSV and Viterbi filters and of their
-    /// integer bounds from `gm`, the profile this one was converted from,
-    /// unless it has them already.
-    pub fn build_exact_filter_tables(&mut self, gm: &Profile) {
-        if self.has_exact_filter_tables {
-            return;
-        }
-        self.allocate_exact_filter_tables();
-        log_conversion(gm, self);
-        msv_units_conversion(gm, self);
-        vit_units_conversion(gm, self);
-    }
-
-    /// Whether the tables of the exact filters have been built.
-    #[inline]
-    pub fn has_exact_filter_tables(&self) -> bool {
-        self.has_exact_filter_tables
-    }
-
-    /// The tables of the exact filters, with every score impossible.
-    fn allocate_exact_filter_tables(&mut self) {
-        let (m, kp, q4, isa) = (self.m, self.kp, self.q4, self.isa);
-        self.rlv = vec![vec![f32::NEG_INFINITY; q4 * 4]; kp];
-        self.tlv = vec![f32::NEG_INFINITY; (NTSC_PER_Q * q4 + q4) * 4];
-        let (q, lanes) = (isa.vector_count::<i16>(m), isa.lanes::<i16>());
-        self.msv_units = vec![i16::MIN; kp * q * lanes];
-        self.vit_units = vec![i16::MIN; (NTSC_PER_Q + 1) * q * lanes];
-        self.has_exact_filter_tables = true;
-    }
-
-    /// The instruction set the integer MSV kernels run with.
+    /// The instruction set the integer kernels run with.
     #[inline]
     pub fn isa(&self) -> Isa {
         self.isa
-    }
-
-    /// Striped 16-bit match emissions of `residue` for the Viterbi
-    /// over-estimate (see i16_viterbi.rs).
-    #[inline]
-    pub fn msv_units_row(&self, residue: u8) -> &[i16] {
-        let xi = residue as usize;
-        let xi = if xi < self.kp { xi } else { 0 };
-        let width = self.q_vit * self.isa.lanes::<i16>();
-        &self.msv_units[xi * width..][..width]
     }
 
     /// Reconfigure length model for target length L.
@@ -403,172 +291,4 @@ fn fwd_conversion(gm: &Profile, om: &mut OptimizedProfile) {
     om.xf[XST_C][XTR_MOVE] = ss.c_move.exp();
     om.xf[XST_J][XTR_LOOP] = ss.j_loop.exp();
     om.xf[XST_J][XTR_MOVE] = ss.j_move.exp();
-}
-
-// ---------- i16x8 match emissions for the MSV over-estimate ----------
-
-fn msv_units_conversion(gm: &Profile, om: &mut OptimizedProfile) {
-    let m = gm.num_nodes;
-    let nq = om.q_vit;
-    let lanes = om.isa.lanes::<i16>();
-    for x in 0..om.kp {
-        let rsc = gm.residue_scores_for(x);
-        let row = &mut om.msv_units[x * nq * lanes..][..nq * lanes];
-        for q in 0..nq {
-            for z in 0..lanes {
-                let k = q + 1 + z * nq;
-                let score_idx = k * PROFILE_NUM_EMISSIONS + PRsc::MatchScore as usize;
-                if k <= m && score_idx < rsc.len() {
-                    row[q * lanes + z] = i16_msv::emission_units(om.msv_scale, rsc[score_idx]);
-                }
-            }
-        }
-    }
-    let (isa, kp) = (om.isa, om.kp);
-    let (q16, lanes16) = (om.q_msv16, isa.lanes::<i16>());
-    let (q8, lanes8) = (om.q_msv8, isa.lanes::<i8>());
-    om.ssv_units = int_msv::emission_table(gm, kp, q16, lanes16, i16_msv::SCALE, Rounding::Up);
-    om.ssv_units_down =
-        int_msv::emission_table(gm, kp, q16, lanes16, i16_msv::SCALE, Rounding::Down);
-    om.msv_units8 = int_msv::emission_table(gm, kp, q8, lanes8, om.msv_scale8, Rounding::Up);
-    om.msv_units8_plus_one = int_msv::one_unit_higher(&om.msv_units8);
-    om.msv_units8_down = int_msv::emission_table(gm, kp, q8, lanes8, om.msv_scale8, Rounding::Down);
-    om.msv_units8_down_plus_one = int_msv::one_unit_higher(&om.msv_units8_down);
-}
-
-// ---------- i16x8 transitions for the Viterbi over-estimate ----------
-
-/// Same striped layout as `tlv`, with the lanes of the instruction set:
-/// seven transitions per vector, then the delete-to-delete transitions.
-fn vit_units_conversion(gm: &Profile, om: &mut OptimizedProfile) {
-    let m = gm.num_nodes;
-    let nq = om.q_vit;
-    let lanes = om.isa.lanes::<i16>();
-    let tsc = gm.transition_scores_raw();
-    let units = |index: usize| {
-        tsc.get(index).map_or(i16::MIN, |&score| {
-            i16_viterbi::transition_units(om.msv_scale, score)
-        })
-    };
-
-    let t_map: [(usize, usize); NTSC_PER_Q] = [
-        (PTsc::BeginToMatch.idx(), 1),
-        (PTsc::MatchToMatch.idx(), 1),
-        (PTsc::InsertToMatch.idx(), 1),
-        (PTsc::DeleteToMatch.idx(), 1),
-        (PTsc::MatchToDelete.idx(), 0),
-        (PTsc::MatchToInsert.idx(), 0),
-        (PTsc::InsertToInsert.idx(), 0),
-    ];
-    let mut min_begin = i16::MAX;
-    let mut j = 0usize;
-    for q in 0..nq {
-        for (slot, &(kind, back)) in t_map.iter().enumerate() {
-            for z in 0..lanes {
-                // Transitions into node k are stored at node k - 1.
-                let kb = q + 1 + z * nq - back;
-                let value = if kb < m {
-                    units(kb * PROFILE_NUM_TRANSITIONS + kind)
-                } else {
-                    i16::MIN
-                };
-                om.vit_units[j * lanes + z] = value;
-                if slot == TSC_BM && value > i16::MIN {
-                    min_begin = min_begin.min(value);
-                }
-            }
-            j += 1;
-        }
-    }
-    for q in 0..nq {
-        for z in 0..lanes {
-            let k = q + 1 + z * nq;
-            om.vit_units[j * lanes + z] = if k < m {
-                units(k * PROFILE_NUM_TRANSITIONS + PTsc::DeleteToDelete.idx())
-            } else {
-                i16::MIN
-            };
-        }
-        j += 1;
-    }
-    om.vit_min_begin_units = if min_begin == i16::MAX { 0 } else { min_begin };
-}
-
-// ---------- Log-space f32x4 (exact scores for MSV/Viterbi) ----------
-
-fn log_conversion(gm: &Profile, om: &mut OptimizedProfile) {
-    let m = gm.num_nodes;
-    let nq = om.q4;
-    let kp = om.kp;
-    let tsc = gm.transition_scores_raw();
-    let tsc_len = tsc.len();
-    let neg_inf = f32::NEG_INFINITY;
-
-    // Striped match emission log-scores (NOT exponentiated)
-    for x in 0..kp {
-        let rsc = gm.residue_scores_for(x);
-        let rsc_len = rsc.len();
-        for q in 0..nq {
-            let k_base = q + 1;
-            for z in 0..4 {
-                let k = k_base + z * nq;
-                let idx = q * 4 + z;
-                if k <= m {
-                    let score_idx = k * PROFILE_NUM_EMISSIONS + PRsc::MatchScore as usize;
-                    if score_idx < rsc_len {
-                        om.rlv[x][idx] = rsc[score_idx];
-                    } else {
-                        om.rlv[x][idx] = neg_inf;
-                    }
-                } else {
-                    om.rlv[x][idx] = neg_inf;
-                }
-            }
-        }
-    }
-
-    // Transition log-scores: same Farrar layout as tfv
-    let t_map: [(usize, i32); 7] = [
-        (PTsc::BeginToMatch.idx(), -1),
-        (PTsc::MatchToMatch.idx(), -1),
-        (PTsc::InsertToMatch.idx(), -1),
-        (PTsc::DeleteToMatch.idx(), -1),
-        (PTsc::MatchToDelete.idx(), 0),
-        (PTsc::MatchToInsert.idx(), 0),
-        (PTsc::InsertToInsert.idx(), 0),
-    ];
-
-    let mut j = 0usize;
-    for q in 0..nq {
-        let k_base = q + 1;
-        for &(tg, kb_offset) in &t_map {
-            for z in 0..4 {
-                let kb = (k_base as i32 + kb_offset + z as i32 * nq as i32) as usize;
-                let idx = j * 4 + z;
-                let tsc_idx = kb * PROFILE_NUM_TRANSITIONS + tg;
-                if kb < m && tsc_idx < tsc_len {
-                    om.tlv[idx] = tsc[tsc_idx];
-                } else {
-                    om.tlv[idx] = neg_inf;
-                }
-            }
-            j += 1;
-        }
-    }
-
-    // DD transitions at end
-    for q in 0..nq {
-        let k_base = q + 1;
-        for z in 0..4 {
-            let k = k_base + z * nq;
-            let idx = j * 4 + z;
-            let tsc_idx = k * PROFILE_NUM_TRANSITIONS + PTsc::DeleteToDelete.idx();
-            if k < m && tsc_idx < tsc_len {
-                om.tlv[idx] = tsc[tsc_idx];
-            } else {
-                om.tlv[idx] = neg_inf;
-            }
-        }
-        j += 1;
-    }
 }

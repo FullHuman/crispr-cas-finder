@@ -102,10 +102,10 @@ fn main() {
         let report = worker.search(seq).expect("search");
         if is_target {
             println!(
-                "  >>> trace: null_score={:?}, msv_raw={:?}, vit_raw={:?}, fwd_raw={:?}, domain_count={}, filter={:?}",
+                "  >>> trace: null_score={:?}, msv_filter={:?}, vit_filter={:?}, fwd_raw={:?}, domain_count={}, filter={:?}",
                 report.trace.null_score,
-                report.trace.msv_raw_score,
-                report.trace.viterbi_raw_score,
+                report.trace.msv_filter_score,
+                report.trace.viterbi_filter_score,
                 report.trace.forward_raw_score,
                 report.trace.domain_count,
                 report.trace.filter_reason,
