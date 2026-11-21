@@ -642,7 +642,7 @@ mod tests {
                 .map(|row| f64::from(row[X_SCALE]).ln())
                 .sum();
             let score = scales + f64::from(forward.specials[l][X_C] * om.xf[XST_C][XTR_MOVE]).ln();
-            let filter = forward_filter(&sequence, l, &om).score;
+            let filter = forward_filter(&sequence, l, &om);
             assert!(
                 (score as f32 - filter).abs() < 1e-3,
                 "m={m} l={l}: {score} vs {filter}"

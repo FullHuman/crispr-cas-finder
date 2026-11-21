@@ -82,7 +82,7 @@ fn forward_filter_matches_the_scalar_recurrence_across_stripe_boundaries() {
                     alphabet.canonical_size,
                     l,
                 );
-                let actual = forward_filter(&seq, l, &optimized).score;
+                let actual = forward_filter(&seq, l, &optimized);
                 let expected = scalar_forward(&seq, &profile);
                 assert!(
                     (actual - expected).abs() < 0.002,

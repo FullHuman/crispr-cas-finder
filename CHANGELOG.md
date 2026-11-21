@@ -25,6 +25,12 @@
   `msv_score_bound`, `msv_score_lower_bound` and `viterbi_raw_score`, which
   nothing sets any more. The log-space posterior decoder stays as the
   reference the tests compare the probability-space decoder with.
+- Code left over from earlier decoders is removed too: the checkpointed
+  Forward pass and its segment replay (`simd::fwd_bck`), `ForwardCheckpoints`,
+  `forward_backward::backward_decode_prob_space` and `OptimizedProfile::new`,
+  none of which the search called. `forward_filter` returns the Forward score
+  alone: it no longer fills the special-state rows and scale factors it kept
+  for those decoders on every call.
 - `FilterPolicy::max_mode` now skips the MSV, bias and Viterbi filters, as
   `hmmsearch --max` does: every sequence goes to the Forward pass, whose
   score is not tested, and on to domain definition. It used to compute the

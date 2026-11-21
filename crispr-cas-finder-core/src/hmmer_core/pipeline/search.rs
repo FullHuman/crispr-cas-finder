@@ -625,7 +625,7 @@ impl<'w, 's> TargetRun<'w, 's, Prepared> {
         engine.stats.sequences_past_viterbi += 1;
         engine.stats.residues_past_viterbi += length as u64;
 
-        let forward_raw_score = simd_fwd::forward_filter(residues, length, om).score;
+        let forward_raw_score = simd_fwd::forward_filter(residues, length, om);
         self.trace.forward_raw_score = Some(forward_raw_score);
         let pvalue = evalues::exponential_survival(
             evalues::filter_bit_score(forward_raw_score, filter_score),

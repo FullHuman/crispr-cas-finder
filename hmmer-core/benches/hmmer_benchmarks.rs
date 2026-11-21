@@ -18,7 +18,6 @@ use hmmer_core::profile::Profile;
 use hmmer_core::rng::XorShift64;
 use hmmer_core::score_matrix::*;
 use hmmer_core::simd::forward_filter;
-use hmmer_core::simd::fwd_bck;
 use hmmer_core::simd::int_msv::Isa;
 use hmmer_core::simd::msv_filter;
 use hmmer_core::simd::oprofile::OptimizedProfile;
@@ -140,37 +139,6 @@ fn bench_generic_forward(c: &mut Criterion) {
         b.iter(|| {
             for dsq in &seqs {
                 let _ = forward_filter::forward_filter(black_box(dsq), dsq.len(), &om);
-            }
-        })
-    });
-}
-
-// ===================================================================
-// Generic Backward benchmark
-// ===================================================================
-
-fn bench_checkpointed_forward(c: &mut Criterion) {
-    let abc = Alphabet::amino();
-    let mut rng = XorShift64::new(42);
-    let m = 100;
-    let l = 400;
-
-    let hmm = hmm_sample(&mut rng, m, &abc);
-    let bg = BackgroundModel::new(&abc);
-    let mut gm = Profile::new(hmm.num_nodes, &abc);
-    hmmer_core::modelconfig::profile_config(&hmm, &bg, &mut gm, l, SearchMode::Local);
-    let mut om = OptimizedProfile::from_profile(&gm);
-    om.reconfigure_length(l);
-
-    let nseqs = 100;
-    let seqs: Vec<Vec<Dsq>> = (0..nseqs)
-        .map(|_| random_digital_seq(&mut rng, &bg.residue_frequencies, abc.canonical_size, l))
-        .collect();
-
-    c.bench_function(&format!("checkpointed_forward/M{}_L{}", m, l), |b| {
-        b.iter(|| {
-            for dsq in &seqs {
-                let _ = fwd_bck::forward_checkpointed_simd(black_box(dsq), dsq.len(), &om);
             }
         })
     });
@@ -340,7 +308,6 @@ criterion_group!(
     bench_profile_config,
     bench_null_one,
     bench_generic_forward,
-    bench_checkpointed_forward,
     bench_msv_filter,
     bench_viterbi_filter,
     bench_gmx_operations,

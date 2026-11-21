@@ -513,7 +513,7 @@ fn rescore_isolated_domain(
     let domain_length = j - i + 1;
     let dsq_sub = &digital_sequence[i - 1..j];
 
-    let forward_score = forward_filter::forward_filter(dsq_sub, domain_length, om).score;
+    let forward_score = forward_filter::forward_filter(dsq_sub, domain_length, om);
 
     crate::hmmer_core::dynamic_programming::odds_decode::decode_odds_space(
         dsq_sub,

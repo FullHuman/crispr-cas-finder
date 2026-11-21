@@ -79,14 +79,8 @@ pub struct OptimizedProfile {
 
 impl OptimizedProfile {
     /// An empty profile of `m` nodes over an alphabet of `kp` symbols, for
-    /// the instruction set this processor runs a model of `m` nodes best
-    /// with.
-    pub fn new(m: usize, kp: usize) -> Self {
-        Self::new_with_isa(m, kp, Isa::for_model(m))
-    }
-
-    /// [`OptimizedProfile::new`] for the integer kernels of `isa`, or of the
-    /// portable kernels when this processor lacks it.
+    /// the integer kernels of `isa`, or of the portable kernels when this
+    /// processor lacks it.
     pub fn new_with_isa(m: usize, kp: usize, isa: Isa) -> Self {
         let isa = if isa.is_available() {
             isa

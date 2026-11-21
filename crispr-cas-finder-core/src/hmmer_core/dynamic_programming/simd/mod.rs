@@ -5,7 +5,6 @@
 // rather than to the search pipeline it is called from.
 
 pub mod forward_filter;
-pub mod fwd_bck;
 pub mod int_msv;
 pub mod msv_filter;
 pub mod oprofile;

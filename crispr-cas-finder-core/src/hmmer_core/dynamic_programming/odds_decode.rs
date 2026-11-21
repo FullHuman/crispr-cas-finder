@@ -468,7 +468,7 @@ mod tests {
                     .unwrap();
                 sequence[l / 4 + offset] = best as u8;
             }
-            let forward = forward_filter(&sequence, l, &om).score;
+            let forward = forward_filter(&sequence, l, &om);
 
             let mut reference = ScoreMatrix::new(m, l).unwrap();
             let mut reference_def = DomainDef::new();
