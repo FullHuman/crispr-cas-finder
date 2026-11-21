@@ -21,7 +21,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Install cargo-outdated
-        run: cargo install cargo-outdated
+        run: cargo install cargo-outdated --locked
       - name: Check for outdated dependencies
         run: cargo outdated --exit-code 1
         continue-on-error: true
