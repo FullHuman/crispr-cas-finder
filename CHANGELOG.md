@@ -29,8 +29,10 @@
   Forward pass and its segment replay (`simd::fwd_bck`), `ForwardCheckpoints`,
   `forward_backward::backward_decode_prob_space` and `OptimizedProfile::new`,
   none of which the search called. `forward_filter` returns the Forward score
-  alone: it no longer fills the special-state rows and scale factors it kept
-  for those decoders on every call.
+  alone, where it returned a `ForwardResult`: it no longer fills the
+  special-state rows and scale factors it kept for those decoders on every
+  call. `evalues::msv_score_to_pvalue`, which only the removed filters
+  called, is gone as well.
 - `FilterPolicy::max_mode` now skips the MSV, bias and Viterbi filters, as
   `hmmsearch --max` does: every sequence goes to the Forward pass, whose
   score is not tested, and on to domain definition. It used to compute the
