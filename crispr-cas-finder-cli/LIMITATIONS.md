@@ -117,21 +117,11 @@ truth set have not been measured.
   systems do. On another system a profile's probabilities can differ in their
   last bit from those `hmmsearch` computes on macOS, and a hit sitting exactly
   on a threshold can fall on the other side of it.
-- By default the HMM search decodes posterior probabilities in probability
-  space, as HMMER itself does. `--exact-filters` decides the MSV, bias and
-  Viterbi filters on exact single-precision scores instead of the scores of
-  HMMER's filters and decodes in log space, as earlier versions did. It takes
-  about twice the time and does not give the hits of `hmmsearch`: exact
-  scores let other sequences through, and the log-space decoder rounds
-  posterior probabilities differently, so that a region can begin or end a
-  residue away from HMMER's and is then sampled differently. On the 22
-  proteomes above it reports 7757 pairs, 7592 of them among the 7727 of
-  `hmmsearch`; 8 of those differ in their number of domains and 514 in a
-  domain score by more than 0.05 bit. On E. coli K-12 (4318 proteins) with the
-  535 CasFinder 3.1 profiles, a run of the tool on one thread of an M1 Max
-  takes 6.6 s, gene prediction and array detection included, against 9.1 s
-  for `hmmsearch` 3.4 on the proteins alone, and 13.1 s with
-  `--exact-filters`; with every core, 1.0 s of wall time against 4.6 s for
+- The HMM search decodes posterior probabilities in probability space, as
+  HMMER itself does. On E. coli K-12 (4318 proteins) with the 535 CasFinder
+  3.1 profiles, a run of the tool on one thread of an M1 Max takes 6.6 s, gene
+  prediction and array detection included, against 9.1 s for `hmmsearch` 3.4
+  on the proteins alone; with every core, 1.0 s of wall time against 4.6 s for
   `hmmsearch --cpu 10`.
 - Two generations of Cas models are supported. The bundled default is CasFinder
   2.0.3. CasFinder 3 packages (MacSyFinder 2 format) are loaded from a directory
@@ -164,10 +154,7 @@ truth set have not been measured.
 - Output files are not those of CRISPRCasFinder. See the README for the files
   written and `report.json` for the complete result.
 - The CLI, Python and browser expose array and Cas-system detection and return
-  the same report structure. The choice between the default and the exact HMM
-  filters is made with `--exact-filters` in the CLI and
-  `CasFinderConfig::exact_filters` in the Rust library; Python and the browser
-  run the default filters. Bit scores and E-values can differ in their last
+  the same report structure. Bit scores and E-values can differ in their last
   digits between native and WebAssembly builds. Native library and Python
   callers must provide Cas model and profile directories; the CLI embeds its
   defaults.
@@ -188,8 +175,8 @@ truth set have not been measured.
 | E. coli native/browser comparison | Same FASTA; genetic code 11; circular topology; SubTyping definitions; bundled CasFinder 2.0.3 | Report equality across CLI, Chromium, WebKit, threaded and sequential search, with a 1e-4 relative tolerance on floating-point values between native and browser; baseline five arrays and one type I-E system | Agreement among builds of this implementation on one genome |
 | CasFinder 3.1.0 versus MacSyFinder 2.1.6 | Eight bacterial genomes (E. coli K-12, three Erwinia amylovora, four other Enterobacterales, up to six sequences each); proteins predicted by this project; MacSyFinder run with the options CRISPRCasFinder passes | Identical systems: model, proteins, matched profiles, score and wholeness. HMM hits identical except one domain boundary | Run locally, not in CI, because the models cannot be redistributed. One genus-level clade; six systems of type I-E or I and two genomes without a system. An opt-in test (`CASFINDER3_DIR`) repeats the E. coli case |
 | Comparison with CRISPRCasFinder 4.3.2 | 51 inputs of 1 to 376 contigs (E. coli K-12, an Acetobacter plasmid and 49 enterobacterial assemblies) and 21 reference genomes of bacteria and archaea (`benchmarks/panel.tsv`); both tools with CasFinder 3.1.0; scripts and method in `benchmarks/` | Arrays and Cas systems of the two outputs, paired by overlap | Run locally, not in CI: the arrays of the original on 2026-11-14 with MUSCLE 5.3, its Cas systems on 2026-10-13 with MacSyFinder 2.1.6 and HMMER 3.4. The original reports 485 arrays, 303 of level 1, 14 of level 2, one of level 3 and 167 of level 4. All 485 are reported here and no other, each with the same start, consensus repeat, spacers, evidence level, conservation scores, repeat identifier and CRISPRDirection. For 455 the end is the same too; the other 30 are first parts of a divided locus, which the original reports one base past its last repeat. The orientation is the same for 482; the other three are the arrays of E. coli K-12, whose identifier in the tracked file ends in a range (see above). The original reports 48 Cas systems; all 48 are reported here with the same subtype, the same genes at the same coordinates and every gene matched to the same profile. Thirteen more are reported here: nine that MacSyFinder finds inside the original and its Perl script then loses, and four on sequences under 100 kb |
-| HMMER Cas5 oracle | HMMER 3.4 `hmmsearch` frozen output; TIGR01868/Cas5_0_IE versus CP014688.1_298 | Sequence/domain scores, coordinates, bias, and alignment accuracy, with the default and with the exact HMM filters | One independently generated HMM/sequence oracle |
-| HMM filter references | Synthetic profiles and sequences in `hmmer-core/tests/filter_reference.rs` | SIMD filters compared with independent scalar calculations | Algorithmic regression cases, not biological prevalence or accuracy |
+| HMMER Cas5 oracle | HMMER 3.4 `hmmsearch` frozen output; TIGR01868/Cas5_0_IE versus CP014688.1_298 | Sequence/domain scores, coordinates, bias, and alignment accuracy | One independently generated HMM/sequence oracle |
+| HMM filter references | Synthetic profiles and sequences in `hmmer-core/tests/filter_reference.rs` and `hmmer_filter_scores.rs`; eleven E. coli protein and bundled profile pairs near the thresholds in `crispr-cas-finder-core/tests/hmmer_filter_regression.rs` | The Forward filter compared with an independent scalar calculation; the MSV and Viterbi filters compared, on every instruction set the processor has, with cell-by-cell transcriptions of HMMER's C code; filter scores and outcomes frozen from `hmmsearch` 3.4 | Algorithmic regression cases, not biological prevalence or accuracy |
 | Python API | Synthetic repeat array and invalid inputs | Installed-wheel file/string API agreement and errors | Binding behavior, not additional biological validation |
 
 The provenance and local correction to the bundled models are recorded in

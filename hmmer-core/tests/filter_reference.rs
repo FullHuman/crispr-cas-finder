@@ -1,4 +1,5 @@
-//! Independent, unstriped recurrences for the SIMD filter boundary cases.
+//! An independent, unstriped recurrence for the SIMD Forward filter at the
+//! stripe boundaries.
 use hmmer_core::{
     alphabet::Alphabet,
     background::BackgroundModel,
@@ -6,22 +7,21 @@ use hmmer_core::{
     modelconfig,
     profile::Profile,
     rng::XorShift64,
-    simd::{
-        f32_msv::msv_filter_f32, f32_viterbi::viterbi_filter_f32, forward_filter::forward_filter,
-        i8_msv, i16_msv, i16_viterbi::viterbi_upper_bound, int_msv, oprofile::OptimizedProfile,
-    },
+    simd::{forward_filter::forward_filter, oprofile::OptimizedProfile},
     test_helpers::{hmm_sample, random_digital_seq},
 };
 
-fn combine(a: f32, b: f32, forward: bool) -> f32 {
+/// log(e^a + e^b), the exponential in double precision.
+fn log_sum(a: f32, b: f32) -> f32 {
     let max = a.max(b);
-    if !forward || max == f32::NEG_INFINITY {
+    if max == f32::NEG_INFINITY {
         return max;
     }
     max + ((-(a as f64 - b as f64).abs()).exp().ln_1p() as f32)
 }
 
-fn scalar_full(seq: &[u8], profile: &Profile, forward: bool) -> f32 {
+/// The Forward score of `seq`, cell by cell on the generic profile.
+fn scalar_forward(seq: &[u8], profile: &Profile) -> f32 {
     let m = profile.num_nodes;
     let neg = f32::NEG_INFINITY;
     let special = &profile.special_scores;
@@ -33,69 +33,39 @@ fn scalar_full(seq: &[u8], profile: &Profile, forward: bool) -> f32 {
         for k in 1..=m {
             let transition = |kind| profile.transition_score_at(k, kind);
             let emission = profile.residue_scores_for(residue as usize)[k * 2];
-            current[k][0] = combine(
-                combine(
+            current[k][0] = log_sum(
+                log_sum(
                     previous[k - 1][0] + transition(PTsc::MatchToMatch),
                     previous[k - 1][1] + transition(PTsc::InsertToMatch),
-                    forward,
                 ),
-                combine(
+                log_sum(
                     previous[k - 1][2] + transition(PTsc::DeleteToMatch),
                     b + transition(PTsc::BeginToMatch),
-                    forward,
                 ),
-                forward,
             ) + emission;
-            current[k][2] = combine(
+            current[k][2] = log_sum(
                 current[k - 1][0] + transition(PTsc::MatchToDelete),
                 current[k - 1][2] + transition(PTsc::DeleteToDelete),
-                forward,
             );
             if k < m {
-                current[k][1] = combine(
+                current[k][1] = log_sum(
                     previous[k][0] + profile.transition_score_at(k + 1, PTsc::MatchToInsert),
                     previous[k][1] + profile.transition_score_at(k + 1, PTsc::InsertToInsert),
-                    forward,
                 ) + profile.residue_scores_for(residue as usize)[k * 2 + 1];
             }
-            e = combine(e, combine(current[k][0], current[k][2], forward), forward);
+            e = log_sum(e, log_sum(current[k][0], current[k][2]));
         }
-        j = combine(j + special.j_loop, e + special.e_loop, forward);
-        c = combine(c + special.c_loop, e + special.e_move, forward);
+        j = log_sum(j + special.j_loop, e + special.e_loop);
+        c = log_sum(c + special.c_loop, e + special.e_move);
         n += special.n_loop;
-        b = combine(n + special.n_move, j + special.j_move, forward);
+        b = log_sum(n + special.n_move, j + special.j_move);
         previous = current;
     }
     c + special.c_move
 }
 
-fn scalar_msv(seq: &[u8], profile: &Profile) -> f32 {
-    let m = profile.num_nodes;
-    let l = seq.len() as f32;
-    let (tloop, tmove) = ((l / (l + 3.0)).ln(), (3.0 / (l + 3.0)).ln());
-    let entry = (2.0 / (m * (m + 1)) as f32).ln();
-    let exit = 0.5f32.ln();
-    let neg = f32::NEG_INFINITY;
-    let mut previous = vec![neg; m + 1];
-    let (mut n, mut b, mut j, mut c) = (0.0, tmove, neg, neg);
-    for &residue in seq {
-        let mut current = vec![neg; m + 1];
-        for k in 1..=m {
-            current[k] = previous[k - 1].max(b + entry)
-                + profile.residue_scores_for(residue as usize)[k * 2];
-        }
-        let e = current.iter().copied().fold(neg, f32::max);
-        j = (j + tloop).max(e + exit);
-        c = (c + tloop).max(e + exit);
-        n += tloop;
-        b = (n + tmove).max(j + tmove);
-        previous = current;
-    }
-    c + tmove
-}
-
 #[test]
-fn filters_match_scalar_recurrences_across_stripe_boundaries() {
+fn forward_filter_matches_the_scalar_recurrence_across_stripe_boundaries() {
     let alphabet = Alphabet::amino();
     let background = BackgroundModel::new(&alphabet);
     for seed in [0, 1, 17, 42] {
@@ -112,339 +82,12 @@ fn filters_match_scalar_recurrences_across_stripe_boundaries() {
                     alphabet.canonical_size,
                     l,
                 );
-                for (name, actual, expected) in [
-                    (
-                        "MSV",
-                        msv_filter_f32(&seq, l, &optimized),
-                        scalar_msv(&seq, &profile),
-                    ),
-                    (
-                        "Viterbi",
-                        viterbi_filter_f32(&seq, l, &optimized),
-                        scalar_full(&seq, &profile, false),
-                    ),
-                    (
-                        "Forward",
-                        forward_filter(&seq, l, &optimized).score,
-                        scalar_full(&seq, &profile, true),
-                    ),
-                ] {
-                    assert!(
-                        (actual - expected).abs() < 0.002,
-                        "{name}: seed={seed}, M={m}, L={l}: {actual} != {expected}"
-                    );
-                }
-            }
-        }
-    }
-}
-
-/// The integer pre-filters may only reject what the exact filters would
-/// reject, so their scores must never fall below the exact ones. They must
-/// also stay close to them, or they would let everything through.
-#[test]
-fn integer_bounds_are_never_below_the_exact_scores_and_stay_tight() {
-    let alphabet = Alphabet::amino();
-    let background = BackgroundModel::new(&alphabet);
-    // (comparisons, summed excess in nats) for MSV, Viterbi and the coarse
-    // eight-bit MSV bound.
-    let mut tightness = [(0usize, 0.0f64); 3];
-    // The eight-bit bound rounds each emission up by up to a twelfth of a
-    // nat, so it may sit a few nats above the exact score on long diagonals.
-    let max_excess = [1.5f32, 1.5, 6.0];
-    let max_mean_excess = [0.3f64, 0.3, 2.0];
-    let mut lower_bounds = 0usize;
-    for seed in [0, 1, 17, 42, 1234] {
-        let mut rng = XorShift64::new(seed);
-        for m in [1, 2, 7, 8, 9, 16, 17, 64, 100, 257, 600] {
-            let hmm = hmm_sample(&mut rng, m, &alphabet);
-            for l in [1, 2, 8, 51, 300, 1500] {
-                let mut profile = Profile::new(m, &alphabet);
-                modelconfig::profile_config(&hmm, &background, &mut profile, l, SearchMode::Local);
-                let optimized = OptimizedProfile::from_profile(&profile);
-                let random = random_digital_seq(
-                    &mut rng,
-                    &background.residue_frequencies,
-                    alphabet.canonical_size,
-                    l,
+                let actual = forward_filter(&seq, l, &optimized);
+                let expected = scalar_forward(&seq, &profile);
+                assert!(
+                    (actual - expected).abs() < 0.002,
+                    "seed={seed}, M={m}, L={l}: {actual} != {expected}"
                 );
-                // Repeating the best residue of each model position gives
-                // long, high-scoring diagonals and exercises saturation.
-                let best_residue = |k: usize| {
-                    (0..alphabet.canonical_size)
-                        .max_by(|&left, &right| {
-                            profile.residue_scores_for(left)[k * 2]
-                                .total_cmp(&profile.residue_scores_for(right)[k * 2])
-                        })
-                        .unwrap() as u8
-                };
-                let consensus: Vec<u8> = (0..l)
-                    .map(|position| best_residue(position % m + 1))
-                    .collect();
-                // A consensus stretch with residues dropped and inserted
-                // sends the best path through delete and insert states.
-                let mut gapped = random.clone();
-                let mut k = 1;
-                for (position, residue) in gapped.iter_mut().enumerate().skip(l / 4) {
-                    if k > m {
-                        break;
-                    }
-                    if position % 11 == 5 {
-                        continue; // keep the random residue: an insertion
-                    }
-                    *residue = best_residue(k);
-                    k += if position % 7 == 3 { 3 } else { 1 }; // skip nodes: deletions
-                }
-                for (kind, seq) in [
-                    ("random", &random),
-                    ("consensus", &consensus),
-                    ("gapped", &gapped),
-                ] {
-                    let checks = [
-                        (
-                            "MSV",
-                            msv_filter_f32(seq, l, &optimized),
-                            i16_msv::msv_upper_bound(seq, l, &optimized),
-                        ),
-                        (
-                            "Viterbi",
-                            viterbi_filter_f32(seq, l, &optimized),
-                            viterbi_upper_bound(seq, l, &optimized),
-                        ),
-                        (
-                            "MSV (8-bit)",
-                            msv_filter_f32(seq, l, &optimized),
-                            i8_msv::msv_upper_bound(seq, l, &optimized),
-                        ),
-                    ];
-                    // The 16-bit bound restricted to any one block, started
-                    // from the 8-bit pass's recorded row, must still bound the
-                    // exact score from above.
-                    let mut blocks = int_msv::Blocks::default();
-                    let coarse = i8_msv::msv_upper_bound_with(
-                        seq,
-                        l,
-                        &optimized,
-                        &mut Vec::new(),
-                        Some(&mut blocks),
-                    );
-                    assert_eq!(blocks.bounds.len(), l.div_ceil(int_msv::BLOCK_ROWS));
-                    assert_eq!(
-                        blocks
-                            .bounds
-                            .iter()
-                            .copied()
-                            .fold(f32::NEG_INFINITY, f32::max),
-                        coarse,
-                        "block bounds do not combine to the whole bound: seed={seed}, M={m}, L={l}"
-                    );
-                    if !blocks.saturated {
-                        let exact = msv_filter_f32(seq, l, &optimized);
-                        for block in 0..blocks.bounds.len() {
-                            let within = i16_msv::msv_upper_bound_within(
-                                seq,
-                                l,
-                                &optimized,
-                                &mut Vec::new(),
-                                &blocks,
-                                1 << block,
-                            );
-                            assert!(
-                                within >= exact,
-                                "MSV within block {block} {kind}: seed={seed}, M={m}, L={l}: bound {within} < exact {exact}"
-                            );
-                        }
-                    }
-                    // The lower bounds must never exceed the exact score, and
-                    // the 16-bit one must settle most decisions, so it stays
-                    // close as well. An infinite lower bound reports saturation:
-                    // the best segment then stands at least as high above the
-                    // begin state as the cells can count.
-                    let exact = msv_filter_f32(seq, l, &optimized);
-                    let lf = l as f64;
-                    let (tloop, tmove) = ((lf / (lf + 3.0)).ln(), (3.0 / (lf + 3.0)).ln());
-                    let segment_costs = (2.0 / (m as f64 * (m as f64 + 1.0))).ln()
-                        + 0.5f64.ln()
-                        + 2.0 * tmove
-                        + lf * tloop;
-                    for (name, lower, slack, cells) in [
-                        (
-                            "MSV lower",
-                            i16_msv::msv_lower_bound(seq, l, &optimized),
-                            1.5f32,
-                            65534.0 / i16_msv::SCALE,
-                        ),
-                        (
-                            "MSV lower (8-bit)",
-                            i8_msv::msv_lower_bound(seq, l, &optimized),
-                            6.0,
-                            254.0 / optimized.msv_scale8,
-                        ),
-                    ] {
-                        let Some(lower) = lower else { continue };
-                        if lower.is_infinite() {
-                            let at_saturation = (cells + segment_costs - 0.1) as f32;
-                            assert!(
-                                exact >= at_saturation,
-                                "{name} {kind}: seed={seed}, M={m}, L={l}: saturated at exact {exact}, below {at_saturation}"
-                            );
-                            continue;
-                        }
-                        assert!(
-                            lower <= exact,
-                            "{name} {kind}: seed={seed}, M={m}, L={l}: bound {lower} > exact {exact}"
-                        );
-                        if kind == "random" {
-                            assert!(
-                                exact - lower < slack,
-                                "{name} {kind}: seed={seed}, M={m}, L={l}: bound {lower} far below {exact}"
-                            );
-                            if slack < 2.0 {
-                                lower_bounds += 1;
-                            }
-                        }
-                    }
-                    for (index, (name, exact, bound)) in checks.into_iter().enumerate() {
-                        assert!(
-                            bound >= exact,
-                            "{name} {kind}: seed={seed}, M={m}, L={l}: bound {bound} < exact {exact}"
-                        );
-                        if bound.is_finite() && kind == "random" {
-                            tightness[index].0 += 1;
-                            tightness[index].1 += f64::from(bound - exact);
-                            assert!(
-                                bound - exact < max_excess[index],
-                                "{name} {kind}: seed={seed}, M={m}, L={l}: bound {bound} far above {exact}"
-                            );
-                        }
-                    }
-                }
-            }
-        }
-    }
-    assert!(
-        lower_bounds > 200,
-        "only {lower_bounds} finite MSV lower bounds"
-    );
-    for (index, (name, (compared, total_excess))) in ["MSV", "Viterbi", "MSV (8-bit)"]
-        .into_iter()
-        .zip(tightness)
-        .enumerate()
-    {
-        assert!(compared > 300, "{name}: only {compared} finite bounds");
-        let mean_excess = total_excess / compared as f64;
-        eprintln!("{name}: mean excess {mean_excess:.3} nats over {compared} bounds");
-        assert!(
-            mean_excess < max_mean_excess[index],
-            "{name}: mean excess {mean_excess} nats"
-        );
-    }
-}
-
-/// The integer bounds do not depend on the instruction set: every one this
-/// processor supports gives the portable kernels' results, bit for bit, for
-/// the whole-sequence MSV and Viterbi bounds, the block-wise record and the
-/// bounds within blocks. Rows in registers and rows in memory are both covered: with the
-/// widest vectors a row of 1,600 nodes still spills to memory.
-#[test]
-fn integer_bounds_are_the_same_on_every_instruction_set() {
-    let alphabet = Alphabet::amino();
-    let background = BackgroundModel::new(&alphabet);
-    let isas = int_msv::Isa::available();
-    assert_eq!(isas[0], int_msv::Isa::Portable);
-    eprintln!("instruction sets: {isas:?}");
-    let bits = |value: f32| value.to_bits();
-    for seed in [0, 3, 42] {
-        let mut rng = XorShift64::new(seed);
-        for m in [1, 2, 8, 16, 17, 33, 64, 65, 129, 300, 400, 1600] {
-            let hmm = hmm_sample(&mut rng, m, &alphabet);
-            // 66 and 67 leave two and three rows after the last four-row
-            // pass of the plain MSV kernels.
-            for l in [1, 2, 7, 64, 65, 66, 67, 200] {
-                let mut profile = Profile::new(m, &alphabet);
-                modelconfig::profile_config(&hmm, &background, &mut profile, l, SearchMode::Local);
-                let optimized: Vec<OptimizedProfile> = isas
-                    .iter()
-                    .map(|&isa| OptimizedProfile::from_profile_with_isa(&profile, isa))
-                    .collect();
-                for (isa, om) in isas.iter().zip(&optimized) {
-                    assert_eq!(om.isa(), *isa);
-                }
-                let random = random_digital_seq(
-                    &mut rng,
-                    &background.residue_frequencies,
-                    alphabet.canonical_size,
-                    l,
-                );
-                let best_residue = |k: usize| {
-                    (0..alphabet.canonical_size)
-                        .max_by(|&left, &right| {
-                            profile.residue_scores_for(left)[k * 2]
-                                .total_cmp(&profile.residue_scores_for(right)[k * 2])
-                        })
-                        .unwrap() as u8
-                };
-                let consensus: Vec<u8> = (0..l)
-                    .map(|position| best_residue(position % m + 1))
-                    .collect();
-                let mut half = random.clone();
-                for (position, residue) in half.iter_mut().enumerate().skip(l / 2) {
-                    *residue = best_residue(position % m + 1);
-                }
-                for seq in [&random, &consensus, &half] {
-                    let results: Vec<_> = optimized
-                        .iter()
-                        .map(|om| {
-                            let mut blocks = int_msv::Blocks::default();
-                            let upper8 = i8_msv::msv_upper_bound_with(
-                                seq,
-                                l,
-                                om,
-                                &mut Vec::new(),
-                                Some(&mut blocks),
-                            );
-                            let states: Vec<Option<Vec<i64>>> = (0..blocks.bounds.len())
-                                .map(|block| blocks.state_by_node(block, m))
-                                .collect();
-                            let within: Vec<u32> = if blocks.saturated {
-                                Vec::new()
-                            } else {
-                                let every = (1u64 << blocks.bounds.len()) - 1;
-                                (0..blocks.bounds.len())
-                                    .map(|block| 1u64 << block)
-                                    .chain([every])
-                                    .map(|selected| {
-                                        bits(i16_msv::msv_upper_bound_within(
-                                            seq,
-                                            l,
-                                            om,
-                                            &mut Vec::new(),
-                                            &blocks,
-                                            selected,
-                                        ))
-                                    })
-                                    .collect()
-                            };
-                            (
-                                bits(upper8),
-                                i8_msv::msv_lower_bound(seq, l, om).map(bits),
-                                bits(i16_msv::msv_upper_bound(seq, l, om)),
-                                i16_msv::msv_lower_bound(seq, l, om).map(bits),
-                                bits(viterbi_upper_bound(seq, l, om)),
-                                blocks.bounds.iter().copied().map(bits).collect::<Vec<_>>(),
-                                blocks.saturated,
-                                states,
-                                within,
-                            )
-                        })
-                        .collect();
-                    for (isa, result) in isas.iter().zip(&results).skip(1) {
-                        assert_eq!(
-                            result, &results[0],
-                            "{isa:?} differs from the portable kernels: seed={seed}, M={m}, L={l}"
-                        );
-                    }
-                }
             }
         }
     }

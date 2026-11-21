@@ -228,7 +228,7 @@ fn hmmer_filter_scores_match_cell_by_cell_transcriptions() {
                 modelconfig::profile_config(&hmm, &background, &mut profile, l, SearchMode::Local);
                 let optimized: Vec<OptimizedProfile> = isas
                     .iter()
-                    .map(|&isa| OptimizedProfile::for_hmmer_filters_with_isa(&profile, isa))
+                    .map(|&isa| OptimizedProfile::from_profile_with_isa(&profile, isa))
                     .collect();
                 let random = random_digital_seq(
                     &mut rng,
@@ -463,7 +463,7 @@ fn viterbi_filter_follows_hmmer_where_its_shortcuts_do_not_hold() {
         let pairs_exact = oddity != Oddity::DeleteStateWithoutSuccessor;
         let every_path_is_hmmer = oddity == Oddity::DeleteStateWithoutSuccessor;
         for isa in Isa::available() {
-            let om = OptimizedProfile::for_hmmer_filters_with_isa(&profile, isa);
+            let om = OptimizedProfile::from_profile_with_isa(&profile, isa);
             let words = &om.viterbi_words;
             assert_eq!(words.dd_pairs_are_exact, pairs_exact, "{oddity:?}");
             assert_eq!(words.dd_bound_is_exact, every_path_is_hmmer, "{oddity:?}");

@@ -222,7 +222,7 @@ fn filter_scores_are_those_of_hmmer_3_4() {
         let length = case.sequence.len();
         let (alphabet, mut background, profile) = bundled_profile(case.profile, length);
         let target = DigitalSequence::from_bytes("target", "", case.sequence, &alphabet);
-        let om = OptimizedProfile::for_hmmer_filters(&profile);
+        let om = OptimizedProfile::from_profile(&profile);
         background
             .set_filter(
                 profile.num_nodes,

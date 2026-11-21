@@ -1,7 +1,3 @@
-use ndarray::Array2;
-
-use super::simd::fwd_bck;
-use super::simd::oprofile::OptimizedProfile;
 use crate::hmmer_core::config::{PROFILE_NUM_EMISSIONS, PROFILE_NUM_TRANSITIONS, PRsc, PTsc};
 use crate::hmmer_core::errors::HmmerError;
 use crate::hmmer_core::profile::Profile;
@@ -20,49 +16,6 @@ fn transition(tsc: &[f32], source_node: usize, kind: PTsc) -> f32 {
 #[inline]
 fn emission(profile: &Profile, residue: usize, node: usize, kind: PRsc) -> f32 {
     profile.residue_scores_for(residue)[node * PROFILE_NUM_EMISSIONS + kind.idx()]
-}
-
-// ─── Forward checkpoints ────────────────────────────────────────────────────
-
-/// Checkpoint data saved during the forward pass.
-///
-/// Stores main-state rows at intervals of `ceil(sqrt(L))` plus special-state
-/// scores for *every* row (only 5 floats each). This reduces memory from
-/// O(LM) to O(M√L) while allowing on-demand forward row reconstruction
-/// during the backward/decode pass.
-pub struct ForwardCheckpoints {
-    /// Checkpointed main-state rows, each shape (num_nodes+1, 3).
-    /// Stored in order of ascending row index.
-    pub checkpoint_main: Vec<Array2<f32>>,
-    /// Row indices corresponding to each entry in `checkpoint_main`.
-    pub checkpoint_indices: Vec<usize>,
-    /// Special-state scores for every row 0..=L, shape (L+1, 5).
-    pub all_specials: Array2<f32>,
-    /// Overall forward score = fwd_special(L, C) + c_move.
-    pub overall_score: f32,
-    /// Sequence length L.
-    pub sequence_length: usize,
-    /// Number of model nodes M.
-    pub num_nodes: usize,
-}
-
-impl ForwardCheckpoints {
-    /// Get the special-state score at row `i`, state `s`.
-    #[inline]
-    pub fn special_score(&self, i: usize, s: usize) -> f32 {
-        self.all_specials[[i, s]]
-    }
-
-    /// Find the largest checkpoint index at or before `row`.
-    ///
-    /// Returns the position in `checkpoint_main` and its row index, or `None`
-    /// when the checkpoint list is empty or every checkpoint follows `row`.
-    pub fn checkpoint_at_or_before(&self, row: usize) -> Option<(usize, usize)> {
-        // Binary search: find rightmost index where checkpoint_indices[idx] <= row
-        let pos = self.checkpoint_indices.partition_point(|&r| r <= row);
-        let idx = pos.checked_sub(1)?;
-        Some((idx, self.checkpoint_indices[idx]))
-    }
 }
 
 // ─── Fused backward + decoding ──────────────────────────────────────────────
@@ -407,6 +360,10 @@ fn decode_posterior_row(
 ///
 /// A generic full Forward matrix is reconstructed here and checked against an
 /// independently computed SIMD Forward score before posterior decoding.
+///
+/// The search decodes in probability space
+/// ([`super::odds_decode::decode_odds_space`]) and does not call this
+/// function; it is the reference the tests compare that decoder with.
 pub fn backward_decode_log_space(
     digital_sequence: &[u8],
     profile: &Profile,
@@ -421,70 +378,4 @@ pub fn backward_decode_log_space(
         posterior_matrix,
         domain_def,
     )
-}
-
-/// Compatibility wrapper for the former checkpoint-replay Backward API.
-///
-/// The current decoder is log-space and only needs the checkpointed Forward
-/// score. New callers should use [`backward_decode_log_space`].
-#[allow(clippy::too_many_arguments)]
-pub fn backward_decode_prob_space(
-    digital_sequence: &[u8],
-    profile: &Profile,
-    _om: &OptimizedProfile,
-    checkpoints: &ForwardCheckpoints,
-    _simd_data: &fwd_bck::SIMDCheckpointData,
-    posterior_matrix: &mut ScoreMatrix,
-    domain_def: Option<&mut DomainDef>,
-    _seg_buf: &mut fwd_bck::OddsSegmentBuf,
-) -> Result<f32, HmmerError> {
-    if digital_sequence.len() < checkpoints.sequence_length {
-        return Err(HmmerError::Internal(format!(
-            "checkpoint sequence length {} exceeds target length {}",
-            checkpoints.sequence_length,
-            digital_sequence.len()
-        )));
-    }
-    backward_decode_log_space(
-        &digital_sequence[..checkpoints.sequence_length],
-        profile,
-        checkpoints.overall_score,
-        posterior_matrix,
-        domain_def,
-    )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn checkpoints(indices: Vec<usize>) -> ForwardCheckpoints {
-        ForwardCheckpoints {
-            checkpoint_main: indices
-                .iter()
-                .map(|_| Array2::zeros((1, NUM_MAIN_STATES)))
-                .collect(),
-            checkpoint_indices: indices,
-            all_specials: Array2::zeros((1, NUM_SPECIAL_STATES)),
-            overall_score: 0.0,
-            sequence_length: 0,
-            num_nodes: 0,
-        }
-    }
-
-    #[test]
-    fn checkpoint_lookup_handles_boundaries() {
-        let checkpoints = checkpoints(vec![0, 4, 8]);
-
-        assert_eq!(checkpoints.checkpoint_at_or_before(0), Some((0, 0)));
-        assert_eq!(checkpoints.checkpoint_at_or_before(3), Some((0, 0)));
-        assert_eq!(checkpoints.checkpoint_at_or_before(4), Some((1, 4)));
-        assert_eq!(checkpoints.checkpoint_at_or_before(100), Some((2, 8)));
-    }
-
-    #[test]
-    fn checkpoint_lookup_returns_none_without_a_preceding_checkpoint() {
-        assert_eq!(checkpoints(Vec::new()).checkpoint_at_or_before(0), None);
-        assert_eq!(checkpoints(vec![2, 4]).checkpoint_at_or_before(1), None);
-    }
 }

@@ -4,22 +4,15 @@ use crispr_cas_finder_core::hmmer_core::{
     config::SearchMode,
     hit::Hit,
     modelconfig,
-    pipeline::search::{
-        CapacityHints, FilterPolicy, SearchOutcome, SearchPlan, SearchQuery, SearchReport,
-    },
+    pipeline::search::{CapacityHints, SearchOutcome, SearchPlan, SearchQuery, SearchReport},
     profile::Profile,
     sequence::DigitalSequence,
 };
 use crispr_cas_finder_core::hmmer_io::HmmFile;
 
 /// Search `sequence` with the bundled CasFinder 2.0.3 profile
-/// `profile_file` and `filters`.
-fn search_bundled_profile(
-    profile_file: &str,
-    name: &str,
-    sequence: &[u8],
-    filters: FilterPolicy,
-) -> SearchReport {
+/// `profile_file`.
+fn search_bundled_profile(profile_file: &str, name: &str, sequence: &[u8]) -> SearchReport {
     let profile_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../crispr-cas-finder-cli/data/CasFinder-2.0.3/CASprofiles-2.0.3")
         .join(profile_file);
@@ -37,7 +30,7 @@ fn search_bundled_profile(
         SearchMode::Local,
     );
     let query = SearchQuery::from_configured_profile(profile, background).unwrap();
-    let plan = SearchPlan::builder(query).filters(filters).build().unwrap();
+    let plan = SearchPlan::builder(query).build().unwrap();
     let mut worker = plan
         .spawn_worker(CapacityHints {
             target_length: target.len(),
@@ -46,18 +39,10 @@ fn search_bundled_profile(
     worker.search(&target).unwrap()
 }
 
-fn exact_filters() -> FilterPolicy {
-    FilterPolicy {
-        exact: true,
-        ..FilterPolicy::default()
-    }
-}
-
-/// TIGR01868 (Cas5_0_IE) searched against E. coli Cas5 (CP014688.1_298)
-/// with `filters`.
-fn search_cas5(filters: FilterPolicy) -> SearchReport {
+/// TIGR01868 (Cas5_0_IE) searched against E. coli Cas5 (CP014688.1_298).
+fn search_cas5() -> SearchReport {
     let sequence = b"MRSYLILRLAGPMQAWGQPTFEGTRPTGRFPTRSGLLGLLGACLGIQRDDTSSLQALSESVQFAVRCDELILDDRRVSVTGLRDYHTVLGAREDYRGLKSHETIQTWREYLCDASFTVALWLTPHATMVISELEKAVLKPRYTPYLGRRSCPLTHPLFLGTCQASDPQKALLNYEPVGGDIYSEESVTGHHLKFTARDEPMITLPRQFASREWYVIKGGMDVSQ";
-    search_bundled_profile("Cas5_0_IE.hmm", "CP014688.1_298", sequence, filters)
+    search_bundled_profile("Cas5_0_IE.hmm", "CP014688.1_298", sequence)
 }
 
 /// The values HMMER 3.4 `hmmsearch` reports for that pair.
@@ -90,18 +75,7 @@ fn assert_matches_hmmer_3_4(report: SearchReport) {
 /// E. coli Cas5 (CP014688.1_298), with the default filters.
 #[test]
 fn cas5_domain_null2_and_oa_match_hmmer_3_4() {
-    assert_matches_hmmer_3_4(search_cas5(FilterPolicy::default()));
-}
-
-/// The same values with the exact filters and the log-space decoder.
-#[test]
-fn cas5_matches_hmmer_3_4_with_exact_filters() {
-    let report = search_cas5(exact_filters());
-    assert!(
-        report.trace.msv_score_bound.is_some(),
-        "the exact policy starts from the integer upper bounds"
-    );
-    assert_matches_hmmer_3_4(report);
+    assert_matches_hmmer_3_4(search_cas5());
 }
 
 /// One line of `hmmsearch --domtblout`: bit score, bias, and the model,
@@ -125,9 +99,8 @@ fn hit_of(report: SearchReport) -> Hit {
     }
 }
 
-/// Compare the domains of `hit` with `expected`. `skip_envelope_of` names a
-/// domain whose envelope is not compared (see the test using it).
-fn assert_domains(hit: &Hit, expected: &[OracleDomain], skip_envelope_of: Option<usize>) {
+/// Compare the domains of `hit` with `expected`.
+fn assert_domains(hit: &Hit, expected: &[OracleDomain]) {
     assert_eq!(hit.domains.len(), expected.len(), "number of domains");
     for (index, (domain, oracle)) in hit.domains.iter().zip(expected).enumerate() {
         let n = index + 1;
@@ -149,25 +122,22 @@ fn assert_domains(hit: &Hit, expected: &[OracleDomain], skip_envelope_of: Option
             oracle.alignment,
             "domain {n}"
         );
-        if skip_envelope_of != Some(index) {
-            assert_eq!(
-                (domain.envelope_start, domain.envelope_end),
-                oracle.envelope,
-                "domain {n}"
-            );
-        }
+        assert_eq!(
+            (domain.envelope_start, domain.envelope_end),
+            oracle.envelope,
+            "domain {n}"
+        );
     }
 }
 
 /// TIGR01875 (Cas7_0_I) against the Cas7 of Thermococcus kodakarensis KOD1
 /// (NC_006624.1, gene 460 of the Prodigal prediction; 399 residues).
-fn search_cas7_two_domains(filters: FilterPolicy) -> Hit {
+fn search_cas7_two_domains() -> Hit {
     let sequence = b"MFLSVGVRFEANVEALNMVETAGNYGKHRRVPYLVEEDGKLKTVYVPAMSGESLAHAYQEHLVREALSAGLPVCDDCQRGEFYKSMDEVHFAPKLFNREEVFESVLANLSEVVDITISVLSSEIEKERNKKKQNEDKIKELEKFRGFMENLVKSEKPRDYILKNLSLASQVFGNYVIKKGILDLPPVKIEDIIVKSCVVEDVGGFLYTGSAPIRRSSAFQVSYALPVKSVALFATSEPQLHARHAQMDASSKKGNASEQMIYYVETGTALYGFTFNLDLDAIGVSAITSKPILDENEIKKRREASLKALFRMLSSSQFGAKLSRFFPVGGITELIVAVTDHPFVVTSPIYDDYIEKTQRRLKVLKSFGEESFLVVAGEEKVPEEALKEAIDYLHEKEAF";
     hit_of(search_bundled_profile(
         "Cas7_0_I.hmm",
         "NC_006624.1_460",
         sequence,
-        filters,
     ))
 }
 
@@ -216,27 +186,21 @@ fn assert_cas7_matches_hmmer_3_4(hit: &Hit) {
                 envelope: (110, 343),
             },
         ],
-        None,
     );
 }
 
 #[test]
 fn two_domains_in_one_region_match_hmmer_3_4() {
-    assert_cas7_matches_hmmer_3_4(&search_cas7_two_domains(FilterPolicy::default()));
-}
-
-#[test]
-fn two_domains_in_one_region_match_hmmer_3_4_with_exact_filters() {
-    assert_cas7_matches_hmmer_3_4(&search_cas7_two_domains(exact_filters()));
+    assert_cas7_matches_hmmer_3_4(&search_cas7_two_domains());
 }
 
 /// Sampling restarts from the same seed at every region: searching the
 /// protein again, after another one, gives the same domains.
 #[test]
 fn a_multi_domain_region_is_resolved_the_same_way_every_time() {
-    let first = search_cas7_two_domains(FilterPolicy::default());
-    let _ = search_cas5(FilterPolicy::default());
-    let second = search_cas7_two_domains(FilterPolicy::default());
+    let first = search_cas7_two_domains();
+    let _ = search_cas5();
+    let second = search_cas7_two_domains();
     assert_eq!(first.domains.len(), second.domains.len());
     for (a, b) in first.domains.iter().zip(&second.domains) {
         assert_eq!(a.bitscore, b.bitscore);
@@ -249,13 +213,12 @@ fn a_multi_domain_region_is_resolved_the_same_way_every_time() {
 
 /// TIGR03158 (Cas3_0_ID) against a helicase of T. kodakarensis KOD1
 /// (NC_006624.1, gene 457; 524 residues).
-fn search_cas3_overlapping_envelopes(filters: FilterPolicy) -> Hit {
+fn search_cas3_overlapping_envelopes() -> Hit {
     let sequence = b"MRAFKKALQKLAEAKGFKPEKRPLLEEAFHFITPSENPPFLILQAPTGYGKTLLSFALAVHSLWDASIFDRVIHVLPMRSIIEDIQKTAEDAFGFSRTKMMGSSGEFLHLFPLNITTADTFTWDLLKLNTKKRHRIKAGLEFGYDYLTQASILTSLVIFDEAHFLLEDESMVTAFLSAIEFLTSQKVPIVVMTATLSEAHRGIFEKYAKKNGYNFYVLCPQEDDPFIERELKKEVEIEFREGNPLDFIEPGRRNAIIVNSVKRAVDLFNEAKNNPEIWPESERIMLIHGRMTPSHKRELIKRLREWTKKENFLLIGTQAVEAGVDFSVDLMITDRAPINSLLQRFGRVARYGSDMKANIFVLEDAPCGPYPKDKVEKTVNLMKEHQILPRVPDTYQAIVTEVHGKKPISVKKNVNRELKRTLLKLMSDPTKRAPHVLSSIERLTASGTPIMRGFLIPLSVGGEAVLISPSKLVELYYRGVVEIRGWKGNIRSLNDAYNVAKSVALGKNVEVVFIGEYDWERGIP";
     hit_of(search_bundled_profile(
         "Cas3_0_ID.hmm",
         "NC_006624.1_457",
         sequence,
-        filters,
     ))
 }
 
@@ -271,7 +234,7 @@ fn search_cas3_overlapping_envelopes(filters: FilterPolicy) -> Hit {
 /// ```
 ///
 /// with a sequence score of 36.4 and `reg clu ov env dom` = `2 1 1 3 3`.
-fn assert_cas3_matches_hmmer_3_4(hit: &Hit, skip_envelope_of: Option<usize>) {
+fn assert_cas3_matches_hmmer_3_4(hit: &Hit) {
     assert!(
         (hit.score - 36.4).abs() < SCORE_TOLERANCE,
         "sequence score={}",
@@ -311,25 +274,10 @@ fn assert_cas3_matches_hmmer_3_4(hit: &Hit, skip_envelope_of: Option<usize>) {
                 envelope: (243, 349),
             },
         ],
-        skip_envelope_of,
     );
 }
 
 #[test]
 fn overlapping_envelopes_of_one_region_match_hmmer_3_4() {
-    assert_cas3_matches_hmmer_3_4(
-        &search_cas3_overlapping_envelopes(FilterPolicy::default()),
-        None,
-    );
-}
-
-/// With the log-space decoder the first, single-envelope region ends one
-/// residue later than HMMER's (107 for 106): its posteriors, which decide
-/// where a region ends, are rounded differently. The region resolved by
-/// sampling comes out the same.
-#[test]
-fn overlapping_envelopes_of_one_region_match_hmmer_3_4_with_exact_filters() {
-    let hit = search_cas3_overlapping_envelopes(exact_filters());
-    assert_cas3_matches_hmmer_3_4(&hit, Some(0));
-    assert_eq!(hit.domains[0].envelope_start, 28);
+    assert_cas3_matches_hmmer_3_4(&search_cas3_overlapping_envelopes());
 }

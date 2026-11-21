@@ -69,9 +69,6 @@ pub struct DomainConfig {
     /// Seed of the generator that samples tracebacks: `hmmsearch --seed`.
     /// Zero stands for the default, 42 (see `EaselFastRng::new`).
     pub seed: u32,
-    /// Decode posteriors with the log-space reference decoder rather than in
-    /// probability space (see `odds_decode`).
-    pub exact_decode: bool,
 }
 
 impl Default for DomainConfig {
@@ -88,7 +85,6 @@ impl Default for DomainConfig {
             min_endpointp: 0.02,
             do_reseeding: true,
             seed: EaselFastRng::DEFAULT_SEED,
-            exact_decode: false,
         }
     }
 }
@@ -207,7 +203,7 @@ impl DomainWorkspace {
                                 end,
                                 buf,
                                 om,
-                                (!config.exact_decode).then_some(odds),
+                                odds,
                                 false,
                             );
                             match domain {
@@ -250,7 +246,7 @@ impl DomainWorkspace {
                     region_j,
                     buf,
                     om,
-                    (!config.exact_decode).then_some(odds),
+                    odds,
                     true,
                 );
 
@@ -509,7 +505,7 @@ fn rescore_isolated_domain(
     j: usize,
     buf: &mut RescoringBuffers,
     om: &OptimizedProfile,
-    odds: Option<&OddsTables>,
+    odds: &OddsTables,
     compute_null2: bool,
 ) -> Result<(Domain, Option<Vec<f32>>), DomainRescoreFailure> {
     use crate::hmmer_core::dynamic_programming::simd::forward_filter;
@@ -517,25 +513,16 @@ fn rescore_isolated_domain(
     let domain_length = j - i + 1;
     let dsq_sub = &digital_sequence[i - 1..j];
 
-    let forward_score = forward_filter::forward_filter(dsq_sub, domain_length, om).score;
+    let forward_score = forward_filter::forward_filter(dsq_sub, domain_length, om);
 
-    match odds {
-        Some(odds) => crate::hmmer_core::dynamic_programming::odds_decode::decode_odds_space(
-            dsq_sub,
-            profile,
-            odds,
-            forward_score,
-            &mut buf.posterior_matrix,
-            None,
-        ),
-        None => crate::hmmer_core::forward_backward::backward_decode_log_space(
-            dsq_sub,
-            profile,
-            forward_score,
-            &mut buf.posterior_matrix,
-            None,
-        ),
-    }
+    crate::hmmer_core::dynamic_programming::odds_decode::decode_odds_space(
+        dsq_sub,
+        profile,
+        odds,
+        forward_score,
+        &mut buf.posterior_matrix,
+        None,
+    )
     .map_err(|_| DomainRescoreFailure::Backward)?;
 
     finish_domain_scoring(

@@ -8,7 +8,8 @@
 //! overflows. Scores agree with the log-space decoder to about a hundredth
 //! of a nat and posteriors to about a thousandth; the log-space decoder is
 //! several times slower because each of its rows is a serial chain of
-//! table look-ups, and it remains the reference in tests and in exact mode.
+//! table look-ups. The search does not run it; it remains the reference the
+//! tests compare this decoder with.
 
 use super::score_matrix::*;
 use crate::hmmer_core::config::{PROFILE_NUM_EMISSIONS, PROFILE_NUM_TRANSITIONS, PRsc, PTsc};
@@ -467,7 +468,7 @@ mod tests {
                     .unwrap();
                 sequence[l / 4 + offset] = best as u8;
             }
-            let forward = forward_filter(&sequence, l, &om).score;
+            let forward = forward_filter(&sequence, l, &om);
 
             let mut reference = ScoreMatrix::new(m, l).unwrap();
             let mut reference_def = DomainDef::new();

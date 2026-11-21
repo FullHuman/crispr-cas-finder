@@ -13,10 +13,7 @@ use hmmer_core::profile::Profile;
 use hmmer_core::rng::XorShift64;
 use hmmer_core::score_matrix::NUM_SPECIAL_STATES;
 use hmmer_core::score_matrix::*;
-use hmmer_core::simd::f32_msv;
-use hmmer_core::simd::f32_viterbi;
 use hmmer_core::simd::forward_filter;
-use hmmer_core::simd::fwd_bck;
 use hmmer_core::simd::oprofile::OptimizedProfile;
 use hmmer_core::test_helpers::*;
 use hmmer_core::tophits::TopHits;
@@ -655,31 +652,6 @@ fn test_hmm_encode_decode_statetype() {
 // }
 
 // ===================================================================
-// generic_viterbi.c :: utest_viterbi()
-// ===================================================================
-
-#[test]
-fn test_generic_viterbi_random_seqs() {
-    let abc = Alphabet::amino();
-    let mut rng = XorShift64::new(42);
-    let m = 20;
-    let l = 50;
-
-    let hmm = hmm_sample(&mut rng, m, &abc);
-    let bg = BackgroundModel::new(&abc);
-    let mut gm = Profile::new(hmm.num_nodes, &abc);
-    hmmer_core::modelconfig::profile_config(&hmm, &bg, &mut gm, l, SearchMode::Local);
-    let mut om = OptimizedProfile::from_profile(&gm);
-    om.reconfigure_length(l);
-
-    for _ in 0..10 {
-        let dsq = random_digital_seq(&mut rng, &bg.residue_frequencies, abc.canonical_size, l);
-        let score = f32_viterbi::viterbi_filter_f32(&dsq, dsq.len(), &om);
-        assert!(!score.is_nan(), "Viterbi score is NaN");
-    }
-}
-
-// ===================================================================
 // generic_fwdback.c :: utest_forward()
 // ===================================================================
 
@@ -700,121 +672,13 @@ fn test_generic_forward_random_seqs() {
     for _ in 0..10 {
         let dsq = random_digital_seq(&mut rng, &bg.residue_frequencies, abc.canonical_size, l);
         let result = forward_filter::forward_filter(&dsq, dsq.len(), &om);
-        assert!(!result.score.is_nan(), "Forward score is NaN");
+        assert!(!result.is_nan(), "Forward score is NaN");
     }
 }
 
 // ===================================================================
+// forward_backward.rs :: the log-space reference decoder
 // ===================================================================
-// forward_backward.rs :: forward_score_only / forward_checkpointed
-// Verify that both new functions agree with the reference forward().
-// ===================================================================
-
-#[test]
-fn test_forward_score_only_agrees_with_forward() {
-    let abc = Alphabet::amino();
-    let mut rng = XorShift64::new(42);
-    let m = 20;
-    let bg = BackgroundModel::new(&abc);
-
-    for l in [1, 5, 20, 50, 200] {
-        let hmm = hmm_sample(&mut rng, m, &abc);
-        let mut gm = Profile::new(hmm.num_nodes, &abc);
-        hmmer_core::modelconfig::profile_config(&hmm, &bg, &mut gm, l, SearchMode::Local);
-        let mut om = OptimizedProfile::from_profile(&gm);
-        om.reconfigure_length(l);
-
-        for _ in 0..10 {
-            let dsq = random_digital_seq(&mut rng, &bg.residue_frequencies, abc.canonical_size, l);
-            let ref_score = forward_filter::forward_filter(&dsq, dsq.len(), &om).score;
-            let (checkpoints, _) = fwd_bck::forward_checkpointed_simd(&dsq, dsq.len(), &om);
-            let score_only = checkpoints.overall_score;
-
-            let diff = (ref_score - score_only).abs();
-            assert!(
-                diff < 1e-4,
-                "checkpointed forward mismatch: ref={ref_score}, got={score_only}, diff={diff}, L={l}"
-            );
-        }
-    }
-}
-
-#[test]
-fn test_forward_checkpointed_agrees_with_forward() {
-    let abc = Alphabet::amino();
-    let mut rng = XorShift64::new(42);
-    let m = 20;
-    let bg = BackgroundModel::new(&abc);
-
-    for l in [1, 5, 20, 50, 200] {
-        let hmm = hmm_sample(&mut rng, m, &abc);
-        let mut gm = Profile::new(hmm.num_nodes, &abc);
-        hmmer_core::modelconfig::profile_config(&hmm, &bg, &mut gm, l, SearchMode::Local);
-        let mut om = OptimizedProfile::from_profile(&gm);
-        om.reconfigure_length(l);
-
-        for _ in 0..10 {
-            let dsq = random_digital_seq(&mut rng, &bg.residue_frequencies, abc.canonical_size, l);
-            let ref_result = forward_filter::forward_filter(&dsq, dsq.len(), &om);
-            let (checkpoints, simd_data) = fwd_bck::forward_checkpointed_simd(&dsq, dsq.len(), &om);
-
-            let diff = (ref_result.score - checkpoints.overall_score).abs();
-            assert!(
-                diff < 1e-4,
-                "forward_checkpointed score mismatch: ref={}, got={}, diff={diff}, L={l}",
-                ref_result.score,
-                checkpoints.overall_score
-            );
-
-            let mut cumulative_scale = 0.0f32;
-            for i in 0..=l {
-                cumulative_scale += ref_result.scale_factors[i].ln();
-                for s in 0..5 {
-                    let raw = ref_result.xmx[i][s];
-                    let ref_sp = if raw > 0.0 {
-                        raw.ln() + cumulative_scale
-                    } else {
-                        f32::NEG_INFINITY
-                    };
-                    let chk_sp = checkpoints.special_score(i, s);
-                    let sp_diff = (ref_sp - chk_sp).abs();
-                    assert!(
-                        sp_diff < 1e-4 || (ref_sp.is_infinite() && chk_sp.is_infinite()),
-                        "special state mismatch at row={i}, state={s}: ref={ref_sp}, got={chk_sp}"
-                    );
-                }
-            }
-
-            for seg in 0..checkpoints.checkpoint_indices.len() - 1 {
-                let start = checkpoints.checkpoint_indices[seg];
-                let end = checkpoints.checkpoint_indices[seg + 1];
-                let rows = fwd_bck::recompute_forward_segment_simd(
-                    &dsq,
-                    &om,
-                    &checkpoints,
-                    &simd_data,
-                    seg,
-                    start,
-                    end,
-                );
-
-                let (_, recomputed_end) = rows.last().expect("segment should include its endpoint");
-                let expected_end = &checkpoints.checkpoint_main[seg + 1];
-                for k in 0..=gm.num_nodes {
-                    for s in 0..3 {
-                        let ref_val = expected_end[[k, s]];
-                        let rec_val = recomputed_end[[k, s]];
-                        let val_diff = (ref_val - rec_val).abs();
-                        assert!(
-                            val_diff < 1e-4 || (ref_val.is_infinite() && rec_val.is_infinite()),
-                            "recomputed checkpoint mismatch at row={end}, k={k}, s={s}: ref={ref_val}, got={rec_val}"
-                        );
-                    }
-                }
-            }
-        }
-    }
-}
 
 #[test]
 fn test_backward_posterior_null2_and_oa_invariants() {
@@ -828,19 +692,19 @@ fn test_backward_posterior_null2_and_oa_invariants() {
         hmmer_core::modelconfig::profile_config(&hmm, &bg, &mut gm, l, SearchMode::Local);
         let om = OptimizedProfile::from_profile(&gm);
         let dsq = random_digital_seq(&mut rng, &bg.residue_frequencies, abc.canonical_size, l);
-        let (checkpoints, _) = fwd_bck::forward_checkpointed_simd(&dsq, l, &om);
+        let forward_score = forward_filter::forward_filter(&dsq, l, &om);
         let mut posterior = ScoreMatrix::new(gm.num_nodes, l).unwrap();
         let mut domains = hmmer_core::domaindef::DomainWorkspace::new();
 
         let backward_score = hmmer_core::forward_backward::backward_decode_log_space(
             &dsq,
             &gm,
-            checkpoints.overall_score,
+            forward_score,
             &mut posterior,
             Some(&mut domains),
         )
         .unwrap();
-        assert!((backward_score - checkpoints.overall_score).abs() < 0.1);
+        assert!((backward_score - forward_score).abs() < 0.1);
         assert!(domains.begin_totals[l].is_finite());
         assert!(domains.exit_totals[l].is_finite());
         assert!((domains.begin_totals[l] - domains.exit_totals[l]).abs() < 0.02);
@@ -876,89 +740,6 @@ fn test_backward_posterior_null2_and_oa_invariants() {
             oa.trace.steps.last().unwrap().state,
             TraceStateType::Terminate
         );
-    }
-}
-
-#[test]
-fn test_recompute_forward_segment() {
-    let abc = Alphabet::amino();
-    let mut rng = XorShift64::new(42);
-    let m = 20;
-    let l = 100;
-    let bg = BackgroundModel::new(&abc);
-
-    let hmm = hmm_sample(&mut rng, m, &abc);
-    let mut gm = Profile::new(hmm.num_nodes, &abc);
-    hmmer_core::modelconfig::profile_config(&hmm, &bg, &mut gm, l, SearchMode::Local);
-    let mut om = OptimizedProfile::from_profile(&gm);
-    om.reconfigure_length(l);
-
-    let dsq = random_digital_seq(&mut rng, &bg.residue_frequencies, abc.canonical_size, l);
-    let (checkpoints, simd_data) = fwd_bck::forward_checkpointed_simd(&dsq, dsq.len(), &om);
-
-    for seg in 0..checkpoints.checkpoint_indices.len() - 1 {
-        let start = checkpoints.checkpoint_indices[seg];
-        let end = checkpoints.checkpoint_indices[seg + 1];
-        let rows = fwd_bck::recompute_forward_segment_simd(
-            &dsq,
-            &om,
-            &checkpoints,
-            &simd_data,
-            seg,
-            start,
-            end,
-        );
-
-        let (_, start_row) = rows.first().expect("segment should include start row");
-        for k in 0..=gm.num_nodes {
-            for s in 0..3 {
-                let ref_val = checkpoints.checkpoint_main[seg][[k, s]];
-                let rec_val = start_row[[k, s]];
-                let diff = (ref_val - rec_val).abs();
-                assert!(
-                    diff < 1e-4 || (ref_val.is_infinite() && rec_val.is_infinite()),
-                    "recompute mismatch at start row={start}, k={k}, s={s}: ref={ref_val}, got={rec_val}"
-                );
-            }
-        }
-
-        let (_, end_row) = rows.last().expect("segment should include end row");
-        for k in 0..=gm.num_nodes {
-            for s in 0..3 {
-                let ref_val = checkpoints.checkpoint_main[seg + 1][[k, s]];
-                let rec_val = end_row[[k, s]];
-                let diff = (ref_val - rec_val).abs();
-                assert!(
-                    diff < 1e-4 || (ref_val.is_infinite() && rec_val.is_infinite()),
-                    "recompute mismatch at end row={end}, k={k}, s={s}: ref={ref_val}, got={rec_val}"
-                );
-            }
-        }
-    }
-}
-
-// ===================================================================
-// generic_msv.c :: utest_msv()
-// ===================================================================
-
-#[test]
-fn test_generic_msv_random_seqs() {
-    let abc = Alphabet::amino();
-    let mut rng = XorShift64::new(42);
-    let m = 20;
-    let l = 50;
-
-    let hmm = hmm_sample(&mut rng, m, &abc);
-    let bg = BackgroundModel::new(&abc);
-    let mut gm = Profile::new(hmm.num_nodes, &abc);
-    hmmer_core::modelconfig::profile_config(&hmm, &bg, &mut gm, l, SearchMode::Local);
-    let mut om = OptimizedProfile::from_profile(&gm);
-    om.reconfigure_length(l);
-
-    for _ in 0..10 {
-        let dsq = random_digital_seq(&mut rng, &bg.residue_frequencies, abc.canonical_size, l);
-        let score = f32_msv::msv_filter_f32(&dsq, dsq.len(), &om);
-        assert!(score.is_finite(), "MSV score not finite: {}", score);
     }
 }
 

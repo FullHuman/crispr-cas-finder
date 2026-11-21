@@ -256,11 +256,6 @@ pub struct Cli {
         help = "Bit score the best hit of a Cas system must reach; not applied to MacSyFinder model packages"
     )]
     min_cas_score: f64,
-    #[arg(
-        long,
-        help = "Decide the HMM filters with exact scores instead of HMMER's rounded filter scores, and decode in log space (slower)"
-    )]
-    exact_filters: bool,
     #[arg(long = "cas-models-dir", value_name = "DIR")]
     #[arg(
         help = "Directory of Cas model definitions, or a MacSyFinder model package such as CasFinder 3"
@@ -400,7 +395,6 @@ impl Cli {
                 min_best_hit_score: self.min_cas_score,
                 cas_models_dir: Some(cas_models_dir),
                 cas_profiles_dir: Some(cas_profiles_dir),
-                exact_filters: self.exact_filters,
             },
             _bundled_data: bundled_data,
         })

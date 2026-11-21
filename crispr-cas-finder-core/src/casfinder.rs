@@ -45,7 +45,6 @@ pub fn legacy_hit_filtering() -> HitFiltering {
         i_evalue_sel: MAX_DOMAIN_INCLUSION_EVALUE,
         coverage_profile: MIN_PROFILE_COVERAGE,
         cut_ga: false,
-        exact_filters: false,
     }
 }
 
@@ -110,7 +109,7 @@ fn load_model_set(config: &CasFinderConfig) -> Result<ModelSet> {
             definitions_dir.display()
         );
     }
-    let (mut filtering, weights) = if macsyfinder2 > 0 {
+    let (filtering, weights) = if macsyfinder2 > 0 {
         for model in &models {
             macsy::check_supported(model).map_err(anyhow::Error::msg)?;
         }
@@ -127,8 +126,6 @@ fn load_model_set(config: &CasFinderConfig) -> Result<ModelSet> {
     } else {
         (legacy_hit_filtering(), HitWeights::default())
     };
-    filtering.exact_filters = config.exact_filters;
-
     let profiles_dir = match &config.cas_profiles_dir {
         Some(directory) => directory.clone(),
         None if is_package => models_dir.join("profiles"),
@@ -652,10 +649,7 @@ fn search_hmm_profile_in_order(
     let query = SearchQuery::from_configured_profile(configured_profile, background_model.clone())
         .map_err(|e| anyhow::anyhow!("Query config failed for {}: {}", profile_name, e))?;
     let plan = SearchPlan::builder(query)
-        .filters(FilterPolicy {
-            exact: filtering.exact_filters,
-            ..FilterPolicy::default()
-        })
+        .filters(FilterPolicy::default())
         .build()
         .map_err(|e| anyhow::anyhow!("Search plan config failed for {}: {}", profile_name, e))?;
     let mut worker = plan

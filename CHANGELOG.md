@@ -2,6 +2,43 @@
 
 ## [Unreleased]
 
+### Cas detection
+
+- The `--exact-filters` option is removed. Since 0.2.0 the default search
+  decides the MSV, bias and Viterbi filters on the scores HMMER's own filters
+  return and reports the hits of `hmmsearch` 3.4. The option decided them on
+  unrounded single-precision scores and decoded posterior probabilities in
+  log space, which gave other hits than `hmmsearch` in twice the time. The
+  results of the default search are unchanged: on the 72 genomes of the
+  comparison in `benchmarks/`, searched with the CasFinder 3.1 models, every
+  output file is byte for byte the one 0.2.0 writes.
+
+### Library
+
+- `CasFinderConfig::exact_filters`, `HitFiltering::exact_filters`,
+  `FilterPolicy::exact` and `DomainConfig::exact_decode` are removed with the
+  option, and so is the code only it reached in the bundled HMMER
+  implementation: the single-precision MSV and Viterbi filters, the integer
+  bounds on their scores, and the tables `OptimizedProfile` kept for them.
+  `OptimizedProfile::from_profile` builds the tables of the search, as
+  `for_hmmer_filters` did, and `SearchTrace` loses `msv_raw_score`,
+  `msv_score_bound`, `msv_score_lower_bound` and `viterbi_raw_score`, which
+  nothing sets any more. The log-space posterior decoder stays as the
+  reference the tests compare the probability-space decoder with.
+- Code left over from earlier decoders is removed too: the checkpointed
+  Forward pass and its segment replay (`simd::fwd_bck`), `ForwardCheckpoints`,
+  `forward_backward::backward_decode_prob_space` and `OptimizedProfile::new`,
+  none of which the search called. `forward_filter` returns the Forward score
+  alone, where it returned a `ForwardResult`: it no longer fills the
+  special-state rows and scale factors it kept for those decoders on every
+  call. `evalues::msv_score_to_pvalue`, which only the removed filters
+  called, is gone as well.
+- `FilterPolicy::max_mode` now skips the MSV, bias and Viterbi filters, as
+  `hmmsearch --max` does: every sequence goes to the Forward pass, whose
+  score is not tested, and on to domain definition. It used to compute the
+  unrounded MSV and Viterbi scores first, without testing them. No command
+  line option sets it.
+
 ## [0.2.0] - 2026-11-14
 
 On the 72 genomes of the comparison in `benchmarks/`, this version and

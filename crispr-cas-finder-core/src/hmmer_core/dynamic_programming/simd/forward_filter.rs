@@ -3,25 +3,17 @@
 // Uses Simd<f32, 4> for 4-way parallel Forward in probability (odds-ratio) space
 // with Farrar-striped layout. Sparse rescaling prevents single-precision overflow.
 //
-// Parser mode: O(M+L) memory — one MDI row reused, plus special state
-// scores per position for posterior decoding of domain structure.
+// Parser mode: O(M) memory, one MDI row reused. Only the score is kept.
 
 use super::oprofile::*;
 use std::simd::prelude::*;
 
-/// Result of the Forward filter in parser mode.
-pub struct ForwardResult {
-    pub score: f32,
-    pub xmx: Vec<[f32; 5]>,      // [E,N,J,B,C] per position 0..L
-    pub scale_factors: Vec<f32>, // scale factor at each position 0..L
-    pub totscale: f64,
-}
-
-/// Run the Forward filter (parser mode) on a digitized sequence.
+/// The Forward score, in nats, of a digitized sequence (parser mode), or
+/// minus infinity when no path reaches the end.
 ///
 /// `dsq` is 0-indexed: residues at dsq[0..l].
 #[inline(never)]
-pub fn forward_filter(dsq: &[u8], l: usize, om: &OptimizedProfile) -> ForwardResult {
+pub fn forward_filter(dsq: &[u8], l: usize, om: &OptimizedProfile) -> f32 {
     let q = om.q4;
     let zero_v = f32x4::splat(0.0);
     // Transition layout is invariant across sequence rows.
@@ -33,21 +25,16 @@ pub fn forward_filter(dsq: &[u8], l: usize, om: &OptimizedProfile) -> ForwardRes
     let mut imx = vec![f32x4::splat(0.0); q];
     let mut dmx = vec![f32x4::splat(0.0); q];
 
-    let mut xmx = vec![[0.0f32; 5]; l + 1];
-    let mut scale_factors = vec![1.0f32; l + 1];
     let mut totscale: f64 = 0.0;
 
     // Init row 0
-    let mut x_e: f32 = 0.0;
     let mut x_n: f32 = 1.0;
     let mut x_j: f32 = 0.0;
     let mut x_b: f32 = om.xf[XST_N][XTR_MOVE];
     let mut x_c: f32 = 0.0;
 
-    xmx[0] = [x_e, x_n, x_j, x_b, x_c];
-
-    for i in 0..l {
-        let xi = dsq[i] as usize;
+    for &residue in &dsq[..l] {
+        let xi = residue as usize;
         let rsc = if xi < om.kp { &om.rfv[xi] } else { &om.rfv[0] };
 
         let mut dcv = f32x4::splat(0.0);
@@ -159,7 +146,7 @@ pub fn forward_filter(dsq: &[u8], l: usize, om: &OptimizedProfile) -> ForwardRes
         }
 
         // Horizontal sum of xe_v
-        x_e = xe_v.reduce_sum();
+        let x_e = xe_v.reduce_sum();
 
         // Special states
         x_n *= om.xf[XST_N][XTR_LOOP];
@@ -181,25 +168,14 @@ pub fn forward_filter(dsq: &[u8], l: usize, om: &OptimizedProfile) -> ForwardRes
                 dmx[qi] *= inv_v;
                 imx[qi] *= inv_v;
             }
-            scale_factors[i + 1] = x_e;
             totscale += (x_e as f64).ln();
-            x_e = 1.0;
         }
-
-        xmx[i + 1] = [x_e, x_n, x_j, x_b, x_c];
     }
 
-    let score = if l > 0 && x_c > 0.0 {
+    if l > 0 && x_c > 0.0 {
         totscale as f32 + (x_c * om.xf[XST_C][XTR_MOVE]).ln()
     } else {
         f32::NEG_INFINITY
-    };
-
-    ForwardResult {
-        score,
-        xmx,
-        scale_factors,
-        totscale,
     }
 }
 
@@ -247,19 +223,10 @@ mod tests {
     #[test]
     fn test_simd_forward_produces_finite_score() {
         let (_, om, dsq) = setup_profile_and_om(20, 50);
-        let result = forward_filter(&dsq, dsq.len(), &om);
+        let score = forward_filter(&dsq, dsq.len(), &om);
         assert!(
-            result.score.is_finite(),
-            "SIMD forward score should be finite, got {}",
-            result.score
+            score.is_finite(),
+            "SIMD forward score should be finite, got {score}"
         );
-    }
-
-    #[test]
-    fn test_simd_forward_xmx_length() {
-        let (_, om, dsq) = setup_profile_and_om(20, 50);
-        let result = forward_filter(&dsq, dsq.len(), &om);
-        assert_eq!(result.xmx.len(), dsq.len() + 1);
-        assert_eq!(result.scale_factors.len(), dsq.len() + 1);
     }
 }

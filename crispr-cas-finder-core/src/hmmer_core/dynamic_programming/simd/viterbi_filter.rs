@@ -22,7 +22,7 @@
 // Every cell of a model node, and the test that decides which rows skip,
 // are integers that do not depend on the striping, so the result is the
 // same for any vector width; the kernels run with the widest vectors the
-// processor has, as the bounds of int_msv.rs do.
+// processor has, as those of int_msv.rs do.
 
 #[cfg(target_arch = "x86_64")]
 use super::int_msv::{Avx2Kernels, Avx512Kernels, Sse41Kernels};
