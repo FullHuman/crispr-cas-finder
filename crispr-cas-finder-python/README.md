@@ -106,10 +106,10 @@ for system in report["cas_clusters"]:
 Other keyword arguments: `gff` and `faa` (use an existing annotation),
 `metagenome`, `auto_metagenome_below`, `linear`, `cas_only_with_crispr`,
 `vicinity`, `workers`, and the detection settings of `find_crispr_arrays`.
-Cas detection from Python runs with genetic code 11, the `SubTyping`
-definitions of CasFinder 2 and the default HMM filters; the CLI's
-`--genetic-code`, `--definition`, `--min-cas-score` and `--exact-filters` have
-no Python equivalent. The interpreter lock is released while the analysis runs.
+Cas detection from Python runs with genetic code 11 and the `SubTyping`
+definitions of CasFinder 2; the CLI's `--genetic-code`, `--definition` and
+`--min-cas-score` have no Python equivalent. The interpreter lock is released
+while the analysis runs.
 
 ### `CrisprArray`
 
