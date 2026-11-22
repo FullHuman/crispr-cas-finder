@@ -169,7 +169,13 @@ fn malformed_header_value_is_reported() {
 
 #[test]
 fn truncated_model_body_is_reported() {
-    let truncated = &ANNOTATED_DNA[..ANNOTATED_DNA.len() - 3];
+    // Cut the model before the `//` that ends it. Counting bytes from the end
+    // would depend on the line endings of the checkout.
+    let terminator = ANNOTATED_DNA
+        .windows(2)
+        .rposition(|pair| pair == b"//")
+        .expect("the fixture ends with //");
+    let truncated = &ANNOTATED_DNA[..terminator];
 
     let error = read_hmm(&mut Cursor::new(truncated)).expect_err("truncation must fail");
     assert!(error.to_string().contains("premature EOF"));
