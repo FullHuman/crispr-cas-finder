@@ -1,0 +1,35 @@
+HMMER3/f [hmmer-rust]
+NAME  round-trip
+ACC   TEST0002
+DESC  round-trip model
+LENG  2
+MAXL  91
+ALPH  DNA
+RF    yes
+MM    yes
+CONS  yes
+CS    yes
+MAP   yes
+COM   hmmbuild input.sto
+COM   hmmpress model.hmm
+NSEQ  8
+EFFN  6.250000
+CKSUM 42
+GA    20.00 19.00
+TC    25.00 24.00
+NC    15.00 14.00
+STATS LOCAL MSV      -9.000000 0.700000
+STATS LOCAL VITERBI  -8.000000 0.600000
+STATS LOCAL FORWARD  -3.000000 0.500000
+HMM                 A        C        G        T
+            m->m     m->i     m->d     i->m     i->i     d->m     d->d
+  COMPO  1.38629  1.38629  1.38629  1.38629
+         1.38629  1.38629  1.38629  1.38629
+         1.94591  1.94591  1.94591  1.94591  1.94591  1.94591  1.94591
+      1  1.38629  1.38629  1.38629  1.38629     11    A    x    m    <
+         1.38629  1.38629  1.38629  1.38629
+         1.94591  1.94591  1.94591  1.94591  1.94591  1.94591  1.94591
+      2  1.38629  1.38629  1.38629  1.38629     22    C    y    .    >
+         1.38629  1.38629  1.38629  1.38629
+         1.94591  1.94591  1.94591  1.94591  1.94591  1.94591  1.94591
+//

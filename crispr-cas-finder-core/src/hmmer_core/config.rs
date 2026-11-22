@@ -1,28 +1,5 @@
 pub use crate::hmmer_core::constants::*;
 
-/// Search mode for profile configuration.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SearchMode {
-    /// Multihit local: "fs" mode
-    Local = 1,
-    /// Multihit glocal: "ls" mode
-    Glocal = 2,
-    /// Unihit local: "sw" mode
-    UniLocal = 3,
-    /// Unihit glocal: "s" mode
-    UniGlocal = 4,
-}
-
-impl SearchMode {
-    pub fn is_local(self) -> bool {
-        matches!(self, Self::Local | Self::UniLocal)
-    }
-
-    pub fn is_multihit(self) -> bool {
-        matches!(self, Self::Local | Self::Glocal)
-    }
-}
-
 // ---------------------------------------------------------------
 // E-value parameter indices
 // ---------------------------------------------------------------
@@ -41,30 +18,6 @@ impl EvParam {
     pub const fn idx(self) -> usize {
         self as usize
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Cutoff {
-    GatheringSequence = 0,
-    GatheringDomain = 1,
-    TrustedSequence = 2,
-    TrustedDomain = 3,
-    NoiseSequence = 4,
-    NoiseDomain = 5,
-}
-
-impl Cutoff {
-    pub const fn idx(self) -> usize {
-        self as usize
-    }
-}
-
-/// Which strand(s) should be searched
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Strands {
-    TopOnly = 0,
-    BottomOnly = 1,
-    Both = 2,
 }
 
 // ---------------------------------------------------------------
@@ -94,7 +47,6 @@ impl HTransition {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TraceStateType {
-    Bogus = 0,
     Match = 1,
     Delete = 2,
     Insert = 3,
@@ -105,13 +57,11 @@ pub enum TraceStateType {
     CTerminal = 8,
     Terminate = 9,
     Jump = 10,
-    Missing = 11, // missing data: for local entry/exits
 }
 
 impl TraceStateType {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Bogus => "?",
             Self::Match => "M",
             Self::Delete => "D",
             Self::Insert => "I",
@@ -122,12 +72,7 @@ impl TraceStateType {
             Self::CTerminal => "C",
             Self::Terminate => "T",
             Self::Jump => "J",
-            Self::Missing => "X",
         }
-    }
-
-    pub const fn idx(self) -> usize {
-        self as usize
     }
 }
 

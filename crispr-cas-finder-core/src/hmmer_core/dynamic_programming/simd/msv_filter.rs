@@ -171,12 +171,6 @@ impl MsvBytes {
         self.tjb = unbiased_byteify(self.scale, (3.0f32 / (l + 3) as f32).ln());
     }
 
-    /// Alphabet size of the tables.
-    #[inline]
-    pub fn kp(&self) -> usize {
-        self.kp
-    }
-
     /// The instruction set the single-segment pass runs with.
     #[inline]
     pub fn isa(&self) -> Isa {

@@ -1,6 +1,4 @@
 use crate::hmmer_core::config::{MAX_CANONICAL_ALPHABET, MAX_FULL_ALPHABET};
-#[cfg(feature = "hmmer-serde")]
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Digitized residue code (0-based index into the alphabet).
 pub type Dsq = u8;
@@ -37,16 +35,12 @@ pub struct Alphabet {
     /// True if digital code `x` includes canonical residue `a`.
     pub degen: [bool; MAX_FULL_SIZE * MAX_CANONICAL_SIZE],
 
-    /// Number of canonical residues represented by each code.
-    pub degeneracy_counts: [usize; MAX_FULL_SIZE],
-
     /// ASCII → digital code lookup (128 entries, case-folding).
     /// Unknown characters map to `kp - 1` (missing data).
     input_map: [Dsq; 128],
 }
 
 /// The kind of biological alphabet.
-#[cfg_attr(feature = "hmmer-serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AlphabetKind {
     Amino,
@@ -83,7 +77,6 @@ impl Alphabet {
             degen[26 * MAX_CANONICAL_SIZE + a] = true;
         }
 
-        let ndegen = compute_ndegen(&degen, kp, k);
         let inmap = build_inmap(&sym, kp);
 
         Alphabet {
@@ -92,7 +85,6 @@ impl Alphabet {
             full_size: kp,
             symbols: sym,
             degen,
-            degeneracy_counts: ndegen,
             input_map: inmap,
         }
     }
@@ -134,7 +126,6 @@ impl Alphabet {
             degen[15 * MAX_CANONICAL_SIZE + a] = true;
         }
 
-        let ndegen = compute_ndegen(&degen, kp, k);
         let inmap = build_inmap(&sym, kp);
 
         Alphabet {
@@ -143,7 +134,6 @@ impl Alphabet {
             full_size: kp,
             symbols: sym,
             degen,
-            degeneracy_counts: ndegen,
             input_map: inmap,
         }
     }
@@ -169,103 +159,10 @@ impl Alphabet {
         }
     }
 
-    /// Check whether digital code `x` is a degenerate (ambiguous) residue,
-    /// i.e. not one of the K canonical residues and not gap/special.
-    #[inline]
-    pub fn is_degenerate(&self, x: Dsq) -> bool {
-        let x = x as usize;
-        x > self.canonical_size && x < self.full_size.saturating_sub(2)
-    }
-
-    /// Check whether digital code `x` is a canonical residue (0..K-1).
-    #[inline]
-    pub fn is_canonical(&self, x: Dsq) -> bool {
-        (x as usize) < self.canonical_size
-    }
-
     /// Get the degeneracy row for code `x` as a slice of K booleans.
     #[inline]
     pub fn degen_row(&self, x: usize) -> &[bool] {
         &self.degen[x * MAX_CANONICAL_SIZE..x * MAX_CANONICAL_SIZE + self.canonical_size]
-    }
-}
-
-#[cfg(feature = "hmmer-serde")]
-#[derive(Serialize, Deserialize)]
-struct AlphabetSerde {
-    kind: AlphabetKind,
-    canonical_size: usize,
-    full_size: usize,
-    symbols: Vec<u8>,
-    degen: Vec<bool>,
-    degeneracy_counts: Vec<usize>,
-}
-
-#[cfg(feature = "hmmer-serde")]
-impl Serialize for Alphabet {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        AlphabetSerde {
-            kind: self.kind,
-            canonical_size: self.canonical_size,
-            full_size: self.full_size,
-            symbols: self.symbols.to_vec(),
-            degen: self.degen.to_vec(),
-            degeneracy_counts: self.degeneracy_counts.to_vec(),
-        }
-        .serialize(serializer)
-    }
-}
-
-#[cfg(feature = "hmmer-serde")]
-impl<'de> Deserialize<'de> for Alphabet {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        use serde::de::Error;
-
-        let raw = AlphabetSerde::deserialize(deserializer)?;
-        if raw.canonical_size > MAX_CANONICAL_SIZE {
-            return Err(D::Error::custom(
-                "canonical_size exceeds maximum alphabet size",
-            ));
-        }
-        if raw.full_size > MAX_FULL_SIZE {
-            return Err(D::Error::custom("full_size exceeds maximum alphabet size"));
-        }
-        if raw.symbols.len() != MAX_FULL_SIZE {
-            return Err(D::Error::custom("symbols has incorrect serialized length"));
-        }
-        if raw.degen.len() != MAX_FULL_SIZE * MAX_CANONICAL_SIZE {
-            return Err(D::Error::custom("degen has incorrect serialized length"));
-        }
-        if raw.degeneracy_counts.len() != MAX_FULL_SIZE {
-            return Err(D::Error::custom(
-                "degeneracy_counts has incorrect serialized length",
-            ));
-        }
-
-        let mut symbols = [0u8; MAX_FULL_SIZE];
-        symbols.copy_from_slice(&raw.symbols);
-
-        let mut degen = [false; MAX_FULL_SIZE * MAX_CANONICAL_SIZE];
-        degen.copy_from_slice(&raw.degen);
-
-        let mut degeneracy_counts = [0usize; MAX_FULL_SIZE];
-        degeneracy_counts.copy_from_slice(&raw.degeneracy_counts);
-
-        Ok(Self {
-            kind: raw.kind,
-            canonical_size: raw.canonical_size,
-            full_size: raw.full_size,
-            symbols,
-            degen,
-            degeneracy_counts,
-            input_map: build_inmap(&symbols, raw.full_size),
-        })
     }
 }
 
@@ -288,22 +185,6 @@ fn set_degen(degen: &mut [bool; MAX_FULL_SIZE * MAX_CANONICAL_SIZE], x: usize, r
     }
 }
 
-/// Compute ndegen counts from the flat degen table.
-fn compute_ndegen(
-    degen: &[bool; MAX_FULL_SIZE * MAX_CANONICAL_SIZE],
-    kp: usize,
-    k: usize,
-) -> [usize; MAX_FULL_SIZE] {
-    let mut nd = [0usize; MAX_FULL_SIZE];
-    for x in 0..kp {
-        nd[x] = degen[x * MAX_CANONICAL_SIZE..x * MAX_CANONICAL_SIZE + k]
-            .iter()
-            .filter(|&&b| b)
-            .count();
-    }
-    nd
-}
-
 /// Build the ASCII → digital code lookup table.
 /// Maps both upper and lower case to the same code.
 fn build_inmap(sym: &[u8; MAX_FULL_SIZE], kp: usize) -> [Dsq; 128] {
@@ -322,8 +203,7 @@ fn build_inmap(sym: &[u8; MAX_FULL_SIZE], kp: usize) -> [Dsq; 128] {
             map[lower as usize] = code as Dsq;
         }
     }
-    // DNA and RNA accept both spellings of the fourth nucleotide. Keep this
-    // in the shared builder so deserialized alphabets have the same mapping.
+    // DNA and RNA accept both spellings of the fourth nucleotide.
     if sym.starts_with(b"ACGT") || sym.starts_with(b"ACGU") {
         for c in b"TtUu" {
             map[*c as usize] = 3;
@@ -340,12 +220,16 @@ fn build_inmap(sym: &[u8; MAX_FULL_SIZE], kp: usize) -> [Dsq; 128] {
 mod tests {
     use super::*;
 
+    /// How many canonical residues a degeneracy row stands for.
+    fn count_of(row: &[bool]) -> usize {
+        row.iter().filter(|&&included| included).count()
+    }
+
     #[test]
     fn nucleotide_alphabets_accept_uracil_and_thymine() {
         for abc in [Alphabet::dna(), Alphabet::rna()] {
             for base in b"TtUu" {
                 assert_eq!(abc.digitize(*base), 3);
-                assert!(abc.is_canonical(abc.digitize(*base)));
             }
             assert_eq!(abc.degen_row(3), &[false, false, false, true]);
         }
@@ -414,9 +298,9 @@ mod tests {
         assert!(amino_alphabet.degen_row(21)[2]);
         assert!(amino_alphabet.degen_row(21)[11]);
         assert!(!amino_alphabet.degen_row(21)[0]);
-        assert_eq!(amino_alphabet.degeneracy_counts[21], 2);
+        assert_eq!(count_of(amino_alphabet.degen_row(21)), 2);
         // X = any (26)
-        assert_eq!(amino_alphabet.degeneracy_counts[26], 20);
+        assert_eq!(count_of(amino_alphabet.degen_row(26)), 20);
     }
 
     #[test]
@@ -426,28 +310,8 @@ mod tests {
         assert!(dna_alphabet.degen_row(5)[0]);
         assert!(dna_alphabet.degen_row(5)[2]);
         assert!(!dna_alphabet.degen_row(5)[1]);
-        assert_eq!(dna_alphabet.degeneracy_counts[5], 2);
+        assert_eq!(count_of(dna_alphabet.degen_row(5)), 2);
         // N = any (15)
-        assert_eq!(dna_alphabet.degeneracy_counts[15], 4);
-    }
-
-    #[test]
-    fn test_is_canonical() {
-        let amino_alphabet = Alphabet::amino();
-        assert!(amino_alphabet.is_canonical(0));
-        assert!(amino_alphabet.is_canonical(19));
-        assert!(!amino_alphabet.is_canonical(20)); // gap
-        assert!(!amino_alphabet.is_canonical(26)); // X
-    }
-
-    #[test]
-    fn test_is_degenerate() {
-        let amino_alphabet = Alphabet::amino();
-        assert!(!amino_alphabet.is_degenerate(0)); // canonical
-        assert!(!amino_alphabet.is_degenerate(20)); // gap
-        assert!(amino_alphabet.is_degenerate(21)); // B
-        assert!(amino_alphabet.is_degenerate(26)); // X
-        assert!(!amino_alphabet.is_degenerate(27)); // nonresidue
-        assert!(!amino_alphabet.is_degenerate(28)); // missing
+        assert_eq!(count_of(dna_alphabet.degen_row(15)), 4);
     }
 }

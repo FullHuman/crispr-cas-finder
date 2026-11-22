@@ -179,7 +179,7 @@ mod tests {
         let alphabet = Alphabet::amino();
         let mut rng = XorShift64::new(11);
         let m = 23;
-        let (_, _, profile) = setup_profile(&mut rng, m, 100, &alphabet, SearchMode::Local);
+        let (_, _, profile) = setup_profile(&mut rng, m, 100, &alphabet);
         let om = OptimizedProfile::from_profile(&profile);
         let q = om.q4;
         let striped = |k: usize| ((k - 1) % q) * 4 + (k - 1) / q;

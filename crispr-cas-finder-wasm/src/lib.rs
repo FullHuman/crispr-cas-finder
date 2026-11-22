@@ -183,9 +183,7 @@ pub fn cas_prepare(
     let targets = proteome
         .genes
         .iter()
-        .map(|gene| {
-            DigitalSequence::from_bytes(&gene.id, "", gene.protein.as_bytes(), &amino_alphabet)
-        })
+        .map(|gene| DigitalSequence::from_bytes(&gene.id, gene.protein.as_bytes(), &amino_alphabet))
         .collect();
 
     let registry = build_model_registry(&models).map_err(|e| JsValue::from_str(&e))?;

@@ -7,10 +7,6 @@ rust-version.workspace = true
 license.workspace = true
 description = "HMMER profile HMM algorithms — core library"
 
-[features]
-default = []
-serde = ["crispr-cas-finder-core/hmmer-serde"]
-
 [dependencies]
 crispr-cas-finder-core = { path = "../crispr-cas-finder-core" }
 

@@ -10,20 +10,18 @@ use crate::hmmer_core::config::*;
 use crate::hmmer_core::hmm::Hmm;
 use crate::hmmer_core::profile::Profile;
 
-/// Configure a search profile from an HMM.
+/// Configure a search profile from an HMM: local alignment to the model,
+/// any number of hits in the target, what HMMER calls multihit local mode.
 pub fn profile_config(
     hmm: &Hmm,
     background: &BackgroundModel,
     profile: &mut Profile,
     target_length: usize,
-    mode: SearchMode,
 ) {
     let model_length = hmm.num_nodes;
     let full_alphabet_size = hmm.alphabet.full_size;
 
-    profile.mode = mode;
     profile.num_nodes = model_length;
-    profile.max_length = hmm.max_length.unwrap_or(0);
 
     copy_metadata(hmm, profile);
     configure_model_composition(hmm, background, profile);
@@ -32,8 +30,8 @@ pub fn profile_config(
     profile.resize_transition_scores(model_length);
     profile.resize_residue_scores(full_alphabet_size, model_length);
 
-    configure_entry_scores(hmm, profile, mode);
-    configure_e_state(profile, mode);
+    configure_entry_scores(hmm, profile);
+    configure_e_state(profile);
     configure_transition_scores(hmm, profile);
     configure_match_emissions(hmm, background, profile);
     configure_insert_emissions(profile, full_alphabet_size);
@@ -43,20 +41,11 @@ pub fn profile_config(
     config_length_model(profile, target_length);
 }
 
-/// Copy all metadata fields from an HMM into a profile.
+/// Copy the calibration of an HMM into a profile.
 fn copy_metadata(hmm: &Hmm, profile: &mut Profile) {
-    profile.name = hmm.name.clone();
-    profile.accession = hmm.accession.clone();
-    profile.description = hmm.description.clone();
-    profile.reference_annotation = hmm.reference_annotation.clone();
-    profile.model_mask = hmm.model_mask.clone();
-    profile.consensus_structure = hmm.consensus_structure.clone();
-    profile.consensus = hmm.consensus.clone();
-
     profile.ev_params = hmm
         .ev_params
         .map_or([EV_PARAM_UNSET; NUM_EV_PARAMS], |e| e.to_array());
-    profile.score_cutoffs = hmm.cutoffs.to_array();
 }
 
 /// Copy or derive the model's average canonical-residue composition.
@@ -112,20 +101,12 @@ fn configure_model_composition(hmm: &Hmm, background: &BackgroundModel, profile:
     }
 }
 
-/// Set begin-to-match entry scores (B->M_k transitions).
-fn configure_entry_scores(hmm: &Hmm, profile: &mut Profile, mode: SearchMode) {
-    if mode.is_local() {
-        configure_local_entry_scores(hmm, profile);
-    } else {
-        configure_glocal_entry_scores(hmm, profile);
-    }
-}
-
-/// Local mode: occupancy-weighted entry probabilities.
+/// Set begin-to-match entry scores (B->M_k transitions) for local
+/// alignment: occupancy-weighted entry probabilities.
 ///
 /// Entry score for node k is `log(occ[k] / sum_i(occ[i] * (M - i + 1)))`.
 /// Falls back to a uniform distribution if the occupancy sum is zero.
-fn configure_local_entry_scores(hmm: &Hmm, profile: &mut Profile) {
+fn configure_entry_scores(hmm: &Hmm, profile: &mut Profile) {
     let model_length = hmm.num_nodes;
     let (occupancy, _) = hmm.calculate_occupancy();
 
@@ -157,38 +138,12 @@ fn configure_local_entry_scores(hmm: &Hmm, profile: &mut Profile) {
     }
 }
 
-/// Glocal mode: left wing retraction entry scores.
-///
-/// Entry to node k goes through the silent delete path D_1..D_{k-1}.
-fn configure_glocal_entry_scores(hmm: &Hmm, profile: &mut Profile) {
-    let model_length = hmm.num_nodes;
-    let t0 = hmm.transitions(0);
-    let md0 = t0[HTransition::MatchToDelete as usize];
-
-    // B->M_1: probability of taking the match branch at node 0
-    profile.transition_scores_for_node_mut(1)[PTsc::BeginToMatch.idx()] = (1.0 - md0).ln();
-
-    // B->M_{k+1} for k in 1..M-1: accumulated wing retraction score
-    let mut wing_score = md0.ln();
-    for node_index in 1..model_length {
-        let node_transitions = hmm.transitions(node_index);
-        profile.transition_scores_for_node_mut(node_index + 1)[PTsc::BeginToMatch.idx()] =
-            wing_score + node_transitions[HTransition::DeleteToMatch.idx()].ln();
-        wing_score += node_transitions[HTransition::DeleteToDelete.idx()].ln();
-    }
-}
-
-/// Configure the E-state loop/move scores and expected J uses.
-fn configure_e_state(profile: &mut Profile, mode: SearchMode) {
-    if mode.is_multihit() {
-        profile.special_scores.e_move = -LN_2;
-        profile.special_scores.e_loop = -LN_2;
-        profile.expected_j_uses = 1.0;
-    } else {
-        profile.special_scores.e_move = 0.0;
-        profile.special_scores.e_loop = f32::NEG_INFINITY;
-        profile.expected_j_uses = 0.0;
-    }
+/// Configure the E-state loop/move scores and expected J uses for any
+/// number of hits in the target.
+fn configure_e_state(profile: &mut Profile) {
+    profile.special_scores.e_move = -LN_2;
+    profile.special_scores.e_loop = -LN_2;
+    profile.expected_j_uses = 1.0;
 }
 
 /// Set log-probability transition scores for nodes k = 1..M-1.
@@ -375,21 +330,6 @@ pub fn config_length_model(profile: &mut Profile, target_length: usize) {
 /// Reconfigure the length model of an already-configured profile.
 pub fn reconfigure_length(profile: &mut Profile, target_length: usize) {
     profile.reconfigure_length(target_length);
-}
-
-/// Reconfigure profile for unihit mode with target length L.
-///
-/// Port of p7_ReconfigUnihit() in C HMMER.
-/// Sets E->C = 1.0, E->J = 0, and adjusts N/C loop for length L.
-pub fn reconfig_unihit(profile: &mut Profile, target_length: usize) {
-    profile.reconfig_unihit(target_length);
-}
-
-/// Reconfigure profile for multihit mode with target length L.
-///
-/// Port of p7_ReconfigMultihit() in C HMMER.
-pub fn reconfig_multihit(profile: &mut Profile, target_length: usize) {
-    profile.reconfig_multihit(target_length);
 }
 
 #[cfg(test)]

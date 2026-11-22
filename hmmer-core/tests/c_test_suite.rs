@@ -7,7 +7,6 @@ use hmmer_core::alphabet::Alphabet;
 use hmmer_core::background::BackgroundModel;
 use hmmer_core::config::TraceStateType;
 use hmmer_core::config::*;
-use hmmer_core::hmm::Hmm;
 use hmmer_core::logsum;
 use hmmer_core::profile::Profile;
 use hmmer_core::rng::XorShift64;
@@ -16,8 +15,6 @@ use hmmer_core::score_matrix::*;
 use hmmer_core::simd::forward_filter;
 use hmmer_core::simd::oprofile::OptimizedProfile;
 use hmmer_core::test_helpers::*;
-use hmmer_core::tophits::TopHits;
-use hmmer_core::trace::Trace;
 
 // ===================================================================
 // p7_hmm.c :: utest_occupancy()
@@ -42,33 +39,6 @@ fn test_hmm_occupancy() {
         "occupancy unit test: expected ~0.6, got {:.3}",
         x
     );
-}
-
-// ===================================================================
-// p7_hmm.c :: utest_composition()
-// ===================================================================
-
-#[test]
-fn test_hmm_composition() {
-    let abc = Alphabet::amino();
-    let mut rng = XorShift64::new(42);
-    let m = 50;
-    let k = abc.canonical_size;
-
-    let mut hmm = hmm_sample(&mut rng, m, &abc);
-    hmm_set_composition(&mut hmm);
-
-    let compo = hmm.model_composition.as_ref().expect("compo should be set");
-    let sum: f32 = compo[..k].iter().sum();
-    assert!(
-        (sum - 1.0).abs() < 0.01,
-        "composition sum = {}, expected ~1.0",
-        sum
-    );
-
-    for (a, value) in compo.iter().enumerate().take(k) {
-        assert!(*value >= 0.0, "composition[{}] = {} (negative!)", a, value);
-    }
 }
 
 // ===================================================================
@@ -122,54 +92,6 @@ fn test_bg_different_alphabets() {
             sum
         );
     }
-}
-
-// ===================================================================
-// p7_trace.c :: creation and comparison
-// ===================================================================
-
-#[test]
-fn test_trace_create_and_reuse() {
-    let mut tr = Trace::new();
-    assert_eq!(tr.len(), 0);
-
-    tr.append(TraceStateType::Start, 0, 0);
-    tr.append(TraceStateType::NTerminal, 0, 0);
-    tr.append(TraceStateType::Begin, 0, 0);
-    tr.append(TraceStateType::Match, 1, 1);
-    tr.append(TraceStateType::Match, 2, 2);
-    tr.append(TraceStateType::End, 0, 0);
-    tr.append(TraceStateType::CTerminal, 0, 0);
-    tr.append(TraceStateType::Terminate, 0, 0);
-    assert_eq!(tr.len(), 8);
-
-    tr.reuse();
-    assert_eq!(tr.len(), 0);
-}
-
-#[test]
-fn test_trace_compare() {
-    let mut tr1 = Trace::new();
-    let mut tr2 = Trace::new();
-
-    for &st in &[
-        TraceStateType::Start,
-        TraceStateType::NTerminal,
-        TraceStateType::Begin,
-        TraceStateType::Match,
-        TraceStateType::Match,
-        TraceStateType::End,
-        TraceStateType::CTerminal,
-        TraceStateType::Terminate,
-    ] {
-        tr1.append(st, 0, 0);
-        tr2.append(st, 0, 0);
-    }
-
-    assert!(tr1.compare(&tr2, 0.001));
-
-    tr2.append(TraceStateType::Match, 3, 3);
-    assert!(!tr1.compare(&tr2, 0.001));
 }
 
 // ===================================================================
@@ -262,47 +184,6 @@ fn test_gmx_testpattern() {
 }
 
 // ===================================================================
-// p7_gmx.c :: utest_GrowTo()
-// ===================================================================
-
-#[test]
-fn test_gmx_resize() {
-    let mut gx = ScoreMatrix::new(20, 20).expect("ScoreMatrix::new failed");
-
-    gx.resize(40, 20).unwrap();
-    assert_eq!(gx.num_nodes, 40);
-    assert_eq!(gx.sequence_length, 20);
-    assert!(gx.model_capacity() >= 40);
-
-    gx.resize(40, 40).unwrap();
-    assert_eq!(gx.sequence_length, 40);
-    assert!(gx.sequence_capacity() >= 40);
-
-    gx.resize(80, 80).unwrap();
-    assert_eq!(gx.num_nodes, 80);
-    assert!(gx.model_capacity() >= 80);
-    assert!(gx.sequence_capacity() >= 80);
-
-    gx.resize(100, 100).unwrap();
-    let m = 100;
-    let l = 100;
-    let mut n: u64 = 0;
-    for i in 0..=l {
-        for k in 0..=m {
-            gx.set_match_score(i, k, n as f32);
-            n += 1;
-        }
-    }
-    let mut n2: u64 = 0;
-    for i in 0..=l {
-        for k in 0..=m {
-            assert_eq!(gx.match_score(i, k) as u64, n2);
-            n2 += 1;
-        }
-    }
-}
-
-// ===================================================================
 // p7_gmx.c :: utest_Compare()
 // ===================================================================
 
@@ -325,11 +206,10 @@ fn test_gmx_compare() {
             gx2.set_delete_score(i, k, n + 0.2);
             n += 1.0;
         }
-        for s in 0..NUM_SPECIAL_STATES {
-            gx1.set_special_score(i, s, n);
-            gx2.set_special_score(i, s, n);
-            n += 1.0;
-        }
+        let specials: [f32; NUM_SPECIAL_STATES] = std::array::from_fn(|s| n + s as f32);
+        gx1.set_special_row(i, specials);
+        gx2.set_special_row(i, specials);
+        n += NUM_SPECIAL_STATES as f32;
     }
 
     for i in 0..=l {
@@ -345,90 +225,6 @@ fn test_gmx_compare() {
 
     gx2.set_match_score(5, 5, gx2.match_score(5, 5) + 1.0);
     assert_ne!(gx1.match_score(5, 5), gx2.match_score(5, 5));
-}
-
-// ===================================================================
-// p7_profile.c :: utest_Compare()
-// ===================================================================
-
-#[test]
-fn test_profile_compare() {
-    let abc = Alphabet::amino();
-    let mut rng = XorShift64::new(42);
-    let m = 200;
-    let l = 400;
-
-    let hmm = hmm_sample(&mut rng, m, &abc);
-    let bg = BackgroundModel::new(&abc);
-
-    let mut gm1 = Profile::new(hmm.num_nodes, &abc);
-    let mut gm2 = Profile::new(hmm.num_nodes, &abc);
-
-    hmmer_core::modelconfig::profile_config(&hmm, &bg, &mut gm1, l, SearchMode::Local);
-    hmmer_core::modelconfig::profile_config(&hmm, &bg, &mut gm2, l, SearchMode::Local);
-
-    assert!(gm1.compare(&gm2, 0.001));
-}
-
-// ===================================================================
-// p7_tophits.c :: TESTDRIVE
-// ===================================================================
-
-#[test]
-fn test_tophits_sort_and_merge() {
-    let mut rng = XorShift64::new(42);
-    let n = 100;
-
-    let mut h1 = TopHits::new();
-    let mut h2 = TopHits::new();
-    let mut h3 = TopHits::new();
-
-    for _ in 0..n {
-        let key = rng.random();
-        {
-            let hit = h1.create_next_hit();
-            hit.name = "not_unique_name".to_string();
-            hit.sortkey = key;
-            hit.score = key as f32;
-        }
-        let key2 = 10.0 * rng.random();
-        {
-            let hit = h2.create_next_hit();
-            hit.name = "not_unique_name".to_string();
-            hit.sortkey = key2;
-            hit.score = key2 as f32;
-        }
-        let key3 = 0.1 * rng.random();
-        {
-            let hit = h3.create_next_hit();
-            hit.name = "not_unique_name".to_string();
-            hit.sortkey = key3;
-            hit.score = key3 as f32;
-        }
-    }
-
-    // Add named hits for sort verification
-    {
-        let hit = h1.create_next_hit();
-        hit.name = "last".to_string();
-        hit.sortkey = -1.0;
-        hit.score = -1.0;
-    }
-    {
-        let hit = h1.create_next_hit();
-        hit.name = "first".to_string();
-        hit.sortkey = 20.0;
-        hit.score = 20.0;
-    }
-
-    h1.sort_by_sortkey();
-
-    let first = h1.get_hit(0).expect("should have first hit");
-    assert_eq!(first.name, "first");
-
-    let nhits = h1.len();
-    let last = h1.get_hit(nhits - 1).expect("should have last hit");
-    assert_eq!(last.name, "last");
 }
 
 // ===================================================================
@@ -464,11 +260,10 @@ fn test_modelconfig_config() {
     let bg = BackgroundModel::new(&abc);
     let mut gm = Profile::new(hmm.num_nodes, &abc);
 
-    hmmer_core::modelconfig::profile_config(&hmm, &bg, &mut gm, 400, SearchMode::Local);
+    hmmer_core::modelconfig::profile_config(&hmm, &bg, &mut gm, 400);
 
     assert_eq!(gm.num_nodes, hmm.num_nodes);
     assert_eq!(gm.target_length, 400);
-    assert_eq!(gm.mode, SearchMode::Local);
 }
 
 #[test]
@@ -480,30 +275,10 @@ fn test_modelconfig_occupancy() {
     let hmm = hmm_sample(&mut rng, m, &abc);
     let bg = BackgroundModel::new(&abc);
     let mut gm = Profile::new(hmm.num_nodes, &abc);
-    hmmer_core::modelconfig::profile_config(&hmm, &bg, &mut gm, 400, SearchMode::Local);
+    hmmer_core::modelconfig::profile_config(&hmm, &bg, &mut gm, 400);
 
     assert_eq!(gm.num_nodes, m);
     assert!(gm.target_length > 0);
-}
-
-#[test]
-fn test_modelconfig_all_modes() {
-    let abc = Alphabet::amino();
-    let mut rng = XorShift64::new(42);
-
-    let hmm = hmm_sample(&mut rng, 50, &abc);
-    let bg = BackgroundModel::new(&abc);
-
-    for &mode in &[
-        SearchMode::Local,
-        SearchMode::Glocal,
-        SearchMode::UniLocal,
-        SearchMode::UniGlocal,
-    ] {
-        let mut gm = Profile::new(hmm.num_nodes, &abc);
-        hmmer_core::modelconfig::profile_config(&hmm, &bg, &mut gm, 200, mode);
-        assert_eq!(gm.mode, mode);
-    }
 }
 
 #[test]
@@ -513,7 +288,7 @@ fn test_reconfig_hit_modes_match_hmmer_length_model() {
     let hmm = hmm_sample(&mut rng, 20, &abc);
     let bg = BackgroundModel::new(&abc);
     let mut profile = Profile::new(hmm.num_nodes, &abc);
-    hmmer_core::modelconfig::profile_config(&hmm, &bg, &mut profile, 224, SearchMode::Local);
+    hmmer_core::modelconfig::profile_config(&hmm, &bg, &mut profile, 224);
 
     profile.reconfig_unihit(224);
     assert!((profile.special_scores.n_move.exp() - 2.0 / 226.0).abs() < 1e-7);
@@ -529,129 +304,6 @@ fn test_reconfig_hit_modes_match_hmmer_length_model() {
 }
 
 // ===================================================================
-// p7_hmm.c :: HMM clone and compare
-// ===================================================================
-
-#[test]
-fn test_hmm_clone_and_compare() {
-    let abc = Alphabet::amino();
-    let mut rng = XorShift64::new(42);
-    let m = 50;
-
-    let hmm1 = hmm_sample(&mut rng, m, &abc);
-    let hmm2 = hmm1.clone();
-
-    assert!(hmm1.compare(&hmm2, 1e-6));
-}
-
-// ===================================================================
-// p7_hmm.c :: scale and renormalize
-// ===================================================================
-
-#[test]
-fn test_hmm_scale_renormalize() {
-    let abc = Alphabet::amino();
-    let mut rng = XorShift64::new(42);
-    let m = 20;
-
-    let mut hmm = hmm_sample(&mut rng, m, &abc);
-    hmm.scale(2.0);
-    hmm.renormalize();
-
-    assert!(hmm_validate(&hmm, 0.01));
-}
-
-// ===================================================================
-// p7_hmm.c :: zero
-// ===================================================================
-
-#[test]
-fn test_hmm_zero() {
-    let abc = Alphabet::amino();
-    let mut rng = XorShift64::new(42);
-
-    let mut hmm = hmm_sample(&mut rng, 10, &abc);
-    hmm.zero();
-
-    let k = abc.canonical_size;
-    for node in 0..=hmm.num_nodes {
-        for j in 0..HMM_NUM_TRANSITIONS {
-            assert_eq!(hmm.transitions(node)[j], 0.0);
-        }
-        for a in 0..k {
-            assert_eq!(hmm.match_emissions(node)[a], 0.0);
-            assert_eq!(hmm.insert_emissions(node)[a], 0.0);
-        }
-    }
-}
-
-// ===================================================================
-// p7_hmm.c :: encode/decode statetype
-// ===================================================================
-
-#[test]
-fn test_hmm_encode_decode_statetype() {
-    let states = vec![
-        ("M", TraceStateType::Match),
-        ("D", TraceStateType::Delete),
-        ("I", TraceStateType::Insert),
-        ("S", TraceStateType::Start),
-        ("N", TraceStateType::NTerminal),
-        ("B", TraceStateType::Begin),
-        ("E", TraceStateType::End),
-        ("C", TraceStateType::CTerminal),
-        ("T", TraceStateType::Terminate),
-        ("J", TraceStateType::Jump),
-        ("X", TraceStateType::Missing),
-    ];
-
-    for (name, st) in &states {
-        let encoded = Hmm::encode_statetype(name);
-        assert_eq!(encoded, *st, "encode '{}' failed", name);
-        let decoded = Hmm::decode_statetype(*st);
-        assert_eq!(decoded, *name, "decode {:?} failed", st);
-    }
-
-    assert_eq!(Hmm::encode_statetype("m"), TraceStateType::Match);
-    assert_eq!(Hmm::encode_statetype("d"), TraceStateType::Delete);
-    assert_eq!(Hmm::encode_statetype("Q"), TraceStateType::Bogus);
-}
-
-// ===================================================================
-// seqmodel.c :: utest_normalization()
-// ===================================================================
-
-// #[test]
-// fn test_seqmodel_normalization() {
-//     let abc = Alphabet::amino();
-//     let mut rng = XorShift64::new(42);
-//     let l = 20;
-
-//     let bg = BackgroundModel::new(&abc);
-//     let dsq = random_digital_seq(&mut rng, &bg.f, abc.k, l);
-
-//     let hmm = hmmer_core::seqmodel::modelsample_single_pathed(&abc, "test_seq", &dsq, l);
-
-//     assert_eq!(hmm.m, l);
-//     assert_eq!(hmm.name, "test_seq");
-
-//     for k in 1..=l {
-//         let sum: f32 = hmm.match_emissions(k).iter().sum();
-//         assert!((sum - 1.0).abs() < 0.01, "node {} mat sum = {}", k, sum);
-//     }
-
-//     let uniform = 1.0 / abc.k as f32;
-//     for k in 0..=l {
-//         for a in 0..abc.k {
-//             assert!(
-//                 (hmm.insert_emissions(k)[a] - uniform).abs() < 0.001,
-//                 "node {} ins[{}] = {}", k, a, hmm.insert_emissions(k)[a]
-//             );
-//         }
-//     }
-// }
-
-// ===================================================================
 // generic_fwdback.c :: utest_forward()
 // ===================================================================
 
@@ -665,7 +317,7 @@ fn test_generic_forward_random_seqs() {
     let hmm = hmm_sample(&mut rng, m, &abc);
     let bg = BackgroundModel::new(&abc);
     let mut gm = Profile::new(hmm.num_nodes, &abc);
-    hmmer_core::modelconfig::profile_config(&hmm, &bg, &mut gm, l, SearchMode::Local);
+    hmmer_core::modelconfig::profile_config(&hmm, &bg, &mut gm, l);
     let mut om = OptimizedProfile::from_profile(&gm);
     om.reconfigure_length(l);
 
@@ -689,7 +341,7 @@ fn test_backward_posterior_null2_and_oa_invariants() {
     for l in [5, 20, 50] {
         let hmm = hmm_sample(&mut rng, 20, &abc);
         let mut gm = Profile::new(hmm.num_nodes, &abc);
-        hmmer_core::modelconfig::profile_config(&hmm, &bg, &mut gm, l, SearchMode::Local);
+        hmmer_core::modelconfig::profile_config(&hmm, &bg, &mut gm, l);
         let om = OptimizedProfile::from_profile(&gm);
         let dsq = random_digital_seq(&mut rng, &bg.residue_frequencies, abc.canonical_size, l);
         let forward_score = forward_filter::forward_filter(&dsq, l, &om);
@@ -744,72 +396,16 @@ fn test_backward_posterior_null2_and_oa_invariants() {
 }
 
 // ===================================================================
-// p7_alidisplay.c :: tests
-// ===================================================================
-
-#[test]
-fn test_alidisplay_create_and_clone() {
-    let ad = hmmer_core::alidisplay::AliDisplay::new();
-    assert_eq!(ad.alignment_length, 0);
-    assert!(ad.model.is_empty());
-
-    let ad2 = ad.clone_display();
-    assert_eq!(ad.alignment_length, ad2.alignment_length);
-}
-
-// ===================================================================
-// p7_domain.c :: tests
-// ===================================================================
-
-#[test]
-fn test_domain_create() {
-    let dom = hmmer_core::domain::Domain::default();
-    assert_eq!(dom.envelope_start, 0);
-    assert_eq!(dom.envelope_end, 0);
-    assert!(dom.scores_per_pos.is_none());
-}
-
-// ===================================================================
 // p7_pipeline.c :: tests
 // ===================================================================
 
 #[test]
 fn test_pipeline_create() {
-    let pipeline = hmmer_core::pipeline::FilterPolicy::default();
+    let pipeline = hmmer_core::pipeline::search::FilterPolicy::default();
 
     assert!((pipeline.msv_threshold - 0.02).abs() < 0.001);
     assert!((pipeline.viterbi_threshold - 1e-3).abs() < 1e-6);
     assert!((pipeline.forward_threshold - 1e-5).abs() < 1e-8);
-}
-
-// ===================================================================
-// p7_domaindef.c :: creation tests
-// ===================================================================
-
-#[test]
-fn test_domaindef_create() {
-    let ws = hmmer_core::domaindef::DomainWorkspace::new();
-    assert!(ws.model_occupancy.is_empty());
-    let config = hmmer_core::domaindef::DomainConfig::default();
-    assert_eq!(config.nsamples, 200);
-}
-
-#[test]
-fn test_domaindef_grow_to() {
-    let mut ws = hmmer_core::domaindef::DomainWorkspace::new();
-    ws.grow_to(500);
-}
-
-// ===================================================================
-// p7_hit.c :: tests
-// ===================================================================
-
-#[test]
-fn test_hit_create_and_flags() {
-    let hit = hmmer_core::hit::Hit::default();
-    assert_eq!(hit.num_domains, 0);
-    assert!(hit.name.is_empty());
-    assert!(hit.sortkey.is_finite());
 }
 
 // ===================================================================
@@ -868,10 +464,10 @@ fn test_gmx_xstate_accessors() {
     let mut gx = ScoreMatrix::new(m, l).expect("new failed");
 
     for i in 0..=l {
-        for s in 0..NUM_SPECIAL_STATES {
-            let v = (i * NUM_SPECIAL_STATES + s) as f32;
-            gx.set_special_score(i, s, v);
-        }
+        gx.set_special_row(
+            i,
+            std::array::from_fn(|s| (i * NUM_SPECIAL_STATES + s) as f32),
+        );
     }
 
     for i in 0..=l {
@@ -883,49 +479,5 @@ fn test_gmx_xstate_accessors() {
 }
 
 // ===================================================================
-// Random HMM -> clone -> compare
-// ===================================================================
-
-#[test]
-fn test_random_hmm_clone_compare() {
-    let abc = Alphabet::amino();
-    let mut rng = XorShift64::new(42);
-
-    for _ in 0..10 {
-        let m = rng.roll(100) + 5;
-        let hmm = hmm_sample(&mut rng, m, &abc);
-        let cloned = hmm.clone();
-        assert!(hmm.compare(&cloned, 1e-6));
-    }
-}
-
-// ===================================================================
 // Test HMM dump doesn't panic
 // ===================================================================
-
-#[test]
-fn test_hmm_dump() {
-    let abc = Alphabet::amino();
-    let mut rng = XorShift64::new(42);
-    let hmm = hmm_sample(&mut rng, 5, &abc);
-
-    let mut buf = Vec::new();
-    hmm.dump(&mut buf).expect("dump should succeed");
-    let output = String::from_utf8(buf).expect("should be valid UTF-8");
-    assert!(output.contains("HMM:"));
-}
-
-// ===================================================================
-// Test bg dump doesn't panic
-// ===================================================================
-
-#[test]
-fn test_bg_dump() {
-    let abc = Alphabet::amino();
-    let bg = BackgroundModel::new(&abc);
-
-    let mut buf = Vec::new();
-    bg.dump(&mut buf).expect("dump should succeed");
-    let output = String::from_utf8(buf).expect("should be valid UTF-8");
-    assert!(output.contains("Background model"));
-}

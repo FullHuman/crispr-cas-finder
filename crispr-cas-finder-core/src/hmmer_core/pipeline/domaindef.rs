@@ -15,7 +15,6 @@ use crate::hmmer_core::pipeline::spensemble::{ClusterRules, SegmentPairEnsemble}
 use crate::hmmer_core::profile::Profile;
 use crate::hmmer_core::rng::EaselFastRng;
 use crate::hmmer_core::score_matrix::ScoreMatrix;
-use crate::hmmer_core::trace::Trace;
 
 /// Pooled buffers for per-domain rescoring, reused across domains to avoid repeated allocation.
 #[derive(Debug)]
@@ -98,13 +97,8 @@ pub struct DomainWorkspace {
     pub model_occupancy: Vec<f32>,
     pub begin_totals: Vec<f32>,
     pub exit_totals: Vec<f32>,
-    pub length: usize,
     pub null2_scores: Vec<f32>,
-    pub trace: Trace,
 }
-
-/// Backward-compatible alias for `DomainWorkspace`.
-pub type DomainDef = DomainWorkspace;
 
 impl DomainWorkspace {
     pub fn new() -> Self {
@@ -120,10 +114,6 @@ impl DomainWorkspace {
         self.begin_totals.resize(needed, 0.0);
         self.exit_totals.resize(needed, 0.0);
         self.null2_scores.resize(needed, 0.0);
-    }
-
-    pub fn reuse(&mut self) {
-        self.length = 0;
     }
 
     /// Define domains by posterior heuristics.
@@ -149,13 +139,10 @@ impl DomainWorkspace {
 
         let mut result = DomainResult {
             domains: Vec::new(),
-            num_expected: self.begin_totals[seq_n],
             num_regions: 0,
             num_clustered: 0,
             num_overlaps: 0,
             num_envelopes: 0,
-            num_backward_failed: 0,
-            num_oa_failed: 0,
         };
 
         for (region_i, region_j) in find_regions(self, config, seq_n) {
@@ -206,24 +193,18 @@ impl DomainWorkspace {
                                 odds,
                                 false,
                             );
-                            match domain {
-                                Ok((mut dom, _)) => {
-                                    // The sampled paths have set the null2
-                                    // scores of the whole region already.
-                                    let mut domcorrection = 0.0f32;
-                                    for &score in &self.null2_scores[start..=end] {
-                                        domcorrection += score;
-                                    }
-                                    dom.domain_correction = domcorrection;
-                                    result.domains.push(dom);
-                                    last_end = end;
+                            // An envelope whose decoding fails gives no
+                            // domain.
+                            if let Some((mut dom, _)) = domain {
+                                // The sampled paths have set the null2
+                                // scores of the whole region already.
+                                let mut domcorrection = 0.0f32;
+                                for &score in &self.null2_scores[start..=end] {
+                                    domcorrection += score;
                                 }
-                                Err(DomainRescoreFailure::Backward) => {
-                                    result.num_backward_failed += 1
-                                }
-                                Err(DomainRescoreFailure::OptimalAccuracy) => {
-                                    result.num_oa_failed += 1
-                                }
+                                dom.domain_correction = domcorrection;
+                                result.domains.push(dom);
+                                last_end = end;
                             }
                         }
                     }
@@ -250,26 +231,22 @@ impl DomainWorkspace {
                     true,
                 );
 
-                match domain {
-                    Ok((mut dom, null2)) => {
-                        // Accumulate null2 scores using the returned null2 vector
-                        debug_assert!(region_j <= seq_n);
-                        debug_assert!(region_j < self.null2_scores.len());
-                        let null2 = null2.expect("the expectation null2 was asked for");
-                        let mut domcorrection = 0.0f32;
-                        for pos in region_i..=region_j {
-                            let x = digital_sequence[pos - 1] as usize;
-                            if x < null2.len() {
-                                let null2_log_correction = null2[x].ln();
-                                self.null2_scores[pos] += null2_log_correction;
-                                domcorrection += null2_log_correction;
-                            }
+                if let Some((mut dom, null2)) = domain {
+                    // Accumulate null2 scores using the returned null2 vector
+                    debug_assert!(region_j <= seq_n);
+                    debug_assert!(region_j < self.null2_scores.len());
+                    let null2 = null2.expect("the expectation null2 was asked for");
+                    let mut domcorrection = 0.0f32;
+                    for pos in region_i..=region_j {
+                        let x = digital_sequence[pos - 1] as usize;
+                        if x < null2.len() {
+                            let null2_log_correction = null2[x].ln();
+                            self.null2_scores[pos] += null2_log_correction;
+                            domcorrection += null2_log_correction;
                         }
-                        dom.domain_correction = domcorrection;
-                        result.domains.push(dom);
                     }
-                    Err(DomainRescoreFailure::Backward) => result.num_backward_failed += 1,
-                    Err(DomainRescoreFailure::OptimalAccuracy) => result.num_oa_failed += 1,
+                    dom.domain_correction = domcorrection;
+                    result.domains.push(dom);
                 }
 
                 // HMMER counts candidate envelopes even when isolated rescoring fails.
@@ -421,15 +398,10 @@ impl DomainWorkspace {
 #[derive(Debug, Default)]
 pub struct DomainResult {
     pub domains: Vec<Domain>,
-    pub num_expected: f32,
     pub num_regions: usize,
     pub num_clustered: usize,
     pub num_overlaps: usize,
     pub num_envelopes: usize,
-    /// Candidate envelopes discarded because posterior decoding failed.
-    pub num_backward_failed: usize,
-    /// Candidate envelopes discarded because OA decoding or traceback failed.
-    pub num_oa_failed: usize,
 }
 
 /// Find candidate regions using HMMER's posterior occupancy heuristics.
@@ -507,7 +479,7 @@ fn rescore_isolated_domain(
     om: &OptimizedProfile,
     odds: &OddsTables,
     compute_null2: bool,
-) -> Result<(Domain, Option<Vec<f32>>), DomainRescoreFailure> {
+) -> Option<(Domain, Option<Vec<f32>>)> {
     use crate::hmmer_core::dynamic_programming::simd::forward_filter;
 
     let domain_length = j - i + 1;
@@ -523,7 +495,7 @@ fn rescore_isolated_domain(
         &mut buf.posterior_matrix,
         None,
     )
-    .map_err(|_| DomainRescoreFailure::Backward)?;
+    .ok()?;
 
     finish_domain_scoring(
         profile,
@@ -534,12 +506,6 @@ fn rescore_isolated_domain(
         &mut buf.oa_decoder,
         compute_null2,
     )
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DomainRescoreFailure {
-    Backward,
-    OptimalAccuracy,
 }
 
 /// Shared tail of domain scoring: null2, optimal accuracy, traceback, domain creation.
@@ -554,21 +520,14 @@ fn finish_domain_scoring(
     posterior_matrix: &ScoreMatrix,
     oa_decoder: &mut OaDecoder,
     compute_null2: bool,
-) -> Result<(Domain, Option<Vec<f32>>), DomainRescoreFailure> {
+) -> Option<(Domain, Option<Vec<f32>>)> {
     // Null2 correction
     let null2 = compute_null2
         .then(|| crate::hmmer_core::null2::null2_by_expectation(profile, posterior_matrix));
 
     // Optimal accuracy alignment + traceback
-    let oa = oa_decoder
-        .decode(profile, posterior_matrix)
-        .map_err(|_| DomainRescoreFailure::OptimalAccuracy)?;
-    let trace_domain = oa
-        .trace
-        .compute_domains()
-        .into_iter()
-        .next()
-        .ok_or(DomainRescoreFailure::OptimalAccuracy)?;
+    let oa = oa_decoder.decode(profile, posterior_matrix).ok()?;
+    let trace_domain = oa.trace.compute_domains().into_iter().next()?;
 
     // Create domain (domain_correction set by caller)
     let mut dom = Domain {
@@ -584,9 +543,8 @@ fn finish_domain_scoring(
     dom.alignment_end = i + trace_domain.sequence_end as usize - 1;
     dom.hmm_from = trace_domain.hmm_start as usize;
     dom.hmm_to = trace_domain.hmm_end as usize;
-    dom.trace = Some(oa.trace);
 
-    Ok((dom, null2))
+    Some((dom, null2))
 }
 
 #[cfg(test)]
@@ -604,7 +562,6 @@ mod tests {
     fn test_workspace_create() {
         let ws = DomainWorkspace::new();
         assert!(ws.model_occupancy.is_empty());
-        assert_eq!(ws.length, 0);
     }
 
     #[test]
@@ -649,12 +606,5 @@ mod tests {
 
         ws.begin_totals.fill(0.0);
         assert!(!is_multidomain_region(&ws, &config, 1, 4));
-    }
-
-    #[test]
-    fn result_failure_counters_default_to_zero() {
-        let result = DomainResult::default();
-        assert_eq!(result.num_backward_failed, 0);
-        assert_eq!(result.num_oa_failed, 0);
     }
 }

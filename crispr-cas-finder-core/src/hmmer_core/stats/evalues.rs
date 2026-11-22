@@ -12,14 +12,6 @@ pub fn forward_score_to_pvalue(score: f32, tau: f32, lambda: f32) -> f64 {
     x.exp()
 }
 
-/// Convert a Viterbi or MSV score to a P-value. The filters do not use it
-/// (see [`gumbel_survival`]); the tests compare the two.
-pub fn viterbi_score_to_pvalue(score: f32, mu: f32, lambda: f32) -> f64 {
-    // Gumbel: P(S >= x) = 1 - exp(-exp(-lambda(x-mu)))
-    let x = -(lambda as f64) * (score as f64 - mu as f64);
-    -(-x.exp()).exp_m1()
-}
-
 /// The bit score a filter of `p7_Pipeline()` tests: `(score - null) /
 /// eslCONST_LOG2`, the difference in single precision, the division in
 /// double precision, the quotient stored in single precision.
@@ -29,8 +21,7 @@ pub fn filter_bit_score(score: f32, null: f32) -> f32 {
 }
 
 /// `esl_gumbel_surv()`: the P-value HMMER's MSV, bias and Viterbi filters
-/// compare with their thresholds, operation for operation. Mathematically
-/// the same as [`viterbi_score_to_pvalue`]; the last bits can differ.
+/// compare with their thresholds, operation for operation.
 #[inline]
 pub fn gumbel_survival(score: f32, mu: f32, lambda: f32) -> f64 {
     let y = f64::from(lambda) * (f64::from(score) - f64::from(mu));
@@ -54,11 +45,19 @@ pub fn exponential_survival(score: f32, tau: f32, lambda: f32) -> f64 {
 mod tests {
     use super::*;
 
+    /// The Gumbel survival function with `exp_m1`, the form that keeps its
+    /// precision near one: what [`gumbel_survival`] is compared with.
+    fn viterbi_score_to_pvalue(score: f32, mu: f32, lambda: f32) -> f64 {
+        // Gumbel: P(S >= x) = 1 - exp(-exp(-lambda(x-mu)))
+        let x = -(lambda as f64) * (score as f64 - mu as f64);
+        -(-x.exp()).exp_m1()
+    }
+
     #[test]
-    fn filter_survival_functions_agree_with_the_reporting_ones() {
+    fn filter_survival_functions_agree_with_the_reference_ones() {
         for score in [-30.0f32, -8.5, -1.0, 0.0, 3.25, 12.0, 40.0, 400.0] {
             let (mu, lambda) = (-9.3f32, 0.71f32);
-            // Easel subtracts from one where the reporting function uses
+            // Easel subtracts from one where the reference function uses
             // `exp_m1`: the two agree to the last bits of a double near one.
             let filter = gumbel_survival(score, mu, lambda);
             let reported = viterbi_score_to_pvalue(score, mu, lambda);

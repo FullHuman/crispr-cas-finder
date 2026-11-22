@@ -69,62 +69,6 @@ pub fn hmm_sample(rng: &mut XorShift64, model_length: usize, alphabet: &Alphabet
     hmm
 }
 
-/// Sample an "enumerable" HMM (no insert states) for sequence enumeration tests.
-///
-/// Corresponds to p7_hmm_SampleEnumerable() in C.
-/// All insert transitions are 0, so the model can only generate
-/// sequences of length 0..M.
-pub fn hmm_sample_enumerable(
-    rng: &mut XorShift64,
-    model_length: usize,
-    alphabet: &Alphabet,
-) -> Hmm {
-    let canonical_size = alphabet.canonical_size;
-    let mut hmm = Hmm::new(model_length, alphabet);
-
-    for node in 0..=model_length {
-        // Match emissions: random
-        let match_row = sample_dirichlet(rng, canonical_size);
-        hmm.match_emissions_mut(node)[..canonical_size].copy_from_slice(&match_row);
-
-        // Insert emissions: doesn't matter, but set uniform
-        let uniform_probability = 1.0 / canonical_size as f32;
-        for residue_index in 0..canonical_size {
-            hmm.insert_emissions_mut(node)[residue_index] = uniform_probability;
-        }
-
-        // Transitions: no inserts
-        // Match: MM + MD = 1, MI = 0
-        let r = rng.random() as f32;
-        hmm.transitions_mut(node)[HTransition::MatchToMatch as usize] = r;
-        hmm.transitions_mut(node)[HTransition::MatchToInsert as usize] = 0.0;
-        hmm.transitions_mut(node)[HTransition::MatchToDelete as usize] = 1.0 - r;
-
-        // Insert transitions: doesn't matter
-        hmm.transitions_mut(node)[HTransition::InsertToMatch as usize] = 1.0;
-        hmm.transitions_mut(node)[HTransition::InsertToInsert as usize] = 0.0;
-
-        // Delete: DM + DD = 1
-        let r = rng.random() as f32;
-        hmm.transitions_mut(node)[HTransition::DeleteToMatch as usize] = r;
-        hmm.transitions_mut(node)[HTransition::DeleteToDelete as usize] = 1.0 - r;
-    }
-
-    // Node 0 conventions
-    hmm.match_emissions_mut(0).fill(0.0);
-    hmm.match_emissions_mut(0)[0] = 1.0;
-
-    // Node M: end
-    hmm.transitions_mut(model_length)[HTransition::MatchToMatch as usize] = 1.0;
-    hmm.transitions_mut(model_length)[HTransition::MatchToInsert as usize] = 0.0;
-    hmm.transitions_mut(model_length)[HTransition::MatchToDelete as usize] = 0.0;
-    hmm.transitions_mut(model_length)[HTransition::DeleteToMatch as usize] = 1.0;
-    hmm.transitions_mut(model_length)[HTransition::DeleteToDelete as usize] = 0.0;
-
-    hmm.name = format!("enumerable-hmm-{}", model_length);
-    hmm
-}
-
 /// Generate a random IID digital sequence of length L,
 /// drawn from a frequency distribution f[0..K-1].
 ///
@@ -195,14 +139,6 @@ pub fn vec_f_validate(v: &[f32], tol: f32) -> bool {
     (sum - 1.0).abs() <= tol
 }
 
-/// Compare two float vectors within tolerance.
-pub fn vec_f_compare(v1: &[f32], v2: &[f32], tol: f32) -> bool {
-    if v1.len() != v2.len() {
-        return false;
-    }
-    v1.iter().zip(v2.iter()).all(|(a, b)| (a - b).abs() <= tol)
-}
-
 /// Validate that an HMM's probability distributions are properly normalized.
 pub fn hmm_validate(hmm: &Hmm, tol: f32) -> bool {
     let canonical_size = hmm.alphabet.canonical_size;
@@ -241,35 +177,6 @@ pub fn hmm_validate(hmm: &Hmm, tol: f32) -> bool {
     true
 }
 
-/// Set the composition of an HMM from its match emission probabilities.
-///
-/// Corresponds to p7_hmm_SetComposition() in C.
-/// `hmm->compo[a]` = weighted average of match emissions across all positions.
-#[allow(clippy::needless_range_loop)]
-pub fn hmm_set_composition(hmm: &mut Hmm) {
-    let k = hmm.alphabet.canonical_size;
-    let (mocc, _) = hmm.calculate_occupancy();
-
-    let mut sum_occ = 0.0f64;
-    for &occ in &mocc[1..=hmm.num_nodes] {
-        sum_occ += occ as f64;
-    }
-
-    let mut compo = vec![0.0f32; k.min(MAX_CANONICAL_ALPHABET)];
-    for a in 0..k.min(MAX_CANONICAL_ALPHABET) {
-        let mut weighted = 0.0f64;
-        for node in 1..=hmm.num_nodes {
-            weighted += mocc[node] as f64 * hmm.match_emissions(node)[a] as f64;
-        }
-        compo[a] = if sum_occ > 0.0 {
-            (weighted / sum_occ) as f32
-        } else {
-            1.0 / k as f32
-        };
-    }
-    hmm.model_composition = Some(compo);
-}
-
 /// Create a background model, configure a profile, and return all three.
 ///
 /// Utility for tests that need a configured (hmm, bg, profile) triple.
@@ -278,19 +185,12 @@ pub fn setup_profile(
     model_length: usize,
     target_length: usize,
     alphabet: &Alphabet,
-    mode: crate::hmmer_core::config::SearchMode,
 ) -> (Hmm, BackgroundModel, Profile) {
     let hmm = hmm_sample(rng, model_length, alphabet);
     let mut background = BackgroundModel::new(alphabet);
     background.set_length(target_length);
     let mut profile = Profile::new(hmm.num_nodes, alphabet);
-    crate::hmmer_core::modelconfig::profile_config(
-        &hmm,
-        &background,
-        &mut profile,
-        target_length,
-        mode,
-    );
+    crate::hmmer_core::modelconfig::profile_config(&hmm, &background, &mut profile, target_length);
     (hmm, background, profile)
 }
 
@@ -306,27 +206,6 @@ mod tests {
         let hmm = hmm_sample(&mut rng, 100, &amino_alphabet);
 
         assert_eq!(hmm.num_nodes, 100);
-        assert!(hmm_validate(&hmm, 0.001));
-    }
-
-    #[test]
-    fn test_hmm_sample_enumerable() {
-        let amino_alphabet = Alphabet::amino();
-        let mut rng = XorShift64::new(42);
-        let hmm = hmm_sample_enumerable(&mut rng, 10, &amino_alphabet);
-
-        assert_eq!(hmm.num_nodes, 10);
-        // All insert transitions should be 0
-        for node in 0..=10 {
-            assert_eq!(
-                hmm.transitions(node)[HTransition::MatchToInsert as usize],
-                0.0
-            );
-            assert_eq!(
-                hmm.transitions(node)[HTransition::InsertToInsert as usize],
-                0.0
-            );
-        }
         assert!(hmm_validate(&hmm, 0.001));
     }
 
@@ -359,16 +238,5 @@ mod tests {
         assert!((sum - 1.0).abs() < 0.001);
         // All values should be positive
         assert!(v.iter().all(|&x| x >= 0.0));
-    }
-
-    #[test]
-    fn test_vec_f_compare() {
-        let v1 = vec![0.1, 0.2, 0.3, 0.4];
-        let v2 = vec![0.1, 0.2, 0.3, 0.4];
-        assert!(vec_f_compare(&v1, &v2, 0.001));
-
-        let v3 = vec![0.11, 0.21, 0.31, 0.41];
-        assert!(!vec_f_compare(&v1, &v3, 0.001));
-        assert!(vec_f_compare(&v1, &v3, 0.02));
     }
 }

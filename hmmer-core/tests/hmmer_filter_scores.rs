@@ -6,7 +6,7 @@
 use hmmer_core::{
     alphabet::Alphabet,
     background::BackgroundModel,
-    config::{HTransition, SearchMode},
+    config::HTransition,
     hmm::Hmm,
     modelconfig,
     profile::Profile,
@@ -225,7 +225,7 @@ fn hmmer_filter_scores_match_cell_by_cell_transcriptions() {
             let hmm = hmm_sample(&mut rng, m, &alphabet);
             for l in [1, 2, 8, 51, 300, 1500] {
                 let mut profile = Profile::new(m, &alphabet);
-                modelconfig::profile_config(&hmm, &background, &mut profile, l, SearchMode::Local);
+                modelconfig::profile_config(&hmm, &background, &mut profile, l);
                 let optimized: Vec<OptimizedProfile> = isas
                     .iter()
                     .map(|&isa| OptimizedProfile::from_profile_with_isa(&profile, isa))
@@ -391,7 +391,7 @@ fn edited_profile(
     let mut hmm = hmm_sample(rng, m, &alphabet);
     edit(&mut hmm);
     let mut profile = Profile::new(m, &alphabet);
-    modelconfig::profile_config(&hmm, &background, &mut profile, l, SearchMode::Local);
+    modelconfig::profile_config(&hmm, &background, &mut profile, l);
     (background, profile)
 }
 

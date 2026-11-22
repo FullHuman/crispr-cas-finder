@@ -2,7 +2,6 @@
 use crispr_cas_finder_core::hmmer_core::{
     alphabet::Alphabet,
     background::BackgroundModel,
-    config::SearchMode,
     modelconfig,
     pipeline::search::{CapacityHints, FilterPolicy, SearchOutcome, SearchPlan, SearchQuery},
     profile::Profile,
@@ -26,21 +25,21 @@ fn main() {
     let faa_content = std::fs::read_to_string(faa_path).expect("read faa");
     let mut targets: Vec<DigitalSequence> = Vec::new();
     let mut current_name = String::new();
-    let mut current_desc = String::new();
     let mut current_seq = Vec::new();
     for line in faa_content.lines() {
         if let Some(header) = line.strip_prefix('>') {
             if !current_name.is_empty() && !current_seq.is_empty() {
                 targets.push(DigitalSequence::from_bytes(
                     &current_name,
-                    &current_desc,
                     &current_seq,
                     &abc,
                 ));
             }
-            let parts: Vec<&str> = header.splitn(2, char::is_whitespace).collect();
-            current_name = parts[0].to_string();
-            current_desc = parts.get(1).unwrap_or(&"").to_string();
+            current_name = header
+                .split(char::is_whitespace)
+                .next()
+                .unwrap_or_default()
+                .to_string();
             current_seq = Vec::new();
         } else {
             current_seq.extend_from_slice(line.trim().as_bytes());
@@ -49,7 +48,6 @@ fn main() {
     if !current_name.is_empty() && !current_seq.is_empty() {
         targets.push(DigitalSequence::from_bytes(
             &current_name,
-            &current_desc,
             &current_seq,
             &abc,
         ));
@@ -73,7 +71,7 @@ fn main() {
 
     let bg = BackgroundModel::new(&abc);
     let mut gm = Profile::new(hmm.num_nodes, &abc);
-    modelconfig::profile_config(&hmm, &bg, &mut gm, avg_len, SearchMode::Local);
+    modelconfig::profile_config(&hmm, &bg, &mut gm, avg_len);
 
     let query = SearchQuery::from_configured_profile(gm, bg).expect("query config");
     // First run with default filters to check what happens
@@ -89,7 +87,6 @@ fn main() {
 
     let mut total_hits = 0;
     let mut total_domains = 0;
-    let mut total_included = 0;
     let mut passing_coverage = 0;
     let mut filter_counts: std::collections::HashMap<String, usize> =
         std::collections::HashMap::new();
@@ -125,12 +122,10 @@ fn main() {
                     // Print ALL domains for target or high-scoring
                     if is_target || domain.bitscore > 20.0 {
                         println!(
-                            "  DOM: seq={} score={:.1} pvalue={:.2e} included={} reported={} hmm={}-{}/{} aln={}-{}/{} env={}-{} env_score={:.1} bias={:.1}",
+                            "  DOM: seq={} score={:.1} pvalue={:.2e} hmm={}-{}/{} aln={}-{}/{} env={}-{} env_score={:.1} bias={:.1}",
                             hit.name,
                             domain.bitscore,
                             domain.log_pvalue.exp(),
-                            domain.is_included,
-                            domain.is_reported,
                             domain.hmm_from,
                             domain.hmm_to,
                             hmm.num_nodes,
@@ -143,24 +138,21 @@ fn main() {
                             domain.domain_bias,
                         );
                     }
-                    if domain.is_included {
-                        total_included += 1;
-                        let prof_cov =
-                            (domain.hmm_to - domain.hmm_from + 1) as f64 / hmm.num_nodes as f64;
-                        if prof_cov >= 0.4 {
-                            passing_coverage += 1;
-                            println!(
-                                "  HIT: {} score={:.1} pvalue={:.2e} prof_cov={:.3} hmm={}-{} aln={}-{}",
-                                hit.name,
-                                domain.bitscore,
-                                domain.log_pvalue.exp(),
-                                prof_cov,
-                                domain.hmm_from,
-                                domain.hmm_to,
-                                domain.alignment_start,
-                                domain.alignment_end,
-                            );
-                        }
+                    let prof_cov =
+                        (domain.hmm_to - domain.hmm_from + 1) as f64 / hmm.num_nodes as f64;
+                    if prof_cov >= 0.4 {
+                        passing_coverage += 1;
+                        println!(
+                            "  HIT: {} score={:.1} pvalue={:.2e} prof_cov={:.3} hmm={}-{} aln={}-{}",
+                            hit.name,
+                            domain.bitscore,
+                            domain.log_pvalue.exp(),
+                            prof_cov,
+                            domain.hmm_from,
+                            domain.hmm_to,
+                            domain.alignment_start,
+                            domain.alignment_end,
+                        );
                     }
                 }
             }
@@ -177,7 +169,6 @@ fn main() {
     println!("\nSummary:");
     println!("  Sequences with any hit: {}", total_hits);
     println!("  Total domains: {}", total_domains);
-    println!("  Included domains: {}", total_included);
     println!("  Passing coverage (>=0.4): {}", passing_coverage);
     println!("  Filter reasons:");
     for (reason, count) in &filter_counts {

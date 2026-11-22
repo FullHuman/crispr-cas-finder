@@ -17,7 +17,7 @@ genomes, on the same machine, and compare run time, memory and results.
 - **Original**: CRISPRCasFinder 4.3.2 (`dcouvin/CRISPRCasFinder` at `9a7f07e`),
   run as `perl CRISPRCasFinder.pl -in genome.fasta -cas -so sel392v2.so -rpts
   Repeat_List.csv -drpt repeatDirection.tsv -out res`. It calls Vmatch 2.3.1,
-  Prodigal 2.6.3, MacSyFinder 2.1.6 with HMMER 3.4, MUSCLE 3.8.1551 and
+  Prodigal 2.6.3, MacSyFinder 2.1.6 with HMMER 3.4, MUSCLE 5.3 and
   EMBOSS 6.6.0 under Perl 5.32.1 with BioPerl.
 - **Rust**: `crispr-cas-finder -i genome.fasta --cas --cas-models-dir CasFinder
   --outdir res -q`, release build of this repository.
@@ -67,7 +67,8 @@ stating next to any number taken from here:
   MUSCLE 5.1 or later, and the arrays it reports depend on it (see the results
   of 2026-11-14 below). Put a `muscle` that runs MUSCLE 5 in
   `vendor/upstream-native/bin/`, which is first on the path `bench.py` gives
-  the original.
+  the original. The rows of 2026-11-22 were measured that way, with MUSCLE
+  5.3.
 - Vmatch built with `-O3` by Apple clang from source instead of the vendor
   binary.
 
@@ -132,12 +133,10 @@ the machine that day. An earlier run of the matrix on 2026-11-14 was discarded
 because the machine gave erratic multi-threaded timings that afternoon, for
 the released binary too; its rows are in `results/discarded-2026-11-14/`.
 
-The rows of the original are those of 2026-10-13, timed with MUSCLE 3.8, and
-`arrays.csv`, `cas_systems.csv` and `genomes.csv` in those two directories
-still compare with the MUSCLE 3.8 outputs kept there. The original was not
-timed again on the whole set. Four genomes timed with MUSCLE 5.3 on its path
-show it slower where arrays are large, so the stored rows understate its run
-time there:
+The original was not timed again on the whole set that day; its rows stayed
+those of 2026-10-13, timed with MUSCLE 3.8, until 2026-11-22 (next section).
+Four genomes timed with MUSCLE 5.3 on its path showed it slower where arrays
+are large:
 
 | genome | arrays only, MUSCLE 3.8 | arrays only, MUSCLE 5.3 | with Cas, MUSCLE 3.8 | with Cas, MUSCLE 5.3 |
 | --- | --- | --- | --- | --- |
@@ -145,6 +144,45 @@ time there:
 | Clostridioides difficile 630 | 23.6 s | 25.1 s | 43.9 s | |
 | Methanocaldococcus jannaschii DSM 2661 | 8.7 s | 8.9 s | 37.0 s | |
 | Escherichia coli K-12 MG1655 | 4.0 s | 4.8 s | 23.8 s | 24.6 s |
+
+## Results of 2026-11-22: every row timed again
+
+Both tools were timed again on 2026-11-22 over the whole matrix, the original
+with MUSCLE 5.3 on its path and this project with the build at `87c632c`,
+whose results are those of 0.2.0. The rows before that are under
+`results/at-db259be/`. The run took 86 minutes: this project's rows first,
+then `upstream-cpuM`, `upstream` and `upstream-arrays`. Before each genome the
+released 0.2.0 was timed on E. coli K-12 with Cas detection as a control; it
+took 1.04 s on average over 195 runs, between 0.98 s and 1.47 s, 16 of them
+above 1.12 s, with no stretch of erratic timings.
+
+With MUSCLE 5.3 the original is slower where arrays are large: Saccharolobus
+solfataricus P2 takes it 39.7 s with Cas detection where it took 27.5 s, and
+21.1 s for its arrays alone where it took 8.5 s. On the local set its rows
+with Cas detection moved by a tenth at most, either way. On the panel, 10 of
+its 21 rows of 2026-10-13 with Cas detection were more than a tenth slower
+than those of today, for a reason not found, so MUSCLE is not the only
+difference between the two sets of rows: Bacillus subtilis 168, which has no
+array, took 30.5 s then and 20.6 s now. Geometric means of the original's
+wall time over this project's, before and after:
+
+| | rows before | rows of 2026-11-22 |
+| --- | --- | --- |
+| arrays and Cas systems, 40 genomes, both at their defaults | 39x (16x to 679x) | 38x (21x to 720x) |
+| the same, this project held to one thread | 5.8x (2.2x to 96x) | 5.8x (3.2x to 105x) |
+| the same, both using every core | 18x (10x to 195x) | 19x (9.5x to 211x) |
+| arrays only, 72 genomes, both at their defaults | 87x (10x to 275x) | 91x (26x to 260x) |
+| the same, this project held to one thread | 29x | 31x |
+
+`raw/<genome>/upstream*/` in the two directories now holds the outputs of the
+original with MUSCLE 5.3, and `arrays.csv`, `cas_systems.csv` and
+`genomes.csv` there were written again from them with `compare.py`: on the 40
+genomes run with Cas detection, 279 arrays reported by both tools and none by
+one alone, with the same start, level and number of spacers, and 42 Cas
+systems reported by both plus 9 here only. `results/outputs/`, which the
+tables of `results/summary.md` take the comparison of the local set from,
+still holds the outputs of 2026-10-13 with MUSCLE 3.8; `results/muscle5/` is
+the comparison to quote for the 72 inputs.
 
 Things to state next to any number taken from here:
 
@@ -156,10 +194,10 @@ Things to state next to any number taken from here:
   3.3.2 it documents. The Cas systems it loses (see `compare.py`) were checked
   against MacSyFinder's own output for two genomes with these versions only.
 - Most timings are single runs on one machine.
-- The Rust rows are of the build at `db259be` (2026-11-14); those of the
-  original are of 2026-10-13, with MUSCLE 3.8 on its path. The browser table,
-  its native rows included, is of 2026-10-13 at `8fa28f5`, so its Cas timings
-  overstate the current run time.
+- Every row of `results/timing/` and `results/panel/` is of 2026-11-22, the
+  Rust ones of the build at `87c632c`, the original's with MUSCLE 5.3 on its
+  path. The browser table, its native rows included, is of 2026-10-13 at
+  `8fa28f5`, so its Cas timings overstate the current run time.
 
 ## Checking the repeat search against Vmatch
 

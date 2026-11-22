@@ -1,11 +1,6 @@
 //! Pure Rust profile-HMM algorithms, scoring, and search.
 //! Requires the pinned nightly compiler for `std::simd`.
 
-pub use rayon;
-
-// Re-export error types
-pub use errors::HmmerError;
-
 // --- Foundation modules ---
 pub mod alphabet;
 pub mod config;
@@ -40,8 +35,5 @@ pub use dynamic_programming::score_matrix;
 pub use dynamic_programming::simd;
 pub use pipeline::domain;
 pub use pipeline::domaindef;
-pub use pipeline::search as pipeline_search;
-pub use results::alidisplay;
 pub use results::hit;
-pub use results::tophits;
 pub use stats::evalues;

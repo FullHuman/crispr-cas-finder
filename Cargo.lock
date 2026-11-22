@@ -331,7 +331,6 @@ version = "0.2.0"
 dependencies = [
  "anyhow",
  "bio",
- "bitflags",
  "log",
  "ndarray",
  "orphos-core",

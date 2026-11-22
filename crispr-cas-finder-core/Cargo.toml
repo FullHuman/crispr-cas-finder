@@ -12,9 +12,6 @@ readme = "../README.md"
 keywords = ["crispr", "cas", "bioinformatics", "genomics", "hmmer"]
 categories = ["science::bioinformatics::genomics", "science::bioinformatics::sequence-analysis"]
 
-[features]
-hmmer-serde = []
-
 [dependencies]
 anyhow = "1"
 bio = "4"
@@ -23,7 +20,6 @@ serde_json = "1"
 log = "0.4"
 quick-xml = "0.41.0"
 orphos-core = "0.5.0"
-bitflags = "2"
 thiserror = "2"
 ndarray = "0.17"
 rayon = "1.11"

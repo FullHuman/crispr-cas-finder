@@ -9,7 +9,6 @@ use crate::hmmer_core::config::*;
 ///
 /// Contains the Gumbel/exponential parameters for MSV, Viterbi, and Forward
 /// filter scores, used to compute P-values and E-values in the search pipeline.
-#[cfg_attr(feature = "hmmer-serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct EvParams {
     pub msv_mu: f32,
@@ -49,32 +48,11 @@ impl EvParams {
 /// Pfam score cutoff thresholds.
 ///
 /// Each pair (per-sequence, per-domain) may be absent if not defined for the HMM.
-#[cfg_attr(feature = "hmmer-serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Cutoffs {
     pub gathering: Option<(f32, f32)>,
     pub trusted: Option<(f32, f32)>,
     pub noise: Option<(f32, f32)>,
-}
-
-impl Cutoffs {
-    /// Convert to the legacy fixed-size array representation.
-    pub fn to_array(&self) -> [f32; NUM_CUTOFFS] {
-        let mut arr = [CUTOFF_UNSET; NUM_CUTOFFS];
-        if let Some((v1, v2)) = self.gathering {
-            arr[Cutoff::GatheringSequence.idx()] = v1;
-            arr[Cutoff::GatheringDomain.idx()] = v2;
-        }
-        if let Some((v1, v2)) = self.trusted {
-            arr[Cutoff::TrustedSequence.idx()] = v1;
-            arr[Cutoff::TrustedDomain.idx()] = v2;
-        }
-        if let Some((v1, v2)) = self.noise {
-            arr[Cutoff::NoiseSequence.idx()] = v1;
-            arr[Cutoff::NoiseDomain.idx()] = v2;
-        }
-        arr
-    }
 }
 
 /// The core Plan7 profile HMM data structure.
@@ -86,7 +64,6 @@ impl Cutoffs {
 ///   - `match_emissions(node)`: match emission probabilities at node (slice of K)
 ///   - `insert_emissions(node)`: insert emission probabilities at node (slice of K)
 ///   - Nodes are numbered 0..M, where 0 is a special entry node
-#[cfg_attr(feature = "hmmer-serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone)]
 pub struct Hmm {
     // Core model parameters (flat layouts)
@@ -103,7 +80,6 @@ pub struct Hmm {
     pub model_mask: Option<Vec<u8>>,
     pub consensus: Option<Vec<u8>>,
     pub consensus_structure: Option<Vec<u8>>,
-    pub character_annotation: Option<Vec<u8>>,
 
     // Metadata
     pub command_log: Option<String>,
@@ -119,7 +95,6 @@ pub struct Hmm {
     pub cutoffs: Cutoffs,
     pub model_composition: Option<Vec<f32>>,
 
-    pub offset: i64,
     pub alphabet: Alphabet,
 }
 
@@ -139,7 +114,6 @@ impl Hmm {
             model_mask: None,
             consensus: None,
             consensus_structure: None,
-            character_annotation: None,
             command_log: None,
             num_sequences: None,
             effective_num_seq_float: None,
@@ -150,7 +124,6 @@ impl Hmm {
             ev_params: None,
             cutoffs: Cutoffs::default(),
             model_composition: None,
-            offset: 0,
             alphabet: abc.clone(),
         };
         // Enforce conventions on node 0
@@ -204,207 +177,6 @@ impl Hmm {
     }
 
     // ---------------------------------------------------------------
-    // Core operations
-    // ---------------------------------------------------------------
-
-    /// Copy parameters (t, mat, ins) from src to self.
-    /// Both must have the same M and alphabet.
-    pub fn copy_parameters(&mut self, src: &Hmm) {
-        debug_assert_eq!(self.num_nodes, src.num_nodes);
-        debug_assert_eq!(self.alphabet.canonical_size, src.alphabet.canonical_size);
-        self.transitions.copy_from_slice(&src.transitions);
-        self.match_emissions.copy_from_slice(&src.match_emissions);
-        self.insert_emissions.copy_from_slice(&src.insert_emissions);
-    }
-
-    /// Set all parameters to zero.
-    pub fn zero(&mut self) {
-        self.transitions.fill(0.0);
-        self.match_emissions.fill(0.0);
-        self.insert_emissions.fill(0.0);
-        self.model_composition = None;
-    }
-
-    // ---------------------------------------------------------------
-    // Convenience routines for setting fields
-    // ---------------------------------------------------------------
-
-    /// Set or change the name of the HMM. Trailing whitespace is chopped.
-    pub fn set_name(&mut self, name: &str) {
-        self.name = name.trim_end().to_string();
-    }
-
-    /// Set or change the accession number.
-    pub fn set_accession(&mut self, acc: Option<&str>) {
-        self.accession = acc.map(|a| a.trim_end().to_string());
-    }
-
-    /// Set or change the description.
-    pub fn set_description(&mut self, desc: Option<&str>) {
-        self.description = desc.map(|d| d.trim_end().to_string());
-    }
-
-    /// Append a command line to the build log.
-    pub fn append_comlog(&mut self, argv: &[String]) {
-        let line = argv.join(" ");
-        match &mut self.command_log {
-            Some(log) => {
-                log.push('\n');
-                log.push_str(&line);
-            }
-            None => {
-                self.command_log = Some(line);
-            }
-        }
-    }
-    // ---------------------------------------------------------------
-    // Renormalization and rescaling
-    // ---------------------------------------------------------------
-
-    /// Scale all counts in the HMM by a factor.
-    pub fn scale(&mut self, scale: f64) {
-        let scale_factor = scale as f32;
-        for v in self.transitions.iter_mut() {
-            *v *= scale_factor;
-        }
-        for v in self.match_emissions.iter_mut() {
-            *v *= scale_factor;
-        }
-        for v in self.insert_emissions.iter_mut() {
-            *v *= scale_factor;
-        }
-    }
-
-    /// Raise all parameters to an exponential power (for entropy weighting).
-    pub fn scale_exponential(&mut self, exp: f64) {
-        for v in self.transitions.iter_mut() {
-            *v = (*v as f64).powf(exp) as f32;
-        }
-        for v in self.match_emissions.iter_mut() {
-            *v = (*v as f64).powf(exp) as f32;
-        }
-        for v in self.insert_emissions.iter_mut() {
-            *v = (*v as f64).powf(exp) as f32;
-        }
-    }
-
-    /// Renormalize all probability parameters.
-    pub fn renormalize(&mut self) {
-        let canonical_size = self.alphabet.canonical_size;
-        for node in 0..=self.num_nodes {
-            let t = self.transitions_mut(node);
-            vec_fnorm(&mut t[0..HMM_NUM_MATCH_TRANSITIONS]);
-            vec_fnorm(
-                &mut t[HTransition::InsertToMatch.idx()
-                    ..HTransition::InsertToMatch.idx() + HMM_NUM_INSERT_TRANSITIONS],
-            );
-            vec_fnorm(
-                &mut t[HTransition::DeleteToMatch.idx()
-                    ..HTransition::DeleteToMatch.idx() + HMM_NUM_DELETE_TRANSITIONS],
-            );
-            vec_fnorm(self.match_emissions_mut(node));
-            let ins = self.insert_emissions_mut(node);
-            vec_fnorm(&mut ins[..canonical_size]);
-        }
-    }
-
-    // ---------------------------------------------------------------
-    // Debugging and development
-    // ---------------------------------------------------------------
-
-    /// Encode a state type string to internal code.
-    pub fn encode_statetype(typestring: &str) -> TraceStateType {
-        match typestring.to_uppercase().as_str() {
-            "M" => TraceStateType::Match,
-            "D" => TraceStateType::Delete,
-            "I" => TraceStateType::Insert,
-            "S" => TraceStateType::Start,
-            "N" => TraceStateType::NTerminal,
-            "B" => TraceStateType::Begin,
-            "E" => TraceStateType::End,
-            "C" => TraceStateType::CTerminal,
-            "T" => TraceStateType::Terminate,
-            "J" => TraceStateType::Jump,
-            "X" => TraceStateType::Missing,
-            _ => TraceStateType::Bogus,
-        }
-    }
-
-    /// Decode a state type code to a string.
-    pub fn decode_statetype(st: TraceStateType) -> &'static str {
-        match st {
-            TraceStateType::Match => "M",
-            TraceStateType::Delete => "D",
-            TraceStateType::Insert => "I",
-            TraceStateType::Start => "S",
-            TraceStateType::NTerminal => "N",
-            TraceStateType::Begin => "B",
-            TraceStateType::End => "E",
-            TraceStateType::CTerminal => "C",
-            TraceStateType::Terminate => "T",
-            TraceStateType::Jump => "J",
-            TraceStateType::Missing => "X",
-            TraceStateType::Bogus => "?",
-        }
-    }
-
-    /// Dump the HMM parameters to a file for debugging.
-    pub fn dump(&self, writer: &mut dyn std::io::Write) -> std::io::Result<()> {
-        let canonical_size = self.alphabet.canonical_size;
-        writeln!(writer, "HMM: {} M={}", self.name, self.num_nodes)?;
-
-        for node in 0..=self.num_nodes {
-            write!(writer, "  Node {:4}  ", node)?;
-            write!(writer, "t: ")?;
-            let t = self.transitions(node);
-            for transition_value in &t[..HMM_NUM_TRANSITIONS] {
-                write!(writer, "{:7.4} ", transition_value)?;
-            }
-            write!(writer, " mat: ")?;
-            let mat = self.match_emissions(node);
-            for &emission_value in &mat[..canonical_size.min(5)] {
-                write!(writer, "{:7.4} ", emission_value)?;
-            }
-            if canonical_size > 5 {
-                write!(writer, "...")?;
-            }
-            writeln!(writer)?;
-        }
-        Ok(())
-    }
-
-    /// Compare two HMMs for equality within tolerance.
-    pub fn compare(&self, other: &Hmm, tol: f32) -> bool {
-        if self.num_nodes != other.num_nodes {
-            return false;
-        }
-
-        let canonical_size = self.alphabet.canonical_size;
-        for node in 0..=self.num_nodes {
-            let st = self.transitions(node);
-            let ot = other.transitions(node);
-            for j in 0..HMM_NUM_TRANSITIONS {
-                if (st[j] - ot[j]).abs() > tol {
-                    return false;
-                }
-            }
-            let sm = self.match_emissions(node);
-            let om = other.match_emissions(node);
-            let si = self.insert_emissions(node);
-            let oi = other.insert_emissions(node);
-            for a in 0..canonical_size {
-                if (sm[a] - om[a]).abs() > tol {
-                    return false;
-                }
-                if (si[a] - oi[a]).abs() > tol {
-                    return false;
-                }
-            }
-        }
-        true
-    }
-
-    // ---------------------------------------------------------------
     // Other routines
     // ---------------------------------------------------------------
 
@@ -445,16 +217,6 @@ impl Hmm {
     }
 }
 
-/// Normalize a float vector to sum to 1.0.
-fn vec_fnorm(v: &mut [f32]) {
-    let sum: f32 = v.iter().sum();
-    if sum > 0.0 {
-        for x in v.iter_mut() {
-            *x /= sum;
-        }
-    }
-}
-
 // ---------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------
@@ -478,8 +240,8 @@ mod tests {
     fn test_clone() {
         let abc = Alphabet::amino();
         let mut hmm = Hmm::new(10, &abc);
-        hmm.set_name("test_model");
-        hmm.set_accession(Some("PF00001"));
+        hmm.name = "test_model".to_string();
+        hmm.accession = Some("PF00001".to_string());
         hmm.match_emissions_mut(1)[0] = 0.5;
         hmm.transitions_mut(1)[0] = 0.9;
 
@@ -488,34 +250,6 @@ mod tests {
         assert_eq!(cloned.accession, Some("PF00001".to_string()));
         assert!((cloned.match_emissions(1)[0] - 0.5).abs() < 1e-6);
         assert!((cloned.transitions(1)[0] - 0.9).abs() < 1e-6);
-    }
-
-    #[test]
-    fn test_zero() {
-        let abc = Alphabet::amino();
-        let mut hmm = Hmm::new(5, &abc);
-        hmm.match_emissions_mut(1)[0] = 1.0;
-        hmm.transitions_mut(1)[0] = 1.0;
-
-        hmm.zero();
-        assert_eq!(hmm.match_emissions(1)[0], 0.0);
-        assert_eq!(hmm.transitions(1)[0], 0.0);
-    }
-
-    #[test]
-    fn test_encode_decode_statetype() {
-        assert_eq!(Hmm::encode_statetype("M"), TraceStateType::Match);
-        assert_eq!(Hmm::encode_statetype("d"), TraceStateType::Delete);
-        assert_eq!(Hmm::decode_statetype(TraceStateType::Match), "M");
-        assert_eq!(Hmm::decode_statetype(TraceStateType::Delete), "D");
-    }
-
-    #[test]
-    fn test_compare() {
-        let abc = Alphabet::amino();
-        let hmm1 = Hmm::new(10, &abc);
-        let hmm2 = hmm1.clone();
-        assert!(hmm1.compare(&hmm2, 1e-6));
     }
 
     #[test]
@@ -531,19 +265,5 @@ mod tests {
         let arr = ev.to_array();
         let ev2 = EvParams::from_array(&arr);
         assert_eq!(ev, ev2);
-    }
-
-    #[test]
-    fn test_cutoffs_roundtrip() {
-        let c = Cutoffs {
-            gathering: Some((25.0, 25.0)),
-            trusted: None,
-            noise: Some((20.0, 20.0)),
-        };
-        let arr = c.to_array();
-        assert_eq!(arr[Cutoff::GatheringSequence.idx()], 25.0);
-        assert_eq!(arr[Cutoff::GatheringDomain.idx()], 25.0);
-        assert_eq!(arr[Cutoff::TrustedSequence.idx()], CUTOFF_UNSET);
-        assert_eq!(arr[Cutoff::NoiseSequence.idx()], 20.0);
     }
 }

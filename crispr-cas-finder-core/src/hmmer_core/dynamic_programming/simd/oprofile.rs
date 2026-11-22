@@ -70,11 +70,6 @@ pub struct OptimizedProfile {
     // return decide the filter cascade (msv_filter.rs, viterbi_filter.rs) ---
     pub msv_bytes: MsvBytes,
     pub viterbi_words: ViterbiWords,
-
-    // E-value parameters
-    pub ev_params: [f32; NUM_EV_PARAMS],
-    pub mode: SearchMode,
-    pub max_length: usize,
 }
 
 impl OptimizedProfile {
@@ -102,9 +97,6 @@ impl OptimizedProfile {
             isa,
             msv_bytes: MsvBytes::default(),
             viterbi_words: ViterbiWords::default(),
-            ev_params: [EV_PARAM_UNSET; NUM_EV_PARAMS],
-            mode: SearchMode::Local,
-            max_length: 0,
         }
     }
 
@@ -121,11 +113,8 @@ impl OptimizedProfile {
     pub fn from_profile_with_isa(gm: &Profile, isa: Isa) -> Self {
         let kp = gm.alphabet.full_size;
         let mut om = OptimizedProfile::new_with_isa(gm.num_nodes, kp, isa);
-        om.mode = gm.mode;
         om.l = gm.target_length;
         om.nj = gm.expected_j_uses;
-        om.max_length = gm.max_length;
-        om.ev_params = gm.ev_params;
 
         fwd_conversion(gm, &mut om);
         om.msv_bytes = MsvBytes::from_profile(gm, kp, om.isa);

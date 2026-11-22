@@ -38,6 +38,67 @@
   score is not tested, and on to domain definition. It used to compute the
   unrounded MSV and Viterbi scores first, without testing them. No command
   line option sets it.
+- The rest of the bundled HMMER implementation that the Cas search never
+  reached is removed. The results are unchanged: every output file on the 72
+  genomes is still byte for byte the one 0.2.0 writes. What is gone:
+  - Reporting that this tool does not do: alignment displays
+    (`results::alidisplay`), the ranked list of hits with its reporting and
+    inclusion thresholds (`results::tophits`, `Thresholds`, `HitFlags`), the
+    `hmmer::banner` and the version constants it printed, `Hmm::dump`,
+    `BackgroundModel::dump` and `Trace::dump`.
+  - Input and output the tool has its own code for: the writer of HMM files
+    (`HmmFile::write_ascii`) and the FASTA readers of `hmmer_io`
+    (`FastaReader`, `read_fasta_digital_sequences`). `HmmFile` and `read_hmm`
+    read models as before.
+  - The search modes other than the one the search runs in. `SearchMode` is
+    gone, and with it glocal alignment and the single-hit configuration at
+    set-up: `modelconfig::profile_config` and `test_helpers::setup_profile`
+    take no mode and configure a profile for local alignment with any number
+    of hits. `Profile::reconfig_unihit` and `reconfig_multihit`, which domain
+    definition switches between, stay.
+  - Fields nothing read. `Hit` keeps the name, score, P-value, the four
+    counts `hmmsearch` prints (`reg`, `clu`, `ov`, `env`) and the domains.
+    `Domain` loses `is_reported`, `is_included`, `scores_per_pos`,
+    `alignment_display` and `trace`. `DigitalSequence` keeps the name and
+    the residues, and `DigitalSequence::from_bytes` takes no description.
+    `Profile` and `OptimizedProfile` no longer copy the name, accession,
+    description, annotation lines, cutoffs, length bound and file offsets of
+    the model. `Trace` always carries posterior probabilities: `Trace::new`
+    and `Trace::append`, which takes one, replace `with_pp` and
+    `append_with_pp`, and `TraceDomain` loses `trace_start` and `trace_end`.
+    `PipelineStats` keeps the sequence counts of the filter funnel and loses
+    the residue counts. `DomainResult` loses `num_expected` and its two
+    failure counters, `DomainWorkspace` its `trace` and `length`,
+    `SearchTrace` its `sequence_length`, `Hmm` its `character_annotation`
+    and `offset`.
+  - Methods and items nothing called: on `Hmm` (`zero`, `scale`,
+    `scale_exponential`, `renormalize`, `copy_parameters`, `compare`,
+    `set_name`, `set_accession`, `set_description`, `append_comlog`,
+    `encode_statetype`, `decode_statetype`), `Profile` (`compare`, `reuse`,
+    `is_local`, `is_multihit`, `sizeof_approx`,
+    `transition_scores_for_node`), `Trace` (`compare`, `len`, `is_empty`,
+    `reuse`, `get_state_use_counts`), `ScoreMatrix` (`reuse`, the capacity
+    getters, `set_special_score` and the row views), `Alphabet`
+    (`is_degenerate`, `is_canonical`, `degeneracy_counts`),
+    `BackgroundModel::create_uniform`, `Cutoffs::to_array`,
+    `SearchWorker::metrics`, `reset_metrics` and `plan`,
+    `SearchQuery::profile` and `background`,
+    `SearchPlanBuilder::domain_config`, `PipelineStats::merge` and `reuse`,
+    `SearchMetrics::merge`, `evalues::viterbi_score_to_pvalue`,
+    `modelconfig::reconfig_unihit` and `reconfig_multihit` (the methods of
+    `Profile` do the work), `MsvBytes::kp`, `EaselFastRng::seed`,
+    `XorShift64::get_seed`, the alias `DomainDef` of `DomainWorkspace`, the
+    enums `Strands` and `Cutoff`, the trace states `Bogus` and `Missing`, the
+    HMM flag constants, four `HmmerError` variants nothing returned
+    (`Incompatible`, `Corrupt`, `Syntax`, `NoResult`), the `internal_err!`
+    macro, and the test helpers `hmm_sample_enumerable`,
+    `hmm_set_composition` and `vec_f_compare`.
+  - Shortcuts: the re-exports `hmmer_core::rayon`, `hmmer_core::HmmerError`,
+    `hmmer_io::HmmerError`, `hmmer_core::pipeline_search` and the types
+    re-exported at `hmmer_core::pipeline`. The items are at their own paths
+    (`hmmer_core::errors::HmmerError`, `hmmer_core::pipeline::search::…`).
+  - The `hmmer-serde` feature, which nothing enabled, and the dependency on
+    `bitflags`.
 
 ## [0.2.0] - 2026-11-14
 

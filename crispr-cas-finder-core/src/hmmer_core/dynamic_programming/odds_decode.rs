@@ -13,7 +13,7 @@
 
 use super::score_matrix::*;
 use crate::hmmer_core::config::{PROFILE_NUM_EMISSIONS, PROFILE_NUM_TRANSITIONS, PRsc, PTsc};
-use crate::hmmer_core::domaindef::DomainDef;
+use crate::hmmer_core::domaindef::DomainWorkspace;
 use crate::hmmer_core::errors::HmmerError;
 use crate::hmmer_core::profile::Profile;
 
@@ -96,7 +96,7 @@ pub fn decode_odds_space(
     tables: &OddsTables,
     expected_forward_score: f32,
     posterior: &mut ScoreMatrix,
-    domain_def: Option<&mut DomainDef>,
+    domain_def: Option<&mut DomainWorkspace>,
 ) -> Result<f32, HmmerError> {
     let m = profile.num_nodes;
     let l = digital_sequence.len();
@@ -129,7 +129,8 @@ pub fn decode_odds_space(
         c_move: scores.c_move.exp(),
         e_loop: scores.e_loop.exp(),
         e_move: scores.e_move.exp(),
-        exit: if profile.mode.is_local() { 1.0 } else { 0.0 },
+        // Local alignment: every match and delete state can exit the model.
+        exit: 1.0,
     };
     let transitions = &tables.transitions[..m];
     let stride = posterior.main_row_stride();
@@ -379,7 +380,6 @@ pub fn decode_odds_space(
                     * inverse_total;
             domain_def.model_occupancy[i] = 1.0 - outside;
         }
-        domain_def.length = l;
     }
 
     Ok(backward_score)
@@ -427,8 +427,7 @@ fn decode_row(
 mod tests {
     use super::*;
     use crate::hmmer_core::alphabet::Alphabet;
-    use crate::hmmer_core::config::SearchMode;
-    use crate::hmmer_core::domaindef::DomainDef;
+    use crate::hmmer_core::domaindef::DomainWorkspace;
     use crate::hmmer_core::dynamic_programming::simd::forward_filter::forward_filter;
     use crate::hmmer_core::dynamic_programming::simd::oprofile::OptimizedProfile;
     use crate::hmmer_core::forward_backward::backward_decode_log_space;
@@ -448,8 +447,7 @@ mod tests {
             (4, 9, 400),
         ] {
             let mut rng = XorShift64::new(seed);
-            let (_, background, profile) =
-                setup_profile(&mut rng, m, l, &alphabet, SearchMode::Local);
+            let (_, background, profile) = setup_profile(&mut rng, m, l, &alphabet);
             let om = OptimizedProfile::from_profile(&profile);
             // A consensus stretch inside a random sequence gives a real
             // alignment with sharp posteriors.
@@ -471,7 +469,7 @@ mod tests {
             let forward = forward_filter(&sequence, l, &om);
 
             let mut reference = ScoreMatrix::new(m, l).unwrap();
-            let mut reference_def = DomainDef::new();
+            let mut reference_def = DomainWorkspace::new();
             let reference_score = backward_decode_log_space(
                 &sequence,
                 &profile,
@@ -483,7 +481,7 @@ mod tests {
 
             let tables = OddsTables::new(&profile);
             let mut odds = ScoreMatrix::new(m, l).unwrap();
-            let mut odds_def = DomainDef::new();
+            let mut odds_def = DomainWorkspace::new();
             let odds_score = decode_odds_space(
                 &sequence,
                 &profile,

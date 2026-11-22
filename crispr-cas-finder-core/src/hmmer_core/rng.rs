@@ -3,7 +3,7 @@ use std::fmt;
 /// A simple xorshift64 random number generator.
 ///
 /// Deterministic and reproducible given the same seed.
-/// Used for HMM sampling, e-value calibration, stochastic traceback, etc.
+/// Samples the models and sequences of the tests.
 pub struct XorShift64 {
     seed: u64,
     state: u64,
@@ -41,11 +41,6 @@ impl XorShift64 {
         assert!(n > 0, "roll requires a nonempty range");
         ((self.random() * n as f64) as usize).min(n - 1)
     }
-
-    /// Get the original seed.
-    pub fn get_seed(&self) -> u64 {
-        self.seed
-    }
 }
 
 impl fmt::Debug for XorShift64 {
@@ -66,7 +61,6 @@ impl fmt::Debug for XorShift64 {
 /// domain envelopes only gives HMMER's envelopes if it draws HMMER's numbers.
 #[derive(Debug, Clone)]
 pub struct EaselFastRng {
-    seed: u32,
     state: u32,
 }
 
@@ -80,7 +74,7 @@ impl EaselFastRng {
     /// process number. Neither exists on every target of this crate and the
     /// search has to be reproducible, so 0 stands for the default seed here.
     pub fn new(seed: u32) -> Self {
-        let mut rng = EaselFastRng { seed: 0, state: 0 };
+        let mut rng = EaselFastRng { state: 0 };
         rng.reseed(seed);
         rng
     }
@@ -88,16 +82,10 @@ impl EaselFastRng {
     /// `esl_randomness_Init()`: restart the sequence of `seed`.
     pub fn reseed(&mut self, seed: u32) {
         let seed = if seed == 0 { Self::DEFAULT_SEED } else { seed };
-        self.seed = seed;
         self.state = mix3(seed, 87_654_321, 12_345_678);
         if self.state == 0 {
             self.state = 42;
         }
-    }
-
-    /// The seed of the current sequence.
-    pub fn seed(&self) -> u32 {
-        self.seed
     }
 
     /// The next 32 bits (`knuth()` in `esl_random.c`).
@@ -181,7 +169,6 @@ mod tests {
     #[test]
     fn easel_fast_generator_sequence_of_seed_42() {
         let mut rng = EaselFastRng::new(42);
-        assert_eq!(rng.seed(), 42);
         let drawn: Vec<u32> = (0..5).map(|_| rng.next_u32()).collect();
         assert_eq!(
             drawn,
@@ -222,7 +209,6 @@ mod tests {
     fn zero_seed_is_reproducible_and_nonconstant() {
         let mut first = XorShift64::new(0);
         let mut second = XorShift64::new(0);
-        assert_eq!(first.get_seed(), 0);
         let values: Vec<_> = (0..100).map(|_| first.random()).collect();
         assert!(values.iter().all(|v| (0.0..1.0).contains(v)));
         assert!(values.windows(2).any(|v| v[0] != v[1]));
@@ -257,11 +243,5 @@ mod tests {
             let v = rng.roll(10);
             assert!(v < 10);
         }
-    }
-
-    #[test]
-    fn test_seed() {
-        let rng = XorShift64::new(42);
-        assert_eq!(rng.get_seed(), 42);
     }
 }

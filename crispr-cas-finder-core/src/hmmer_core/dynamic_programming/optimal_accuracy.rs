@@ -118,9 +118,9 @@ fn build_transition_delta_table(transition_scores: &[f32], num_nodes: usize) -> 
 /// Fill all main-model nodes (k = 1 …= M) for sequence row `i`.
 ///
 /// Interior nodes `1 ..< M` receive match, insert, and delete scores. The final
-/// node `M` has no insert state (fixed to `-∞`). In local-alignment mode every
-/// match cell feeds the exit-state accumulator; in glocal mode only the final
-/// node M does (both its match and delete scores contribute unconditionally).
+/// node `M` has no insert state (fixed to `-∞`). The profile is one of local
+/// alignment: every match cell feeds the exit-state accumulator, and so does
+/// the delete cell of the final node.
 ///
 /// Returns the maximum OA score reaching E and the state/node that supplied it.
 fn fill_main_nodes(
@@ -129,7 +129,6 @@ fn fill_main_nodes(
     pp: &ScoreMatrix,
     td: &[f32],
     prev_b: f32,
-    exit_gate: f32,
     num_nodes: usize,
 ) -> (f32, ExitSource) {
     let mut x_e = f32::NEG_INFINITY;
@@ -162,8 +161,8 @@ fn fill_main_nodes(
                 ),
             );
         dp.set_match_score(i, k, mm);
-        x_e = f32::max(x_e, exit_gate * mm);
-        if exit_gate == 1.0 && mm >= exit_source_score {
+        x_e = f32::max(x_e, mm);
+        if mm >= exit_source_score {
             exit_source_score = mm;
             exit_source = ExitSource {
                 state: TraceStateType::Match,
@@ -220,29 +219,18 @@ fn fill_main_nodes(
     dp.set_insert_score(i, num_nodes, f32::NEG_INFINITY);
 
     x_e = f32::max(x_e, f32::max(mm, dm));
-    if exit_gate == 1.0 {
-        // Match wins a same-node M/D tie, while later match nodes win ties with
-        // earlier nodes. These are HMMER's select_e() rules.
-        if mm >= exit_source_score {
-            exit_source_score = mm;
-            exit_source = ExitSource {
-                state: TraceStateType::Match,
-                node_index: num_nodes,
-            };
-        }
-        if dm > exit_source_score {
-            exit_source = ExitSource {
-                state: TraceStateType::Delete,
-                node_index: num_nodes,
-            };
-        }
-    } else {
+    // Match wins a same-node M/D tie, while later match nodes win ties with
+    // earlier nodes. These are HMMER's select_e() rules.
+    if mm >= exit_source_score {
+        exit_source_score = mm;
         exit_source = ExitSource {
-            state: if mm >= dm {
-                TraceStateType::Match
-            } else {
-                TraceStateType::Delete
-            },
+            state: TraceStateType::Match,
+            node_index: num_nodes,
+        };
+    }
+    if dm > exit_source_score {
+        exit_source = ExitSource {
+            state: TraceStateType::Delete,
             node_index: num_nodes,
         };
     }
@@ -353,11 +341,6 @@ fn optimal_accuracy_fill(
     let seq_len = posterior.sequence_length;
     let num_nodes = profile.num_nodes;
 
-    // In local mode every match node can exit the model; in glocal mode only node
-    // M can. The exit_gate encodes this: 1.0 passes the value through, while the
-    // final-node case is handled unconditionally in fill_main_nodes regardless.
-    let exit_gate: f32 = if profile.mode.is_local() { 1.0 } else { 0.0 };
-
     dp.resize(num_nodes, seq_len)?;
     exit_sources.resize(
         seq_len + 1,
@@ -396,8 +379,7 @@ fn optimal_accuracy_fill(
         dp.set_delete_score(i, 0, f32::NEG_INFINITY);
 
         let prev_b = dp.special_score(i - 1, BEGIN_STATE);
-        let (x_e, exit_source) =
-            fill_main_nodes(i, dp, posterior, &td, prev_b, exit_gate, num_nodes);
+        let (x_e, exit_source) = fill_main_nodes(i, dp, posterior, &td, prev_b, num_nodes);
         *exit_source_slot = exit_source;
         fill_special_states(i, x_e, dp, posterior, &special_td);
     }
@@ -418,7 +400,6 @@ fn oa_trace(
     exit_sources: &[ExitSource],
 ) -> Result<Trace, HmmerError> {
     let seq_len = dp.sequence_length;
-    let num_nodes = profile.num_nodes;
     let tsc = profile.transition_scores_raw();
     let special_td = SpecialTransitionDeltas::from_profile(profile);
 
@@ -427,12 +408,12 @@ fn oa_trace(
         node_index: 0,
     };
 
-    let mut trace = Trace::with_pp();
+    let mut trace = Trace::new();
 
     // Seed the trace at the terminal end; traceback proceeds right-to-left.
     let terminal_position = trace_coordinate(seq_len, "sequence position")?;
-    trace.append_with_pp(TraceStateType::Terminate, 0, terminal_position, 0.0);
-    trace.append_with_pp(TraceStateType::CTerminal, 0, terminal_position, 0.0);
+    trace.append(TraceStateType::Terminate, 0, terminal_position, 0.0);
+    trace.append(TraceStateType::CTerminal, 0, terminal_position, 0.0);
 
     let mut sprv = TraceStateType::CTerminal;
 
@@ -448,7 +429,7 @@ fn oa_trace(
             cursor.node_index,
             cursor.sequence_position,
         );
-        trace.append_with_pp(
+        trace.append(
             scur,
             trace_coordinate(cursor.node_index, "model node")?,
             trace_coordinate(cursor.sequence_position, "sequence position")?,
@@ -464,8 +445,6 @@ fn oa_trace(
         sprv = scur;
     }
 
-    trace.model_length = num_nodes;
-    trace.sequence_length = seq_len;
     trace.reverse();
     Ok(trace)
 }
@@ -716,7 +695,6 @@ fn argmax(v: &[f32]) -> usize {
 mod tests {
     use super::*;
     use crate::hmmer_core::alphabet::Alphabet;
-    use crate::hmmer_core::config::SearchMode;
 
     fn one_residue_posterior(num_nodes: usize) -> ScoreMatrix {
         let mut posterior = ScoreMatrix::new(num_nodes, 1).unwrap();
@@ -730,8 +708,7 @@ mod tests {
 
     #[test]
     fn one_node_one_residue_decode_has_expected_trace_and_score() {
-        let mut profile = Profile::new(1, &Alphabet::amino());
-        profile.mode = SearchMode::Local;
+        let profile = Profile::new(1, &Alphabet::amino());
         let mut posterior = one_residue_posterior(1);
         posterior.set_match_score(1, 1, 1.0);
 
@@ -757,7 +734,7 @@ mod tests {
     }
 
     #[test]
-    fn fill_caches_local_and_glocal_exit_sources_with_upstream_ties() {
+    fn fill_caches_exit_sources_with_upstream_ties() {
         let num_nodes = 3;
         let mut posterior = one_residue_posterior(num_nodes);
         posterior.set_match_score(1, 1, 0.8);
@@ -765,19 +742,13 @@ mod tests {
         posterior.set_match_score(1, 3, 0.1);
         let td = vec![1.0; num_nodes * PROFILE_NUM_TRANSITIONS];
 
-        for (exit_gate, expected_state, expected_node) in [
-            (1.0, TraceStateType::Match, 1),
-            (0.0, TraceStateType::Delete, num_nodes),
-        ] {
-            let mut dp = ScoreMatrix::new(num_nodes, 1).unwrap();
-            dp.resize(num_nodes, 1).unwrap();
-            dp.fill_main_row(0, f32::NEG_INFINITY);
+        let mut dp = ScoreMatrix::new(num_nodes, 1).unwrap();
+        dp.resize(num_nodes, 1).unwrap();
+        dp.fill_main_row(0, f32::NEG_INFINITY);
 
-            let (_, source) =
-                fill_main_nodes(1, &mut dp, &posterior, &td, 0.0, exit_gate, num_nodes);
-            assert_eq!(source.state, expected_state);
-            assert_eq!(source.node_index, expected_node);
-        }
+        let (_, source) = fill_main_nodes(1, &mut dp, &posterior, &td, 0.0, num_nodes);
+        assert_eq!(source.state, TraceStateType::Match);
+        assert_eq!(source.node_index, 1);
     }
 
     #[test]
