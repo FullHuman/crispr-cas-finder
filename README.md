@@ -226,64 +226,60 @@ detection and 72 without: the 21 reference genomes of bacteria and archaea
 listed in [benchmarks/panel.tsv](benchmarks/panel.tsv), E. coli K-12, the
 Acetobacter plasmid of the original's install test, and enterobacterial
 assemblies of 1 to 376 contigs. The original is CRISPRCasFinder 4.3.2 run
-natively on Apple silicon with Vmatch 2.3.1, Prodigal 2.6.3, MacSyFinder 2.1.6
-and HMMER 3.4; both tools read the same CasFinder 3.1.0 models. "Original" is
-the original with its defaults, one MacSyFinder worker; "original, all cores"
-adds `-cpuM 10`. The speed-up compares the two tools at their defaults, the
-original on one worker and this project on every core. Each figure is one run,
-or the median of three for E. coli K-12 and three other inputs. The scripts,
-every row and the caveats are in [benchmarks/README.md](benchmarks/README.md);
-the Rust rows are of the build at `db259be` (2026-11-14), which aligns repeats
-and spacers as MUSCLE 5 does and filters the HMM search as HMMER does. The
-rows of the original are of 2026-10-13, when it ran with MUSCLE 3.8 on its
-path. With MUSCLE 5.3, which it asks for, it is slower where arrays are large,
-so the speed-ups below understate the gap there: Saccharolobus solfataricus
-P2, with six arrays of about a hundred spacers, then takes it 41.8 s and not
-27.5 s, and E. coli K-12 24.6 s and not 23.8 s.
+natively on Apple silicon with Vmatch 2.3.1, Prodigal 2.6.3, MacSyFinder
+2.1.6, HMMER 3.4 and MUSCLE 5.3; both tools read the same CasFinder 3.1.0
+models. "Original" is the original with its defaults, one MacSyFinder worker;
+"original, all cores" adds `-cpuM 10`. The speed-up compares the two tools at
+their defaults, the original on one worker and this project on every core.
+Each figure is one run, or the median of three for E. coli K-12 and three
+other inputs. The scripts, every row and the caveats are in
+[benchmarks/README.md](benchmarks/README.md). Every row was measured on
+2026-11-22, this project's with the build at `87c632c`.
 
 **Arrays and Cas systems** (`--cas`), a selection of the 40 genomes:
 
 | genome | note | Mb | original | original, all cores | Rust, 1 thread | Rust, all cores | speed-up |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| Mycoplasmoides genitalium G37 | no CRISPR-Cas, genetic code 4 | 0.6 | 9.64 s | 3.72 s | 1.09 s | 0.16 s | 60x |
-| Campylobacter jejuni NCTC 11168 | type II-C | 1.6 | 14.9 s | 6.02 s | 2.73 s | 0.40 s | 37x |
-| Methanocaldococcus jannaschii DSM 2661 | archaeon, about twenty arrays | 1.7 | 37.0 s | 18.8 s | 3.86 s | 0.51 s | 73x |
-| Saccharolobus solfataricus P2 | archaeon, types I-A and III-B | 3.0 | 27.5 s | 16.4 s | 12.5 s | 1.67 s | 16x |
-| Haloferax volcanii DS2 | archaeon, type I-B, high GC | 3.5 | 33.0 s | 16.9 s | 5.85 s | 1.00 s | 33x |
-| Bacillus subtilis 168 | no CRISPR-Cas | 4.2 | 30.5 s | 15.3 s | 6.39 s | 0.98 s | 31x |
-| Clostridioides difficile 630 | type I-B, many arrays | 4.3 | 43.9 s | 29.5 s | 6.84 s | 0.97 s | 45x |
-| Mycobacterium tuberculosis H37Rv | type III-A, high GC | 4.4 | 39.3 s | 26.2 s | 6.16 s | 0.93 s | 42x |
-| Escherichia coli K-12 MG1655 | type I-E | 4.6 | 23.8 s | 12.3 s | 6.82 s | 1.04 s | 23x |
-| Pseudomonas aeruginosa PA14 | type I-F | 6.5 | 32.3 s | 18.9 s | 8.69 s | 1.32 s | 24x |
-| Streptomyces coelicolor A3(2) | 8.7 Mb linear chromosome | 8.7 | 53.7 s | 37.3 s | 10.5 s | 1.69 s | 32x |
-| Phytobacter ursingii ATCC 27989 | draft, 19 contigs | 5.8 | 110.9 s | 35.9 s | 8.03 s | 1.16 s | 96x |
-| Phytobacter diazotrophicus Pd1 | draft, 79 contigs | 5.6 | 7.6 min | 2.2 min | 8.46 s | 1.15 s | 396x |
-| isolate 13020RM | enterobacterial draft, 234 contigs | 5.7 | 13.5 min | 3.9 min | 8.48 s | 1.20 s | 679x |
+| Mycoplasmoides genitalium G37 | no CRISPR-Cas, genetic code 4 | 0.6 | 8.53 s | 3.47 s | 1.10 s | 0.18 s | 47x |
+| Campylobacter jejuni NCTC 11168 | type II-C | 1.6 | 11.4 s | 4.64 s | 2.67 s | 0.38 s | 30x |
+| Methanocaldococcus jannaschii DSM 2661 | archaeon, about twenty arrays | 1.7 | 29.2 s | 15.1 s | 3.74 s | 0.50 s | 58x |
+| Saccharolobus solfataricus P2 | archaeon, types I-A and III-B | 3.0 | 39.7 s | 29.9 s | 12.2 s | 1.65 s | 24x |
+| Haloferax volcanii DS2 | archaeon, type I-B, high GC | 3.5 | 29.3 s | 16.3 s | 5.73 s | 0.97 s | 30x |
+| Bacillus subtilis 168 | no CRISPR-Cas | 4.2 | 20.6 s | 10.5 s | 6.24 s | 0.92 s | 22x |
+| Clostridioides difficile 630 | type I-B, many arrays | 4.3 | 39.1 s | 30.3 s | 6.65 s | 0.99 s | 40x |
+| Mycobacterium tuberculosis H37Rv | type III-A, high GC | 4.4 | 35.6 s | 27.7 s | 5.99 s | 0.90 s | 40x |
+| Escherichia coli K-12 MG1655 | type I-E | 4.6 | 24.0 s | 12.5 s | 6.58 s | 1.02 s | 24x |
+| Pseudomonas aeruginosa PA14 | type I-F | 6.5 | 30.8 s | 18.9 s | 8.46 s | 1.34 s | 23x |
+| Streptomyces coelicolor A3(2) | 8.7 Mb linear chromosome | 8.7 | 58.4 s | 45.2 s | 10.4 s | 1.88 s | 31x |
+| Phytobacter ursingii ATCC 27989 | draft, 19 contigs | 5.8 | 112.7 s | 38.9 s | 7.93 s | 1.07 s | 105x |
+| Phytobacter diazotrophicus Pd1 | draft, 79 contigs | 5.6 | 7.2 min | 2.1 min | 8.22 s | 1.10 s | 394x |
+| isolate 13020RM | enterobacterial draft, 234 contigs | 5.7 | 14.5 min | 4.3 min | 8.29 s | 1.21 s | 720x |
 
 Over all 40 genomes, geometric means of the original's wall time over this
 project's:
 
 | | geometric mean | range |
 | --- | --- | --- |
-| both at their defaults | 39x | 16x to 679x |
-| this project held to one thread | 5.8x | 2.2x to 96x |
-| both using every core | 18x | 10x to 195x |
+| both at their defaults | 38x | 21x to 720x |
+| this project held to one thread | 5.8x | 3.2x to 105x |
+| both using every core | 19x | 9.5x to 211x |
 
 The gain grows with the number of contigs because the original runs the
 whole Cas search once per sequence. With Cas detection the largest process
 of this project peaks at about 1.2 times the original's memory; for arrays
-only, at about a third of it, from a seventh to seven tenths. E. coli K-12
+only, at about a third of it, from a seventh to three quarters. E. coli K-12
 with Cas detection against the number of threads:
 
 | threads | 1 | 2 | 4 | 8 |
 | --- | --- | --- | --- | --- |
-| wall time | 6.82 s | 3.42 s | 1.83 s | 1.07 s |
+| wall time | 6.58 s | 3.35 s | 1.86 s | 1.05 s |
 
-**Arrays only**, 72 genomes: the geometric mean is 87x at the defaults (10x to
-275x) and 29x with this project held to one thread. The 51 inputs of the local
-set take 6.1 minutes one after another with the original and 3.7 s here; the
-21 of the panel take 2.3 minutes and 2.3 s, 0.8 s of them on Saccharolobus
-solfataricus P2 and its six arrays of about a hundred spacers.
+**Arrays only**, 72 genomes: the geometric mean is 91x at the defaults (26x to
+260x) and 31x with this project held to one thread. The 51 inputs of the local
+set take 6.2 minutes one after another with the original and 3.7 s here; the
+21 of the panel take 2.7 minutes and 2.3 s. Saccharolobus solfataricus P2 and
+its six arrays of about a hundred spacers take the original 21.1 s of those
+and this project 0.8 s.
 
 **Agreement with the original.** With MUSCLE 5.3 on its path, which version
 4.3.2 asks for, the original reports 485 arrays on these 72 inputs. All 485
@@ -303,8 +299,8 @@ Things to keep in mind:
 - The original ran with MacSyFinder 2.1.6 and HMMER 3.4 rather than the 2.1.2
   and 3.3.2 it documents, and with Vmatch compiled from source for ARM. Its
   arrays depend on the MUSCLE it finds: with MUSCLE 3.8 it reports 448 of the
-  485, and a MUSCLE built for Linux may align a few loci differently from the
-  macOS one used here.
+  485 and is faster where arrays are large, and a MUSCLE built for Linux may
+  align a few loci differently from the macOS one used here.
 - Most figures are single runs on one machine. On Apple silicon the HMM
   kernels run their portable code path; the SSE4.1, AVX2 and AVX-512 paths
   used on x86-64 are not measured here.
