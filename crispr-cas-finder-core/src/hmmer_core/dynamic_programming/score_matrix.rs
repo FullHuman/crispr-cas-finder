@@ -3,7 +3,7 @@
 // Port of src/p7_gmx.c
 
 use crate::hmmer_core::errors::HmmerError;
-use ndarray::{Array2, Array3, ArrayView1, ArrayView2, ArrayViewMut1, ArrayViewMut2, s};
+use ndarray::{Array2, Array3, s};
 
 /// Number of main DP cells per node: M, I, D
 pub const NUM_MAIN_STATES: usize = 3;
@@ -89,26 +89,6 @@ impl ScoreMatrix {
         Ok(())
     }
 
-    /// Mark the retained allocation as an empty matrix for reuse.
-    ///
-    /// Call [`Self::resize`] before reading or writing a new active matrix.
-    pub fn reuse(&mut self) {
-        self.num_nodes = 0;
-        self.sequence_length = 0;
-    }
-
-    /// Maximum model width currently retained by this allocation.
-    #[inline]
-    pub fn model_capacity(&self) -> usize {
-        self.alloc_m
-    }
-
-    /// Maximum sequence length currently retained by this allocation.
-    #[inline]
-    pub fn sequence_capacity(&self) -> usize {
-        self.alloc_l
-    }
-
     // ── Named cell accessors ────────────────────────────────────────────────
 
     #[inline]
@@ -153,12 +133,6 @@ impl ScoreMatrix {
         self.special[[i, s]]
     }
 
-    #[inline]
-    pub fn set_special_score(&mut self, i: usize, s: usize, val: f32) {
-        debug_assert!(i <= self.sequence_length && s < NUM_SPECIAL_STATES);
-        self.special[[i, s]] = val;
-    }
-
     // ── Flat access for DP inner loops ──────────────────────────────────────
 
     /// Number of floats between the starts of consecutive main rows.
@@ -176,35 +150,7 @@ impl ScoreMatrix {
             .expect("main matrix is allocated in standard layout")
     }
 
-    // ── Row-level slice accessors ───────────────────────────────────────────
-
-    /// Returns a 2D view of main states at row `i`: shape `(num_nodes+1, 3)`.
-    #[inline]
-    pub fn main_row(&self, i: usize) -> ArrayView2<'_, f32> {
-        debug_assert!(i <= self.sequence_length);
-        self.main.slice(s![i, ..=self.num_nodes, ..])
-    }
-
-    /// Returns a mutable 2D view of main states at row `i`.
-    #[inline]
-    pub fn main_row_mut(&mut self, i: usize) -> ArrayViewMut2<'_, f32> {
-        debug_assert!(i <= self.sequence_length);
-        self.main.slice_mut(s![i, ..=self.num_nodes, ..])
-    }
-
-    /// Returns a 1D view of special states at row `i`: shape `(5,)`.
-    #[inline]
-    pub fn special_row(&self, i: usize) -> ArrayView1<'_, f32> {
-        debug_assert!(i <= self.sequence_length);
-        self.special.slice(s![i, ..])
-    }
-
-    /// Returns a mutable 1D view of special states at row `i`.
-    #[inline]
-    pub fn special_row_mut(&mut self, i: usize) -> ArrayViewMut1<'_, f32> {
-        debug_assert!(i <= self.sequence_length);
-        self.special.slice_mut(s![i, ..])
-    }
+    // ── Row-level accessors ─────────────────────────────────────────────────
 
     /// Fill all main cells (M/I/D) at row `i` with `val`.
     #[inline]
@@ -268,8 +214,6 @@ mod tests {
         let gx = ScoreMatrix::new(100, 200).unwrap();
         assert_eq!(gx.num_nodes, 100);
         assert_eq!(gx.sequence_length, 200);
-        assert_eq!(gx.model_capacity(), 100);
-        assert_eq!(gx.sequence_capacity(), 200);
         assert_eq!(gx.main.dim(), (201, 101, NUM_MAIN_STATES));
         assert_eq!(gx.special.dim(), (201, NUM_SPECIAL_STATES));
     }
@@ -295,17 +239,6 @@ mod tests {
     }
 
     #[test]
-    fn reuse_clears_active_dimensions_but_retains_capacity() {
-        let mut gx = ScoreMatrix::new(10, 20).unwrap();
-        gx.reuse();
-
-        assert_eq!(gx.num_nodes, 0);
-        assert_eq!(gx.sequence_length, 0);
-        assert_eq!(gx.model_capacity(), 10);
-        assert_eq!(gx.sequence_capacity(), 20);
-    }
-
-    #[test]
     fn oversized_dimensions_return_range_errors() {
         assert!(matches!(
             ScoreMatrix::new(usize::MAX, 0),
@@ -324,7 +257,7 @@ mod tests {
         let mut gx = ScoreMatrix::new(10, 10).unwrap();
         gx.set_match_score(1, 2, PI);
         assert!((gx.match_score(1, 2) - PI).abs() < 1e-6);
-        gx.set_special_score(1, EXIT_STATE, E);
+        gx.set_special_row(1, [E, 0.0, 0.0, 0.0, 0.0]);
         assert!((gx.special_score(1, EXIT_STATE) - E).abs() < 1e-6);
     }
 
@@ -349,22 +282,5 @@ mod tests {
         assert!((gx.special_score(1, EXIT_STATE) - 1.0).abs() < 1e-6);
         assert!((gx.special_score(1, N_STATE) - 2.0).abs() < 1e-6);
         assert!((gx.special_score(1, C_STATE) - 5.0).abs() < 1e-6);
-    }
-
-    #[test]
-    fn test_main_row_view() {
-        let mut gx = ScoreMatrix::new(5, 5).unwrap();
-        gx.set_match_score(1, 2, 10.0);
-        let row = gx.main_row(1);
-        assert!((row[[2, MATCH_CELL]] - 10.0).abs() < 1e-6);
-    }
-
-    #[test]
-    fn main_row_views_expose_only_the_active_model_width() {
-        let mut gx = ScoreMatrix::new(10, 5).unwrap();
-        gx.resize(3, 2).unwrap();
-
-        assert_eq!(gx.main_row(1).dim(), (4, NUM_MAIN_STATES));
-        assert_eq!(gx.main_row_mut(1).dim(), (4, NUM_MAIN_STATES));
     }
 }

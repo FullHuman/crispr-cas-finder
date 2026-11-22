@@ -21,106 +21,25 @@ use crate::hmmer_core::logsum;
 use crate::hmmer_core::profile::Profile;
 use crate::hmmer_core::score_matrix::*;
 use crate::hmmer_core::sequence::DigitalSequence;
-use crate::hmmer_core::tophits::TopHits;
 use std::marker::PhantomData;
 use std::ops::ControlFlow;
 use std::sync::Arc;
 
-/// Reporting and inclusion thresholds.
-#[derive(Debug, Clone)]
-pub struct Thresholds {
-    // Reporting thresholds
-    pub by_e: bool,
-    pub evalue: f64,
-    pub bitscore: f64,
-    pub domain_by_evalue: bool,
-    pub domain_evalue: f64,
-    pub domain_bitscore: f64,
-    pub use_bit_cutoffs: bool,
-
-    // Inclusion thresholds
-    pub inclusion_by_evalue: bool,
-    pub inclusion_evalue: f64,
-    pub inclusion_bitscore: f64,
-    pub inclusion_domain_by_evalue: bool,
-    pub inclusion_domain_evalue: f64,
-    pub inclusion_domain_bitscore: f64,
-}
-
-impl Default for Thresholds {
-    fn default() -> Self {
-        Thresholds {
-            by_e: true,
-            evalue: 10.0,
-            bitscore: 0.0,
-            domain_by_evalue: true,
-            domain_evalue: 10.0,
-            domain_bitscore: 0.0,
-            use_bit_cutoffs: false,
-            inclusion_by_evalue: true,
-            inclusion_evalue: 0.01,
-            inclusion_bitscore: 0.0,
-            inclusion_domain_by_evalue: true,
-            inclusion_domain_evalue: 0.01,
-            inclusion_domain_bitscore: 0.0,
-        }
-    }
-}
-
 /// Pipeline accounting counters.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default)]
 pub struct PipelineStats {
-    pub num_models: u64,
     pub num_sequences: u64,
-    pub num_residues: u64,
-    pub num_nodes: u64,
     pub sequences_past_msv: u64,
     pub sequences_past_bias: u64,
     pub sequences_past_viterbi: u64,
     pub sequences_past_forward: u64,
     pub sequences_output: u64,
-    pub residues_past_msv: u64,
-    pub residues_past_bias: u64,
-    pub residues_past_viterbi: u64,
-    pub residues_past_forward: u64,
-    pub residues_output: u64,
 }
 
-impl PipelineStats {
-    /// Merge accounting from another stats instance.
-    pub fn merge(&mut self, other: &PipelineStats) {
-        self.num_models += other.num_models;
-        self.num_sequences += other.num_sequences;
-        self.num_residues += other.num_residues;
-        self.num_nodes += other.num_nodes;
-        self.sequences_past_msv += other.sequences_past_msv;
-        self.sequences_past_bias += other.sequences_past_bias;
-        self.sequences_past_viterbi += other.sequences_past_viterbi;
-        self.sequences_past_forward += other.sequences_past_forward;
-        self.sequences_output += other.sequences_output;
-        self.residues_past_msv += other.residues_past_msv;
-        self.residues_past_bias += other.residues_past_bias;
-        self.residues_past_viterbi += other.residues_past_viterbi;
-        self.residues_past_forward += other.residues_past_forward;
-        self.residues_output += other.residues_output;
-    }
-
-    /// Reset all accounting counters.
-    pub fn reuse(&mut self) {
-        *self = Self::default();
-    }
-}
-
-/// Mergeable execution metrics for a search worker.
+/// Execution metrics of a search worker.
 #[derive(Debug, Clone, Default)]
 pub struct SearchMetrics {
     pub stats: PipelineStats,
-}
-
-impl SearchMetrics {
-    pub fn merge(&mut self, other: &SearchMetrics) {
-        self.stats.merge(&other.stats);
-    }
 }
 
 /// Filter configuration for the search executor.
@@ -242,14 +161,6 @@ impl SearchQuery {
             optimized_template,
         })
     }
-
-    pub fn profile(&self) -> &Profile {
-        &self.profile_template
-    }
-
-    pub fn background(&self) -> &BackgroundModel {
-        &self.background_template
-    }
 }
 
 #[derive(Debug)]
@@ -293,11 +204,6 @@ impl SearchPlanBuilder {
         self
     }
 
-    pub fn domain_config(mut self, domain_config: DomainConfig) -> Self {
-        self.domain_config = domain_config;
-        self
-    }
-
     pub fn build(self) -> Result<SearchPlan, HmmerError> {
         self.filters.validate()?;
         Ok(SearchPlan {
@@ -323,7 +229,6 @@ impl Default for CapacityHints {
 }
 
 /// The reason a sequence stopped before becoming a hit candidate.
-#[cfg_attr(feature = "hmmer-serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FilterReason {
     Msv,
@@ -335,10 +240,8 @@ pub enum FilterReason {
 }
 
 /// Lightweight per-sequence execution trace for debugging and tests.
-#[cfg_attr(feature = "hmmer-serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Default)]
 pub struct SearchTrace {
-    pub sequence_length: usize,
     pub null_score: Option<f32>,
     pub bias_filter_score: Option<f32>,
     /// What HMMER's MSV filter returns, the score the MSV and bias filters
@@ -357,13 +260,6 @@ pub struct SearchTrace {
 }
 
 impl SearchTrace {
-    fn new(sequence_length: usize) -> Self {
-        Self {
-            sequence_length,
-            ..Self::default()
-        }
-    }
-
     fn into_filtered_report(mut self, reason: FilterReason) -> SearchReport {
         self.filter_reason = Some(reason);
         SearchReport {
@@ -407,7 +303,6 @@ struct ScoreHitRequest<'a> {
 /// Reusable per-thread search executor.
 #[derive(Debug)]
 pub struct SearchWorker {
-    plan: Arc<SearchPlanInner>,
     engine: SearchEngine,
     state: QueryState,
 }
@@ -421,7 +316,6 @@ impl SearchWorker {
         engine.msv_threshold = plan.filters.msv_threshold;
         engine.viterbi_threshold = plan.filters.viterbi_threshold;
         engine.forward_threshold = plan.filters.forward_threshold;
-        engine.thresholds.by_e = false;
         engine.domain_config = plan.domain_config.clone();
         engine.odds_tables = OddsTables::new(&plan.query.profile_template);
         engine.oprofile = Some(plan.query.optimized_template.clone());
@@ -432,7 +326,6 @@ impl SearchWorker {
         background.set_length(hints.target_length);
 
         Ok(Self {
-            plan,
             engine,
             state: QueryState {
                 profile,
@@ -455,28 +348,12 @@ impl SearchWorker {
             ControlFlow::Continue(decoded) => decoded,
         };
 
-        Ok(decoded.score()?.finish())
-    }
-
-    pub fn metrics(&self) -> SearchMetrics {
-        SearchMetrics {
-            stats: self.engine.stats.clone(),
-        }
+        Ok(decoded.score().finish())
     }
 
     pub fn into_metrics(self) -> SearchMetrics {
         SearchMetrics {
             stats: self.engine.stats,
-        }
-    }
-
-    pub fn reset_metrics(&mut self) {
-        self.engine.stats = PipelineStats::default();
-    }
-
-    pub fn plan(&self) -> SearchPlan {
-        SearchPlan {
-            inner: Arc::clone(&self.plan),
         }
     }
 }
@@ -513,7 +390,6 @@ impl<'w, 's> TargetRun<'w, 's, Prepared> {
     ) -> Result<Self, HmmerError> {
         let sequence_length = sequence.len();
         worker.engine.stats.num_sequences += 1;
-        worker.engine.stats.num_residues += sequence_length as u64;
 
         let null_score = worker.engine.prepare_target(
             &mut worker.state.profile,
@@ -522,8 +398,10 @@ impl<'w, 's> TargetRun<'w, 's, Prepared> {
             sequence_length,
         );
 
-        let mut trace = SearchTrace::new(sequence_length);
-        trace.null_score = Some(null_score);
+        let trace = SearchTrace {
+            null_score: Some(null_score),
+            ..SearchTrace::default()
+        };
 
         Ok(Self {
             worker,
@@ -589,7 +467,6 @@ impl<'w, 's> TargetRun<'w, 's, Prepared> {
             return ControlFlow::Break(self.trace.into_filtered_report(FilterReason::Msv));
         }
         engine.stats.sequences_past_msv += 1;
-        engine.stats.residues_past_msv += length as u64;
 
         let filter_score = if engine.do_biasfilter {
             let score = self.worker.state.background.filter_score(residues, length);
@@ -603,7 +480,6 @@ impl<'w, 's> TargetRun<'w, 's, Prepared> {
             self.null_score
         };
         engine.stats.sequences_past_bias += 1;
-        engine.stats.residues_past_bias += length as u64;
 
         if pvalue > engine.viterbi_threshold {
             let viterbi_score = viterbi_filter::viterbi_filter_with(
@@ -623,7 +499,6 @@ impl<'w, 's> TargetRun<'w, 's, Prepared> {
             }
         }
         engine.stats.sequences_past_viterbi += 1;
-        engine.stats.residues_past_viterbi += length as u64;
 
         let forward_raw_score = simd_fwd::forward_filter(residues, length, om);
         self.trace.forward_raw_score = Some(forward_raw_score);
@@ -636,7 +511,6 @@ impl<'w, 's> TargetRun<'w, 's, Prepared> {
             return ControlFlow::Break(self.trace.into_filtered_report(FilterReason::Forward));
         }
         engine.stats.sequences_past_forward += 1;
-        engine.stats.residues_past_forward += length as u64;
 
         ControlFlow::Continue(TargetRun {
             worker: self.worker,
@@ -692,38 +566,23 @@ impl<'w, 's> TargetRun<'w, 's, PassedFilters> {
 }
 
 impl<'w, 's> TargetRun<'w, 's, Decoded> {
-    fn score(mut self) -> Result<TargetRun<'w, 's, Scored>, HmmerError> {
-        let mut hits = TopHits::new();
+    fn score(mut self) -> TargetRun<'w, 's, Scored> {
         let mut domain_result = self
             .domain_result
             .take()
             .expect("decoded phase must have a domain result");
 
-        let added = self.worker.engine.score_and_add_hit(
-            &mut hits,
-            ScoreHitRequest {
-                profile: &self.worker.state.profile,
-                background: &self.worker.state.background,
-                sequence: self.sequence,
-                domain_result: &mut domain_result,
-                null_score: self.null_score,
-                forward_raw_score: self.forward_raw_score,
-                sequence_length: self.sequence_length,
-            },
-        );
-        if !added || hits.is_empty() {
-            return Err(HmmerError::Internal(
-                "decoded search hit unexpectedly vanished during scoring".into(),
-            ));
-        }
+        let hit = self.worker.engine.score_hit(ScoreHitRequest {
+            profile: &self.worker.state.profile,
+            background: &self.worker.state.background,
+            sequence: self.sequence,
+            domain_result: &mut domain_result,
+            null_score: self.null_score,
+            forward_raw_score: self.forward_raw_score,
+            sequence_length: self.sequence_length,
+        });
 
-        let hit = hits
-            .hits
-            .into_iter()
-            .next()
-            .expect("score_and_add_hit should have produced one hit");
-
-        Ok(TargetRun {
+        TargetRun {
             worker: self.worker,
             sequence: self.sequence,
             sequence_length: self.sequence_length,
@@ -733,7 +592,7 @@ impl<'w, 's> TargetRun<'w, 's, Decoded> {
             hit: Some(hit),
             trace: self.trace,
             _phase: PhantomData,
-        })
+        }
     }
 }
 
@@ -749,12 +608,6 @@ impl<'w, 's> TargetRun<'w, 's, Scored> {
 /// The accelerated comparison pipeline.
 #[derive(Debug)]
 struct SearchEngine {
-    // Reporting and inclusion thresholds
-    thresholds: Thresholds,
-
-    // Search space
-    search_space: f64,
-
     // Filter thresholds
     do_max: bool,
     do_biasfilter: bool,
@@ -799,8 +652,6 @@ impl SearchEngine {
     /// Create a new pipeline with default parameters.
     fn new(m: usize, sequence_length: usize) -> Self {
         SearchEngine {
-            thresholds: Thresholds::default(),
-            search_space: 0.0,
             do_max: false,
             do_biasfilter: true,
             msv_threshold: DEFAULT_MSV_THRESHOLD,
@@ -829,7 +680,7 @@ impl SearchEngine {
         )
     }
 
-    fn score_and_add_hit(&mut self, top_hits: &mut TopHits, request: ScoreHitRequest<'_>) -> bool {
+    fn score_hit(&mut self, request: ScoreHitRequest<'_>) -> Hit {
         let ScoreHitRequest {
             profile,
             background,
@@ -866,9 +717,6 @@ impl SearchEngine {
         }
 
         // ---- Sequence-level scoring ----
-        // pre_score: Forward score without null2 correction
-        let pre_score = (forward_raw_score - null_score) / LOG2;
-
         // seqbias: computed from domain_def->n2sc (per-position null2 log scores)
         let seqbias_sum: f32 = self.domain_workspace.null2_scores[1..=sequence_length]
             .iter()
@@ -893,72 +741,28 @@ impl SearchEngine {
         debug_assert!(sum_ld <= sequence_length);
         sum_raw += sequence_length.saturating_sub(sum_ld) as f32
             * (sequence_length as f32 / (sequence_length as f32 + SCORE_LENGTH_PRIOR_OFFSET)).ln();
-        let pre2_score = (sum_raw - null_score) / LOG2;
         let sum_score = (sum_raw - null_score - sum_seqbias) / LOG2;
 
         // Use reconstruction score if better
-        let mut final_pre_score = pre_score;
         if sum_ld > 0 && sum_score > seq_score {
             seq_score = sum_score;
-            final_pre_score = pre2_score;
         }
-
-        // E-value computation
-        let z = if self.search_space > 0.0 {
-            self.search_space
-        } else {
-            self.stats.num_sequences.max(1) as f64
-        };
 
         let log_pvalue = Self::forward_pvalue(profile, seq_score)
             .max(MIN_PVALUE_CLAMP)
             .ln();
 
-        // Reporting threshold check
-        let evalue = (log_pvalue + z.ln()).exp();
-        if self.thresholds.by_e && evalue > self.thresholds.evalue {
-            return false;
-        }
-
-        // ---- Create hit ----
-        let hit = top_hits.create_next_hit();
-        hit.name = sequence.name.clone();
-        hit.accession = sequence.accession.clone();
-        hit.description = sequence.description.clone();
-        hit.score = seq_score;
-        hit.pre_score = final_pre_score;
-        hit.sum_score = sum_score;
-        hit.log_pvalue = log_pvalue;
-        hit.pre_log_pvalue = log_pvalue;
-        hit.sum_log_pvalue = log_pvalue;
-        hit.sortkey = -log_pvalue;
-        hit.num_expected = domain_result.num_expected;
-        hit.num_regions = domain_result.num_regions;
-        hit.num_clustered = domain_result.num_clustered;
-        hit.num_overlaps = domain_result.num_overlaps;
-        hit.num_envelopes = domain_result.num_envelopes;
-        hit.num_domains = num_domains;
-        hit.seqidx = if sequence.database_index >= 0 {
-            Some(sequence.database_index as usize)
-        } else {
-            None
-        };
-
-        // Copy domain data
-        let mut best_score = f32::NEG_INFINITY;
-        let mut best_d = None;
-        for (d, dom) in domain_result.domains.drain(..).enumerate() {
-            if dom.bitscore > best_score {
-                best_score = dom.bitscore;
-                best_d = Some(d);
-            }
-            hit.domains.push(dom);
-        }
-        hit.best_domain = best_d;
-
         self.stats.sequences_output += 1;
-        self.stats.residues_output += sequence_length as u64;
-        true
+        Hit {
+            name: sequence.name.clone(),
+            score: seq_score,
+            log_pvalue,
+            num_regions: domain_result.num_regions,
+            num_clustered: domain_result.num_clustered,
+            num_overlaps: domain_result.num_overlaps,
+            num_envelopes: domain_result.num_envelopes,
+            domains: std::mem::take(&mut domain_result.domains),
+        }
     }
 
     fn prepare_target(
@@ -1002,7 +806,6 @@ impl SearchEngine {
         sequence_length: usize,
         forward_raw_score: f32,
     ) -> Result<Option<(f32, crate::hmmer_core::domaindef::DomainResult)>, HmmerError> {
-        self.domain_workspace.reuse();
         self.domain_workspace.grow_to(sequence_length);
 
         self.posterior_matrix
@@ -1063,11 +866,7 @@ mod tests {
             .collect();
         DigitalSequence {
             name: "consensus".to_string(),
-            accession: None,
-            description: None,
-            source_length: residues.len() as i64,
             residues,
-            database_index: -1,
         }
     }
 
@@ -1095,7 +894,6 @@ mod tests {
             &background,
             &mut profile,
             target_length,
-            crate::hmmer_core::config::SearchMode::Local,
         );
         (hmm, background, profile)
     }
@@ -1153,40 +951,10 @@ mod tests {
     }
 
     #[test]
-    fn test_pipeline_stats_reuse_resets_every_counter() {
-        let mut stats = PipelineStats {
-            num_models: 1,
-            num_sequences: 2,
-            num_residues: 3,
-            num_nodes: 4,
-            sequences_past_msv: 5,
-            sequences_past_bias: 6,
-            sequences_past_viterbi: 7,
-            sequences_past_forward: 8,
-            sequences_output: 9,
-            residues_past_msv: 10,
-            residues_past_bias: 11,
-            residues_past_viterbi: 12,
-            residues_past_forward: 13,
-            residues_output: 14,
-        };
-
-        stats.reuse();
-
-        assert_eq!(stats, PipelineStats::default());
-    }
-
-    #[test]
     fn test_search_query_rejects_uncalibrated_profile() {
         let abc = Alphabet::amino();
         let mut rng = XorShift64::new(5);
-        let (_, bg, gm) = setup_profile(
-            &mut rng,
-            8,
-            32,
-            &abc,
-            crate::hmmer_core::config::SearchMode::Local,
-        );
+        let (_, bg, gm) = setup_profile(&mut rng, 8, 32, &abc);
 
         let error = SearchQuery::from_configured_profile(gm, bg).unwrap_err();
         assert!(error.to_string().contains("calibration parameter"));
@@ -1196,13 +964,7 @@ mod tests {
     fn test_search_plan_spawns_worker() {
         let abc = Alphabet::amino();
         let mut rng = XorShift64::new(7);
-        let (_, bg, mut gm) = setup_profile(
-            &mut rng,
-            8,
-            32,
-            &abc,
-            crate::hmmer_core::config::SearchMode::Local,
-        );
+        let (_, bg, mut gm) = setup_profile(&mut rng, 8, 32, &abc);
         calibrate(&mut gm);
 
         let query = SearchQuery::from_configured_profile(gm, bg).unwrap();
@@ -1219,13 +981,7 @@ mod tests {
     fn test_search_plan_rejects_invalid_filter_policy() {
         let abc = Alphabet::amino();
         let mut rng = XorShift64::new(9);
-        let (_, bg, mut gm) = setup_profile(
-            &mut rng,
-            8,
-            32,
-            &abc,
-            crate::hmmer_core::config::SearchMode::Local,
-        );
+        let (_, bg, mut gm) = setup_profile(&mut rng, 8, 32, &abc);
         calibrate(&mut gm);
         let query = SearchQuery::from_configured_profile(gm, bg).unwrap();
         let filters = FilterPolicy {
@@ -1240,23 +996,13 @@ mod tests {
     fn test_search_worker_returns_report() {
         let abc = Alphabet::amino();
         let mut rng = XorShift64::new(11);
-        let (_, bg, mut gm) = setup_profile(
-            &mut rng,
-            8,
-            32,
-            &abc,
-            crate::hmmer_core::config::SearchMode::Local,
-        );
+        let (_, bg, mut gm) = setup_profile(&mut rng, 8, 32, &abc);
         calibrate(&mut gm);
         let residues =
             random_digital_seq(&mut rng, &bg.residue_frequencies, abc.canonical_size, 32);
         let sequence = DigitalSequence {
             name: "random-seq".to_string(),
-            accession: None,
-            description: None,
             residues,
-            source_length: 32,
-            database_index: -1,
         };
 
         let query = SearchQuery::from_configured_profile(gm, bg).unwrap();
@@ -1266,7 +1012,6 @@ mod tests {
             .unwrap();
 
         let report = worker.search(&sequence).unwrap();
-        assert_eq!(report.trace.sequence_length, 32);
         assert!(report.trace.null_score.is_some());
         // Without `max_mode` every sequence is scored with HMMER's MSV filter.
         assert!(report.trace.msv_filter_score.is_some());
@@ -1279,13 +1024,7 @@ mod tests {
     fn test_max_mode_computes_no_filter_before_the_forward_pass() {
         let abc = Alphabet::amino();
         let mut rng = XorShift64::new(13);
-        let (_, bg, mut gm) = setup_profile(
-            &mut rng,
-            8,
-            32,
-            &abc,
-            crate::hmmer_core::config::SearchMode::Local,
-        );
+        let (_, bg, mut gm) = setup_profile(&mut rng, 8, 32, &abc);
         calibrate(&mut gm);
         // No MSV score reaches a P-value under the threshold.
         gm.ev_params[EvParam::MsvMu.idx()] = 1_000_000.0;
@@ -1293,11 +1032,7 @@ mod tests {
             random_digital_seq(&mut rng, &bg.residue_frequencies, abc.canonical_size, 32);
         let sequence = DigitalSequence {
             name: "max-mode-seq".to_string(),
-            accession: None,
-            description: None,
             residues,
-            source_length: 32,
-            database_index: -1,
         };
         let query = SearchQuery::from_configured_profile(gm, bg).unwrap();
 
@@ -1328,37 +1063,26 @@ mod tests {
             )
         ));
         // The sequence counts as past every stage.
-        let stats = worker.metrics().stats;
+        let stats = worker.into_metrics().stats;
         assert_eq!(stats.num_sequences, 1);
         assert_eq!(stats.sequences_past_msv, 1);
         assert_eq!(stats.sequences_past_bias, 1);
         assert_eq!(stats.sequences_past_viterbi, 1);
         assert_eq!(stats.sequences_past_forward, 1);
-        assert_eq!(stats.residues_past_forward, 32);
     }
 
     #[test]
     fn test_msv_threshold_filters_a_sequence_end_to_end() {
         let abc = Alphabet::amino();
         let mut rng = XorShift64::new(17);
-        let (_, bg, mut gm) = setup_profile(
-            &mut rng,
-            8,
-            32,
-            &abc,
-            crate::hmmer_core::config::SearchMode::Local,
-        );
+        let (_, bg, mut gm) = setup_profile(&mut rng, 8, 32, &abc);
         calibrate(&mut gm);
         gm.ev_params[EvParam::MsvMu.idx()] = 1_000_000.0;
         let residues =
             random_digital_seq(&mut rng, &bg.residue_frequencies, abc.canonical_size, 32);
         let sequence = DigitalSequence {
             name: "filtered-seq".to_string(),
-            accession: None,
-            description: None,
             residues,
-            source_length: 32,
-            database_index: -1,
         };
         let query = SearchQuery::from_configured_profile(gm, bg).unwrap();
         let plan = SearchPlan::builder(query).build().unwrap();

@@ -139,22 +139,6 @@ impl BackgroundModel {
         }
     }
 
-    /// Create a background model with uniform frequencies.
-    pub fn create_uniform(abc: &Alphabet) -> Self {
-        let canonical_size = abc.canonical_size;
-        let uniform = 1.0 / canonical_size as f32;
-        let f = vec![uniform; canonical_size];
-        let fhmm = BiasFilterHmm::new(abc.full_size);
-
-        BackgroundModel {
-            residue_frequencies: f,
-            null1_transition_prob: DEFAULT_P1,
-            bias_filter_hmm: fhmm,
-            omega: DEFAULT_OMEGA,
-            alphabet: abc.clone(),
-        }
-    }
-
     /// Set the geometric null model length distribution to mean of L residues.
     ///
     /// As `p7_bg_SetLength()`, this sets both transitions out of the normal
@@ -359,21 +343,6 @@ impl BackgroundModel {
         let p1 = self.null1_transition_prob;
         fused_mul_add(sequence_length as f32, p1.ln(), forward_score) + (1.0 - p1).ln()
     }
-
-    /// Dump the background model for debugging.
-    pub fn dump(&self, fp: &mut dyn std::io::Write) -> std::io::Result<()> {
-        writeln!(fp, "Background model:")?;
-        for (i, &freq) in self.residue_frequencies.iter().enumerate() {
-            write!(fp, "  f[{:2}] = {:.6}", i, freq)?;
-            if i < self.alphabet.symbols.len() {
-                write!(fp, " ({})", self.alphabet.symbols[i] as char)?;
-            }
-            writeln!(fp)?;
-        }
-        writeln!(fp, "  p1    = {:.6}", self.null1_transition_prob)?;
-        writeln!(fp, "  omega = {:.6}", self.omega)?;
-        Ok(())
-    }
 }
 
 // ---------------------------------------------------------------
@@ -394,17 +363,6 @@ mod tests {
         let sum: f32 = background.residue_frequencies.iter().sum();
         assert!((sum - 1.0).abs() < 0.001);
         assert!((background.null1_transition_prob - 350.0 / 351.0).abs() < 1e-6);
-    }
-
-    #[test]
-    fn test_create_uniform() {
-        let abc = Alphabet::dna();
-        let background = BackgroundModel::create_uniform(&abc);
-
-        assert_eq!(background.residue_frequencies.len(), 4);
-        for &freq in &background.residue_frequencies {
-            assert!((freq - 0.25).abs() < 1e-6);
-        }
     }
 
     #[test]
@@ -527,7 +485,8 @@ mod tests {
     #[test]
     fn test_filter_score_matches_direct_two_state_forward_sum() {
         let abc = Alphabet::dna();
-        let mut background = BackgroundModel::create_uniform(&abc);
+        // Uniform frequencies: the default of a nucleotide alphabet.
+        let mut background = BackgroundModel::new(&abc);
         background.set_filter(80, &[1.0, 0.0, 0.0, 0.0]).unwrap();
         background.set_length(2);
 

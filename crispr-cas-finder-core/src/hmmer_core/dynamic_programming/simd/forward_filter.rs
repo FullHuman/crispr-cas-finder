@@ -204,13 +204,7 @@ mod tests {
         let hmm = hmm_sample(&mut rng, m, &abc);
         let bg = BackgroundModel::new(&abc);
         let mut gm = Profile::new(m, &abc);
-        modelconfig::profile_config(
-            &hmm,
-            &bg,
-            &mut gm,
-            l,
-            crate::hmmer_core::config::SearchMode::Local,
-        );
+        modelconfig::profile_config(&hmm, &bg, &mut gm, l);
         modelconfig::reconfigure_length(&mut gm, l);
 
         let mut om = OptimizedProfile::from_profile(&gm);

@@ -40,7 +40,7 @@ impl SpecialScores {
     }
 }
 
-/// A scoring profile, configured from an HMM for a particular search mode and target length.
+/// A scoring profile, configured from an HMM for local alignment and a target length.
 ///
 /// Corresponds to P7_PROFILE in the C code.
 ///
@@ -56,28 +56,13 @@ pub struct Profile {
     residue_score_stride: usize,   // (m+1) * P7P_NR per residue
     pub special_scores: SpecialScores, // special transitions
 
-    pub mode: SearchMode,     // configured algorithm mode
     pub target_length: usize, // current target seq length
     pub num_nodes: usize,     // number of nodes
-    pub max_length: usize,    // calculated upper bound on emitted seq length
     pub expected_j_uses: f32, // expected # of J uses
 
     // Info copied from parent HMM
-    pub name: String,
-    pub accession: Option<String>,
-    pub description: Option<String>,
-    pub reference_annotation: Option<Vec<u8>>,
-    pub model_mask: Option<Vec<u8>>,
-    pub consensus_structure: Option<Vec<u8>>,
-    pub consensus: Option<Vec<u8>>,
     pub ev_params: [f32; NUM_EV_PARAMS],
-    pub score_cutoffs: [f32; NUM_CUTOFFS],
     pub model_composition: [f32; MAX_CANONICAL_ALPHABET],
-    pub model_file_offset: Option<i64>,
-    pub filter_file_offset: Option<i64>,
-    pub profile_file_offset: Option<i64>,
-    pub residue_file_offset: Option<i64>,
-    pub end_file_offset: Option<i64>,
 
     pub alphabet: Alphabet,
 }
@@ -92,60 +77,16 @@ impl Profile {
             residue_scores: Arc::new(vec![0.0; kp * rsc_stride]),
             residue_score_stride: rsc_stride,
             special_scores: SpecialScores::new(),
-            mode: SearchMode::Local,
             target_length: 0,
             num_nodes: m,
-            max_length: 0,
             expected_j_uses: 0.0,
-            name: String::new(),
-            accession: None,
-            description: None,
-            reference_annotation: None,
-            model_mask: None,
-            consensus_structure: None,
-            consensus: None,
             ev_params: [EV_PARAM_UNSET; NUM_EV_PARAMS],
-            score_cutoffs: [CUTOFF_UNSET; NUM_CUTOFFS],
             model_composition: [COMPOSITION_UNSET; MAX_CANONICAL_ALPHABET],
-            model_file_offset: None,
-            filter_file_offset: None,
-            profile_file_offset: None,
-            residue_file_offset: None,
-            end_file_offset: None,
             alphabet: abc.clone(),
         }
     }
 
-    /// Check if profile is in local mode
-    pub fn is_local(&self) -> bool {
-        self.mode.is_local()
-    }
-
-    /// Check if profile is in multihit mode
-    pub fn is_multihit(&self) -> bool {
-        self.mode.is_multihit()
-    }
-
-    /// Reuse the profile (reset for new configuration).
-    pub fn reuse(&mut self) {
-        // Retain score storage; profile_config overwrites the active dimensions.
-        let transitions = Arc::clone(&self.transition_scores);
-        let residues = Arc::clone(&self.residue_scores);
-        let stride = self.residue_score_stride;
-        *self = Self::new(0, &self.alphabet);
-        self.transition_scores = transitions;
-        self.residue_scores = residues;
-        self.residue_score_stride = stride;
-    }
-
     // -- Transition score accessors --
-
-    /// Transition scores for node k (8 values). k is 1-based HMM node; stored at (k-1)*NTRANS.
-    #[inline]
-    pub fn transition_scores_for_node(&self, k: usize) -> &[f32] {
-        let start = (k - 1) * PROFILE_NUM_TRANSITIONS;
-        &self.transition_scores[start..start + PROFILE_NUM_TRANSITIONS]
-    }
 
     /// Mutable transition scores for node k.  Panics if the score array is shared.
     #[inline]
@@ -206,70 +147,6 @@ impl Profile {
                 .expect("Profile::resize_residue_scores called after clone");
             rs.resize(needed, 0.0);
         }
-    }
-
-    /// Get the size of this profile in bytes (approximate).
-    pub fn sizeof_approx(&self) -> usize {
-        std::mem::size_of::<Self>()
-            + self.transition_scores.len() * std::mem::size_of::<f32>()
-            + self.residue_scores.len() * std::mem::size_of::<f32>()
-    }
-
-    /// Compare configured scores and model metadata within an absolute tolerance.
-    /// Unused allocation capacity and file offsets do not affect equivalence.
-    pub fn compare(&self, other: &Profile, tol: f32) -> bool {
-        fn close(a: f32, b: f32, tol: f32) -> bool {
-            a == b || (a.is_finite() && b.is_finite() && (a - b).abs() <= tol)
-        }
-        if !tol.is_finite()
-            || tol < 0.0
-            || self.num_nodes != other.num_nodes
-            || self.mode != other.mode
-            || self.target_length != other.target_length
-            || self.max_length != other.max_length
-            || self.alphabet.kind != other.alphabet.kind
-            || self.alphabet.full_size != other.alphabet.full_size
-            || self.name != other.name
-            || self.accession != other.accession
-            || self.description != other.description
-            || self.consensus != other.consensus
-            || self.reference_annotation != other.reference_annotation
-            || self.model_mask != other.model_mask
-            || self.consensus_structure != other.consensus_structure
-        {
-            return false;
-        }
-        let count = self.num_nodes * PROFILE_NUM_TRANSITIONS;
-        if !self.transition_scores[..count]
-            .iter()
-            .zip(&other.transition_scores[..count])
-            .all(|(&a, &b)| close(a, b, tol))
-        {
-            return false;
-        }
-        let count = (self.num_nodes + 1) * PROFILE_NUM_EMISSIONS;
-        for residue in 0..self.alphabet.full_size {
-            if !self.residue_scores_for(residue)[..count]
-                .iter()
-                .zip(&other.residue_scores_for(residue)[..count])
-                .all(|(&a, &b)| close(a, b, tol))
-            {
-                return false;
-            }
-        }
-        let specials = |s: &SpecialScores| {
-            [
-                s.e_loop, s.e_move, s.n_loop, s.n_move, s.j_loop, s.j_move, s.c_loop, s.c_move,
-            ]
-        };
-        specials(&self.special_scores)
-            .iter()
-            .zip(specials(&other.special_scores))
-            .chain(self.ev_params.iter().zip(other.ev_params))
-            .chain(self.score_cutoffs.iter().zip(other.score_cutoffs))
-            .chain(self.model_composition.iter().zip(other.model_composition))
-            .all(|(&a, b)| close(a, b, tol))
-            && close(self.expected_j_uses, other.expected_j_uses, tol)
     }
 
     // -- Length model reconfiguration --
@@ -346,26 +223,11 @@ impl Clone for Profile {
             residue_scores: Arc::clone(&self.residue_scores),
             residue_score_stride: self.residue_score_stride,
             special_scores: self.special_scores,
-            mode: self.mode,
             target_length: self.target_length,
             num_nodes: self.num_nodes,
-            max_length: self.max_length,
             expected_j_uses: self.expected_j_uses,
-            name: self.name.clone(),
-            accession: self.accession.clone(),
-            description: self.description.clone(),
-            reference_annotation: self.reference_annotation.clone(),
-            model_mask: self.model_mask.clone(),
-            consensus_structure: self.consensus_structure.clone(),
-            consensus: self.consensus.clone(),
             ev_params: self.ev_params,
-            score_cutoffs: self.score_cutoffs,
             model_composition: self.model_composition,
-            model_file_offset: self.model_file_offset,
-            filter_file_offset: self.filter_file_offset,
-            profile_file_offset: self.profile_file_offset,
-            residue_file_offset: self.residue_file_offset,
-            end_file_offset: self.end_file_offset,
             alphabet: self.alphabet.clone(),
         }
     }
@@ -374,36 +236,6 @@ impl Clone for Profile {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn compare_checks_emissions_specials_and_infinities() {
-        let abc = Alphabet::amino();
-        let mut a = Profile::new(4, &abc);
-        let mut b = Profile::new(4, &abc);
-        assert!(a.compare(&b, 0.0));
-        b.residue_scores_for_mut(0)[2] = 1.0;
-        assert!(!a.compare(&b, 0.0));
-        a.residue_scores_for_mut(0)[2] = 1.0;
-        b.special_scores.e_loop = f32::NEG_INFINITY;
-        assert!(!a.compare(&b, 0.0));
-        a.special_scores.e_loop = f32::NEG_INFINITY;
-        assert!(a.compare(&b, 0.0));
-        b.special_scores.e_loop = f32::NAN;
-        assert!(!a.compare(&b, 0.0));
-    }
-
-    #[test]
-    fn reuse_resets_metadata() {
-        let mut profile = Profile::new(4, &Alphabet::amino());
-        profile.name = "old".into();
-        profile.ev_params[0] = 42.0;
-        profile.reconfig_multihit(100);
-        profile.reuse();
-        assert!(profile.name.is_empty());
-        assert_eq!(profile.ev_params, [EV_PARAM_UNSET; NUM_EV_PARAMS]);
-        assert_eq!(profile.target_length, 0);
-        assert_eq!(profile.num_nodes, 0);
-    }
 
     #[test]
     fn test_create() {

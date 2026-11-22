@@ -1,7 +1,6 @@
 use crispr_cas_finder_core::hmmer_core::{
     alphabet::Alphabet,
     background::BackgroundModel,
-    config::SearchMode,
     hit::Hit,
     modelconfig,
     pipeline::search::{CapacityHints, SearchOutcome, SearchPlan, SearchQuery, SearchReport},
@@ -18,17 +17,11 @@ fn search_bundled_profile(profile_file: &str, name: &str, sequence: &[u8]) -> Se
         .join(profile_file);
     let mut hmm_file = HmmFile::open(profile_path.to_str().unwrap(), None).unwrap();
     let (alphabet, hmm) = hmm_file.read().unwrap();
-    let target = DigitalSequence::from_bytes(name, "", sequence, &alphabet);
+    let target = DigitalSequence::from_bytes(name, sequence, &alphabet);
 
     let background = BackgroundModel::new(&Alphabet::amino());
     let mut profile = Profile::new(hmm.num_nodes, &alphabet);
-    modelconfig::profile_config(
-        &hmm,
-        &background,
-        &mut profile,
-        target.len(),
-        SearchMode::Local,
-    );
+    modelconfig::profile_config(&hmm, &background, &mut profile, target.len());
     let query = SearchQuery::from_configured_profile(profile, background).unwrap();
     let plan = SearchPlan::builder(query).build().unwrap();
     let mut worker = plan

@@ -14,7 +14,7 @@
 use crispr_cas_finder_core::hmmer_core::{
     alphabet::Alphabet,
     background::BackgroundModel,
-    config::{EvParam, SearchMode},
+    config::EvParam,
     evalues::{filter_bit_score, gumbel_survival},
     modelconfig,
     pipeline::search::{
@@ -208,7 +208,7 @@ fn bundled_profile(file: &str, length: usize) -> (Alphabet, BackgroundModel, Pro
     let (alphabet, hmm) = hmm_file.read().unwrap();
     let background = BackgroundModel::new(&Alphabet::amino());
     let mut profile = Profile::new(hmm.num_nodes, &alphabet);
-    modelconfig::profile_config(&hmm, &background, &mut profile, length, SearchMode::Local);
+    modelconfig::profile_config(&hmm, &background, &mut profile, length);
     (alphabet, background, profile)
 }
 
@@ -221,7 +221,7 @@ fn filter_scores_are_those_of_hmmer_3_4() {
         let name = format!("{} on gene {}", case.profile, case.gene);
         let length = case.sequence.len();
         let (alphabet, mut background, profile) = bundled_profile(case.profile, length);
-        let target = DigitalSequence::from_bytes("target", "", case.sequence, &alphabet);
+        let target = DigitalSequence::from_bytes("target", case.sequence, &alphabet);
         let om = OptimizedProfile::from_profile(&profile);
         background
             .set_filter(
@@ -269,7 +269,7 @@ fn sequences_near_the_thresholds_stop_where_hmmer_3_4_stops_them() {
         let length = case.sequence.len();
         let (alphabet, background, profile) = bundled_profile(case.profile, length);
         let ev_params = profile.ev_params;
-        let target = DigitalSequence::from_bytes("target", "", case.sequence, &alphabet);
+        let target = DigitalSequence::from_bytes("target", case.sequence, &alphabet);
         let query = SearchQuery::from_configured_profile(profile, background).unwrap();
         let plan = SearchPlan::builder(query)
             .filters(FilterPolicy::default())
@@ -310,7 +310,7 @@ fn sequences_near_the_thresholds_stop_where_hmmer_3_4_stops_them() {
             "{name}: MSV P-value {msv_pvalue}"
         );
 
-        let stats = worker.metrics().stats;
+        let stats = worker.into_metrics().stats;
         let passed = [
             stats.sequences_past_msv,
             stats.sequences_past_bias,

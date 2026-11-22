@@ -1,9 +1,8 @@
-//! HMMER3 ASCII model reading and writing.
+//! HMMER3 ASCII model reading.
 //!
 //! The reader handles the versioned annotation layouts used by HMMER3/a-f.
-//! The writer always emits the current HMMER3/f layout.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 use crate::hmmer_core::alphabet::{Alphabet, AlphabetKind};
@@ -49,7 +48,6 @@ impl AsciiFormat {
 /// Reader for one or more HMMER3 ASCII models in a file.
 #[derive(Debug)]
 pub struct HmmFile {
-    pub filename: String,
     reader: Option<BufReader<std::fs::File>>,
 }
 
@@ -100,7 +98,6 @@ impl HmmFile {
         };
 
         Ok(Self {
-            filename: filename.to_string(),
             reader: Some(BufReader::new(file)),
         })
     }
@@ -230,123 +227,6 @@ impl HmmFile {
         }
 
         Ok((alphabet, hmm))
-    }
-
-    /// Write a complete model in HMMER3/f ASCII format.
-    pub fn write_ascii<W: Write>(
-        writer: &mut W,
-        hmm: &Hmm,
-        alphabet: &Alphabet,
-    ) -> Result<(), std::io::Error> {
-        validate_model_for_writing(hmm, alphabet)?;
-
-        writeln!(writer, "HMMER3/f [hmmer-rust]")?;
-        writeln!(writer, "NAME  {}", hmm.name)?;
-        if let Some(accession) = &hmm.accession {
-            writeln!(writer, "ACC   {accession}")?;
-        }
-        if let Some(description) = &hmm.description {
-            writeln!(writer, "DESC  {description}")?;
-        }
-        writeln!(writer, "LENG  {}", hmm.num_nodes)?;
-        if let Some(max_length) = hmm.max_length {
-            writeln!(writer, "MAXL  {max_length}")?;
-        }
-        writeln!(writer, "ALPH  {}", alphabet_name(alphabet.kind))?;
-        writeln!(
-            writer,
-            "RF    {}",
-            yes_no(hmm.reference_annotation.is_some())
-        )?;
-        writeln!(writer, "MM    {}", yes_no(hmm.model_mask.is_some()))?;
-        writeln!(writer, "CONS  {}", yes_no(hmm.consensus.is_some()))?;
-        writeln!(
-            writer,
-            "CS    {}",
-            yes_no(hmm.consensus_structure.is_some())
-        )?;
-        writeln!(writer, "MAP   {}", yes_no(hmm.map.is_some()))?;
-        if let Some(command_log) = &hmm.command_log {
-            for command in command_log.lines() {
-                writeln!(writer, "COM   {command}")?;
-            }
-        }
-        if let Some(num_sequences) = hmm.num_sequences {
-            writeln!(writer, "NSEQ  {num_sequences}")?;
-        }
-        if let Some(effective_num_sequences) = hmm.effective_num_seq_float {
-            writeln!(writer, "EFFN  {effective_num_sequences:.6}")?;
-        }
-        if let Some(checksum) = hmm.checksum {
-            writeln!(writer, "CKSUM {checksum}")?;
-        }
-        write_cutoff(writer, "GA", hmm.cutoffs.gathering)?;
-        write_cutoff(writer, "TC", hmm.cutoffs.trusted)?;
-        write_cutoff(writer, "NC", hmm.cutoffs.noise)?;
-        if let Some(params) = hmm.ev_params {
-            writeln!(
-                writer,
-                "STATS LOCAL MSV      {:.6} {:.6}",
-                params.msv_mu, params.msv_lambda
-            )?;
-            writeln!(
-                writer,
-                "STATS LOCAL VITERBI  {:.6} {:.6}",
-                params.viterbi_mu, params.viterbi_lambda
-            )?;
-            writeln!(
-                writer,
-                "STATS LOCAL FORWARD  {:.6} {:.6}",
-                params.forward_tau, params.forward_lambda
-            )?;
-        }
-
-        write!(writer, "HMM         ")?;
-        for symbol in &alphabet.symbols[..alphabet.canonical_size] {
-            write!(writer, " {:>8}", char::from(*symbol))?;
-        }
-        writeln!(writer)?;
-        writeln!(
-            writer,
-            "            m->m     m->i     m->d     i->m     i->i     d->m     d->d"
-        )?;
-
-        if let Some(composition) = &hmm.model_composition {
-            write!(writer, "  COMPO")?;
-            write_probability_row(writer, composition)?;
-        }
-        write!(writer, "       ")?;
-        write_probability_row(writer, hmm.insert_emissions(0))?;
-        write!(writer, "       ")?;
-        write_probability_row(writer, hmm.transitions(0))?;
-
-        for node in 1..=hmm.num_nodes {
-            write!(writer, "{node:7}")?;
-            for probability in hmm.match_emissions(node) {
-                write_probability(writer, *probability)?;
-            }
-            let map = hmm
-                .map
-                .as_ref()
-                .and_then(|values| values.get(node))
-                .map_or_else(|| "-".to_string(), i32::to_string);
-            write!(
-                writer,
-                " {map:>6} {:>4} {:>4} {:>4} {:>4}",
-                annotation_at(hmm.consensus.as_deref(), node),
-                annotation_at(hmm.reference_annotation.as_deref(), node),
-                annotation_at(hmm.model_mask.as_deref(), node),
-                annotation_at(hmm.consensus_structure.as_deref(), node),
-            )?;
-            writeln!(writer)?;
-
-            write!(writer, "       ")?;
-            write_probability_row(writer, hmm.insert_emissions(node))?;
-            write!(writer, "       ")?;
-            write_probability_row(writer, hmm.transitions(node))?;
-        }
-        writeln!(writer, "//")?;
-        Ok(())
     }
 }
 
@@ -900,85 +780,6 @@ fn alphabet_for(kind: AlphabetKind) -> Alphabet {
         AlphabetKind::Dna => Alphabet::dna(),
         AlphabetKind::Rna => Alphabet::rna(),
     }
-}
-
-fn alphabet_name(kind: AlphabetKind) -> &'static str {
-    match kind {
-        AlphabetKind::Amino => "amino",
-        AlphabetKind::Dna => "DNA",
-        AlphabetKind::Rna => "RNA",
-    }
-}
-
-fn yes_no(value: bool) -> &'static str {
-    if value { "yes" } else { "no" }
-}
-
-fn validate_model_for_writing(hmm: &Hmm, alphabet: &Alphabet) -> Result<(), std::io::Error> {
-    if hmm.num_nodes == 0 {
-        return Err(invalid_input("cannot write a zero-length HMM"));
-    }
-    if hmm.name.trim().is_empty() {
-        return Err(invalid_input("cannot write an HMM without a NAME"));
-    }
-    if hmm.alphabet.kind != alphabet.kind || hmm.alphabet.canonical_size != alphabet.canonical_size
-    {
-        return Err(invalid_input("HMM and writer alphabets do not match"));
-    }
-    if let Some(composition) = &hmm.model_composition
-        && composition.len() != alphabet.canonical_size
-    {
-        return Err(invalid_input(
-            "model composition length does not match the alphabet",
-        ));
-    }
-    Ok(())
-}
-
-fn invalid_input(message: &str) -> std::io::Error {
-    std::io::Error::new(std::io::ErrorKind::InvalidInput, message)
-}
-
-fn write_cutoff<W: Write>(
-    writer: &mut W,
-    tag: &str,
-    cutoff: Option<(f32, f32)>,
-) -> Result<(), std::io::Error> {
-    if let Some((sequence, domain)) = cutoff {
-        writeln!(writer, "{tag:<5} {sequence:.2} {domain:.2}")?;
-    }
-    Ok(())
-}
-
-fn write_probability_row<W: Write>(
-    writer: &mut W,
-    probabilities: &[f32],
-) -> Result<(), std::io::Error> {
-    for probability in probabilities {
-        write_probability(writer, *probability)?;
-    }
-    writeln!(writer)
-}
-
-fn write_probability<W: Write>(writer: &mut W, probability: f32) -> Result<(), std::io::Error> {
-    if probability == 0.0 {
-        write!(writer, " {:>8}", "*")
-    } else if probability.is_finite() && probability > 0.0 && probability <= 1.0 {
-        write!(writer, " {:8.5}", -probability.ln())
-    } else {
-        Err(invalid_input(
-            "HMM probabilities must be finite and in the range 0..=1",
-        ))
-    }
-}
-
-fn annotation_at(annotation: Option<&[u8]>, node: usize) -> char {
-    annotation
-        .and_then(|values| values.get(node))
-        .copied()
-        .filter(u8::is_ascii_graphic)
-        .map(char::from)
-        .unwrap_or('-')
 }
 
 #[cfg(test)]

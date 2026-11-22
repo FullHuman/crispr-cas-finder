@@ -12,7 +12,6 @@ use std::hint::black_box;
 
 use hmmer_core::alphabet::{Alphabet, Dsq};
 use hmmer_core::background::BackgroundModel;
-use hmmer_core::config::*;
 use hmmer_core::logsum;
 use hmmer_core::profile::Profile;
 use hmmer_core::rng::XorShift64;
@@ -23,7 +22,6 @@ use hmmer_core::simd::msv_filter;
 use hmmer_core::simd::oprofile::OptimizedProfile;
 use hmmer_core::simd::viterbi_filter;
 use hmmer_core::test_helpers::*;
-use hmmer_core::tophits::TopHits;
 
 // ===================================================================
 // Logsum benchmark
@@ -85,7 +83,7 @@ fn bench_profile_config(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(m), m, |b, &m| {
             b.iter(|| {
                 let mut gm = Profile::new(m, &abc);
-                hmmer_core::modelconfig::profile_config(&hmm, &bg, &mut gm, l, SearchMode::Local);
+                hmmer_core::modelconfig::profile_config(&hmm, &bg, &mut gm, l);
                 black_box(&gm);
             })
         });
@@ -126,7 +124,7 @@ fn bench_generic_forward(c: &mut Criterion) {
     let hmm = hmm_sample(&mut rng, m, &abc);
     let bg = BackgroundModel::new(&abc);
     let mut gm = Profile::new(hmm.num_nodes, &abc);
-    hmmer_core::modelconfig::profile_config(&hmm, &bg, &mut gm, l, SearchMode::Local);
+    hmmer_core::modelconfig::profile_config(&hmm, &bg, &mut gm, l);
     let mut om = OptimizedProfile::from_profile(&gm);
     om.reconfigure_length(l);
 
@@ -162,7 +160,7 @@ fn bench_msv_filter(c: &mut Criterion) {
     for m in [100, 400, 1000] {
         let hmm = hmm_sample(&mut rng, m, &abc);
         let mut gm = Profile::new(hmm.num_nodes, &abc);
-        hmmer_core::modelconfig::profile_config(&hmm, &bg, &mut gm, l, SearchMode::Local);
+        hmmer_core::modelconfig::profile_config(&hmm, &bg, &mut gm, l);
         for isa in Isa::available() {
             let mut om = OptimizedProfile::from_profile_with_isa(&gm, isa);
             om.reconfigure_length(l);
@@ -206,7 +204,7 @@ fn bench_viterbi_filter(c: &mut Criterion) {
     for m in [100, 400] {
         let hmm = hmm_sample(&mut rng, m, &abc);
         let mut gm = Profile::new(hmm.num_nodes, &abc);
-        hmmer_core::modelconfig::profile_config(&hmm, &bg, &mut gm, l, SearchMode::Local);
+        hmmer_core::modelconfig::profile_config(&hmm, &bg, &mut gm, l);
         for isa in Isa::available() {
             let mut om = OptimizedProfile::from_profile_with_isa(&gm, isa);
             om.reconfigure_length(l);
@@ -271,36 +269,6 @@ fn bench_occupancy(c: &mut Criterion) {
     group.finish();
 }
 
-// ===================================================================
-// TopHits sort benchmark
-// ===================================================================
-
-fn bench_tophits_sort(c: &mut Criterion) {
-    let mut group = c.benchmark_group("tophits_sort");
-    for n in [100, 1000, 10000].iter() {
-        group.bench_with_input(BenchmarkId::from_parameter(n), n, |b, &n| {
-            b.iter_batched(
-                || {
-                    let mut rng = XorShift64::new(42);
-                    let mut th = TopHits::new();
-                    for _ in 0..n {
-                        let hit = th.create_next_hit();
-                        hit.sortkey = rng.random();
-                        hit.score = hit.sortkey as f32;
-                    }
-                    th
-                },
-                |mut th: TopHits| {
-                    th.sort_by_sortkey();
-                    black_box(&th);
-                },
-                criterion::BatchSize::SmallInput,
-            )
-        });
-    }
-    group.finish();
-}
-
 criterion_group!(
     benches,
     bench_logsum,
@@ -312,6 +280,5 @@ criterion_group!(
     bench_viterbi_filter,
     bench_gmx_operations,
     bench_occupancy,
-    bench_tophits_sort,
 );
 criterion_main!(benches);

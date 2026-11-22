@@ -6,35 +6,6 @@
 //   1. Miscellaneous functions for H3
 //   2. Unit tests
 
-use crate::hmmer_core::config;
-use std::io::{self, Write};
-
-/// Print the standard HMMER command line application banner.
-///
-/// Constructs the banner from `progname` and a short one-line `banner` description.
-pub fn banner(fp: &mut dyn Write, progname: &str, banner: &str) -> io::Result<()> {
-    let appname = std::path::Path::new(progname)
-        .file_name()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| progname.to_string());
-
-    writeln!(fp, "# {} :: {}", appname, banner)?;
-    writeln!(
-        fp,
-        "# HMMER {} ({}); {}",
-        config::HMMER_VERSION,
-        config::HMMER_DATE,
-        config::HMMER_URL
-    )?;
-    writeln!(fp, "# {}", config::HMMER_COPYRIGHT)?;
-    writeln!(fp, "# {}", config::HMMER_LICENSE)?;
-    writeln!(
-        fp,
-        "# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -"
-    )?;
-    Ok(())
-}
-
 /// Return amino acid background frequencies in [A..Y] alphabetic order.
 ///
 /// These are from Swiss-Prot 50.8 (Oct 2006), counting over 85956127 (86.0M) residues.
@@ -70,6 +41,7 @@ pub fn amino_frequencies(f: &mut [f32]) {
 mod tests {
     use super::*;
     use crate::hmmer_core::alphabet::Alphabet;
+    use crate::hmmer_core::config;
 
     #[test]
     fn test_amino_frequencies() {
@@ -88,20 +60,6 @@ mod tests {
         for (i, &freq) in f.iter().enumerate() {
             assert!(freq > 0.0, "frequency[{}] = {} is not positive", i, freq);
         }
-    }
-
-    #[test]
-    fn test_banner() {
-        let mut buf = Vec::new();
-        banner(
-            &mut buf,
-            "hmmsearch",
-            "search profile(s) against a sequence database",
-        )
-        .unwrap();
-        let output = String::from_utf8(buf).unwrap();
-        assert!(output.contains("hmmsearch"));
-        assert!(output.contains("HMMER"));
     }
 
     #[test]

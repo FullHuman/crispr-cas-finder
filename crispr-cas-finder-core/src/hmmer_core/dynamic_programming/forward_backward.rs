@@ -20,14 +20,14 @@ fn emission(profile: &Profile, residue: usize, node: usize, kind: PRsc) -> f32 {
 
 // ─── Fused backward + decoding ──────────────────────────────────────────────
 
-use crate::hmmer_core::domaindef::DomainDef;
+use crate::hmmer_core::domaindef::DomainWorkspace;
 
 fn generic_forward_backward_decode(
     digital_sequence: &[u8],
     profile: &Profile,
     expected_forward_score: f32,
     posterior: &mut ScoreMatrix,
-    domain_def: Option<&mut DomainDef>,
+    domain_def: Option<&mut DomainWorkspace>,
 ) -> Result<f32, HmmerError> {
     let m = profile.num_nodes;
     let l = digital_sequence.len();
@@ -40,11 +40,8 @@ fn generic_forward_backward_decode(
     posterior.resize(m, l)?;
     let neg_inf = f32::NEG_INFINITY;
     let tsc = profile.transition_scores_raw();
-    let esc = if profile.mode.is_local() {
-        0.0
-    } else {
-        neg_inf
-    };
+    // Local alignment: every match and delete state can exit the model.
+    let esc = 0.0;
     let special = &profile.special_scores;
 
     // Generic Forward, matching p7_GForward(). The output matrix is used as
@@ -319,7 +316,6 @@ fn generic_forward_backward_decode(
                         .exp();
             domain_def.model_occupancy[i] = 1.0 - outside;
         }
-        domain_def.length = l;
     }
 
     Ok(backward_score)
@@ -369,7 +365,7 @@ pub fn backward_decode_log_space(
     profile: &Profile,
     expected_forward_score: f32,
     posterior_matrix: &mut ScoreMatrix,
-    domain_def: Option<&mut DomainDef>,
+    domain_def: Option<&mut DomainWorkspace>,
 ) -> Result<f32, HmmerError> {
     generic_forward_backward_decode(
         digital_sequence,

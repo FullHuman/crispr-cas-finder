@@ -14,7 +14,6 @@ use crate::casparser::{CasCluster, from_search_results_with_gene_map};
 use crate::hmmer_core::{
     alphabet::Alphabet,
     background::BackgroundModel,
-    config::SearchMode,
     hmm::Hmm,
     modelconfig,
     pipeline::search::{CapacityHints, FilterPolicy, SearchOutcome, SearchPlan, SearchQuery},
@@ -216,9 +215,7 @@ pub fn detect_cas_systems(
     let protein_sequences: Vec<DigitalSequence> = proteome
         .genes
         .iter()
-        .map(|gene| {
-            DigitalSequence::from_bytes(&gene.id, "", gene.protein.as_bytes(), &amino_alphabet)
-        })
+        .map(|gene| DigitalSequence::from_bytes(&gene.id, gene.protein.as_bytes(), &amino_alphabet))
         .collect();
     info!("Loaded {} protein sequences", protein_sequences.len());
     info!(
@@ -643,7 +640,6 @@ fn search_hmm_profile_in_order(
         &background_model,
         &mut configured_profile,
         average_sequence_length,
-        SearchMode::Local,
     );
 
     let query = SearchQuery::from_configured_profile(configured_profile, background_model.clone())
@@ -848,8 +844,6 @@ fn filter_low_confidence_systems(
 mod tests {
     use super::*;
     use crate::cas_types::{GeneDefinition, GeneStatus, SystemModel};
-    use crate::hmmer_core::{hmm::EvParams, rng::XorShift64, test_helpers::hmm_sample};
-    use std::fs::File;
 
     #[test]
     fn unsupported_genetic_code_fails_before_reading_input() {
@@ -898,21 +892,14 @@ mod tests {
         }
     }
 
-    fn write_test_hmm(directory: &Path, profile_name: &str, alphabet: &Alphabet) {
-        let mut random = XorShift64::new(42);
-        let mut hmm = hmm_sample(&mut random, 8, alphabet);
-        hmm.name = profile_name.to_string();
-        hmm.ev_params = Some(EvParams {
-            msv_mu: 0.0,
-            msv_lambda: 0.7,
-            viterbi_mu: 0.0,
-            viterbi_lambda: 0.7,
-            forward_tau: 0.0,
-            forward_lambda: 0.7,
-        });
+    /// A calibrated protein model of two nodes.
+    const TINY_AMINO_HMM: &str = include_str!("../tests/data/tiny_amino.hmm");
+    /// A calibrated DNA model of two nodes.
+    const ANNOTATED_DNA_HMM: &str = include_str!("../tests/data/annotated_dna.hmm");
+
+    fn write_test_hmm(directory: &Path, profile_name: &str, model: &str) {
         let path = directory.join(format!("{profile_name}.hmm"));
-        let mut file = File::create(path).expect("create test HMM");
-        HmmFile::write_ascii(&mut file, &hmm, alphabet).expect("write test HMM");
+        std::fs::write(path, model).expect("write test HMM");
     }
 
     #[test]
@@ -1136,7 +1123,7 @@ mod tests {
     fn hmm_search_loads_a_profile_once_for_an_empty_target_set() {
         let temporary = tempfile::tempdir().expect("temporary directory");
         let alphabet = Alphabet::amino();
-        write_test_hmm(temporary.path(), "Cas1", &alphabet);
+        write_test_hmm(temporary.path(), "Cas1", TINY_AMINO_HMM);
         let profiles = HashSet::from(["Cas1".to_string()]);
 
         let loaded = load_hmm_profiles(temporary.path(), &profiles).expect("load HMM profile");
@@ -1160,7 +1147,7 @@ mod tests {
     #[test]
     fn hmm_search_rejects_profile_with_wrong_alphabet() {
         let temporary = tempfile::tempdir().expect("temporary directory");
-        write_test_hmm(temporary.path(), "Cas1", &Alphabet::dna());
+        write_test_hmm(temporary.path(), "Cas1", ANNOTATED_DNA_HMM);
         let profiles = HashSet::from(["Cas1".to_string()]);
 
         let loaded = load_hmm_profiles(temporary.path(), &profiles).expect("load HMM profile");

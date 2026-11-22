@@ -590,7 +590,6 @@ impl StripedForward {
 mod tests {
     use super::*;
     use crate::hmmer_core::alphabet::Alphabet;
-    use crate::hmmer_core::config::SearchMode;
     use crate::hmmer_core::dynamic_programming::simd::forward_filter::forward_filter;
     use crate::hmmer_core::rng::XorShift64;
     use crate::hmmer_core::test_helpers::{random_digital_seq, setup_profile};
@@ -601,7 +600,7 @@ mod tests {
     fn model_and_target(seed: u64, m: usize, l: usize) -> (OptimizedProfile, Vec<u8>) {
         let alphabet = Alphabet::amino();
         let mut rng = XorShift64::new(seed);
-        let (_, background, profile) = setup_profile(&mut rng, m, l, &alphabet, SearchMode::Local);
+        let (_, background, profile) = setup_profile(&mut rng, m, l, &alphabet);
         let mut om = OptimizedProfile::from_profile(&profile);
         om.reconfig_multihit(l);
         let mut sequence = random_digital_seq(

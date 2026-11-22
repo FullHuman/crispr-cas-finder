@@ -3,7 +3,7 @@
 use hmmer_core::{
     alphabet::Alphabet,
     background::BackgroundModel,
-    config::{PTsc, SearchMode},
+    config::PTsc,
     modelconfig,
     profile::Profile,
     rng::XorShift64,
@@ -74,7 +74,7 @@ fn forward_filter_matches_the_scalar_recurrence_across_stripe_boundaries() {
             let hmm = hmm_sample(&mut rng, m, &alphabet);
             for l in [1, 8, 51] {
                 let mut profile = Profile::new(m, &alphabet);
-                modelconfig::profile_config(&hmm, &background, &mut profile, l, SearchMode::Local);
+                modelconfig::profile_config(&hmm, &background, &mut profile, l);
                 let optimized = OptimizedProfile::from_profile(&profile);
                 let seq = random_digital_seq(
                     &mut rng,
